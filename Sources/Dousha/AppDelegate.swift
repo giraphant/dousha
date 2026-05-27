@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hotkey: HotkeyMonitor?
     private let focusTracker = AppFocusTracker(selfBundleId: "com.dousha.app")
+    private let incompleteDetector = IncompleteTranscriptDetector()
 
     private var status: RecordingStatus = .idle {
         didSet {
@@ -304,29 +305,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self = self else { return }
                 let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
+                // Heuristic: did the stream probably get truncated? If so, hold off
+                // injection and re-transcribe from the saved WAV.
+                if self.incompleteDetector.isLikelyIncomplete(result: result, language: self.prefs.language) {
+                    doushaLog("[Dousha] heuristic flagged incomplete (originalText.len=\(text.count)) — triggering retranscribe")
+                    // Keep HUD in transcribing state — don't drop to idle while retrying.
+                    self.speech.retranscribeLastRecording { retried in
+                        DispatchQueue.main.async {
+                            let retriedText = (retried?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+                            let finalText: String
+                            if let r = retriedText {
+                                doushaLog("[Dousha] retranscribe succeeded: original.len=\(text.count) retried.len=\(r.count)")
+                                finalText = r
+                            } else {
+                                doushaLog("[Dousha] retranscribe returned empty — falling back to original (len=\(text.count))")
+                                finalText = text
+                            }
+                            guard !finalText.isEmpty else {
+                                self.status = .idle
+                                return
+                            }
+                            self.refineAndInject(finalText)
+                        }
+                    }
+                    return
+                }
+
                 guard !text.isEmpty else {
                     self.status = .idle
                     return
                 }
+                self.refineAndInject(text)
+            }
+        }
+    }
 
-                if self.prefs.llmEnabled && self.llm.isConfigured {
-                    self.llm.refine(text) { result in
-                        DispatchQueue.main.async {
-                            let final: String
-                            switch result {
-                            case .success(let refined):
-                                final = refined
-                            case .failure(let err):
-                                doushaLog("[Dousha] LLM refine failed: \(err.localizedDescription)")
-                                final = text
-                            }
-                            self.injectAndFinish(final)
-                        }
+    private func refineAndInject(_ text: String) {
+        if self.prefs.llmEnabled && self.llm.isConfigured {
+            self.llm.refine(text) { result in
+                DispatchQueue.main.async {
+                    let final: String
+                    switch result {
+                    case .success(let refined): final = refined
+                    case .failure(let err):
+                        doushaLog("[Dousha] LLM refine failed: \(err.localizedDescription)")
+                        final = text
                     }
-                } else {
-                    self.injectAndFinish(text)
+                    self.injectAndFinish(final)
                 }
             }
+        } else {
+            self.injectAndFinish(text)
         }
     }
 
