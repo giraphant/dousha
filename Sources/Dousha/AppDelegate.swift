@@ -26,6 +26,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var status: RecordingStatus = .idle {
         didSet {
             hudModel.status = status
+            // Whenever the AppDelegate returns to .idle, force the dispatcher
+            // to match — otherwise a key press silently rejected during
+            // .transcribing leaves dispatcher.isActive=true, and the user
+            // then needs 2-3 presses to actually start a new recording.
+            if status == .idle && oldValue != .idle {
+                hotkey?.forceDispatcherIdle()
+            }
+            // Only show/hide on visibility transitions, not on every state
+            // change — otherwise .recording → .transcribing → .injecting
+            // would re-fade the HUD on each step (strobe effect).
+            guard oldValue.isVisible != status.isVisible else { return }
             if status.isVisible {
                 floatingWindow?.show()
             } else {
@@ -117,7 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         langItem.submenu = langMenu
         menu.addItem(langItem)
 
-        // LLM Refinement submenu
+        // LLM Refinement submenu (just the toggle + status — Settings is now top-level)
         let llmItem = NSMenuItem(title: "LLM Refinement", action: nil, keyEquivalent: "")
         let llmMenu = NSMenu()
         let toggle = NSMenuItem(title: "Enable LLM Refinement",
@@ -131,14 +142,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: nil, keyEquivalent: "")
         configured.isEnabled = false
         llmMenu.addItem(configured)
-        llmMenu.addItem(.separator())
+        llmItem.submenu = llmMenu
+        menu.addItem(llmItem)
+
+        menu.addItem(.separator())
+
+        // Top-level Settings — hosts hotkey + LLM config. ⌘, is the macOS convention.
         let settingsItem = NSMenuItem(title: "Settings…",
                                       action: #selector(openSettings),
                                       keyEquivalent: ",")
         settingsItem.target = self
-        llmMenu.addItem(settingsItem)
-        llmItem.submenu = llmMenu
-        menu.addItem(llmItem)
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
 
@@ -224,12 +238,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Hotkey
 
     private func startHotkeyMonitor() {
+        doushaLog("[Dousha] AppDelegate.startHotkeyMonitor: keyCode=\(prefs.hotkey.keyCode) mode=\(prefs.hotkey.mode.rawValue)")
         let monitor = HotkeyMonitor(
             config: prefs.hotkey,
             onStart: { [weak self] in self?.handleStart() },
             onStop:  { [weak self] in self?.handleStop() }
         )
         if !monitor.start() {
+            doushaLog("[Dousha] AppDelegate.startHotkeyMonitor: monitor.start() returned false — will retry in 3s")
             // Most likely Accessibility permission isn't granted yet. Retry so
             // the user can grant it without restarting the app.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
@@ -238,6 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         hotkey = monitor
+        doushaLog("[Dousha] AppDelegate.startHotkeyMonitor: monitor installed successfully")
     }
 
     @objc private func handleHotkeyConfigChanged() {
@@ -248,8 +265,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleStart() {
-        guard status == .idle || isErrorStatus(status) else { return }
+        doushaLog("[Dousha] AppDelegate.handleStart: current status=\(status)")
+        guard status == .idle || isErrorStatus(status) else {
+            doushaLog("[Dousha] AppDelegate.handleStart: REJECTED (status=\(status))")
+            return
+        }
         status = .recording
+        doushaLog("[Dousha] AppDelegate.handleStart: engine=\(prefs.engine.rawValue) language=\(prefs.language)")
         speech.setLanguage(prefs.language)
         hudModel.resetLevels()
 
@@ -261,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self?.hudModel.pushLevel(level) }
             },
             onError: { [weak self] error in
-                NSLog("[Dousha] recognition error: \(error.localizedDescription)")
+                doushaLog("[Dousha] recognition error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     self?.transitionToError(error.localizedDescription)
                 }
@@ -270,9 +292,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleStop() {
-        guard status == .recording else { return }
+        doushaLog("[Dousha] AppDelegate.handleStop: current status=\(status)")
+        guard status == .recording else {
+            doushaLog("[Dousha] AppDelegate.handleStop: REJECTED (status=\(status))")
+            return
+        }
         status = .transcribing
         speech.stop { [weak self] finalText in
+            doushaLog("[Dousha] AppDelegate: speech.stop completion fired (text len=\(finalText.count))")
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 let text = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -290,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             case .success(let refined):
                                 final = refined
                             case .failure(let err):
-                                NSLog("[Dousha] LLM refine failed: \(err.localizedDescription)")
+                                doushaLog("[Dousha] LLM refine failed: \(err.localizedDescription)")
                                 final = text
                             }
                             self.injectAndFinish(final)
@@ -304,6 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func injectAndFinish(_ text: String) {
+        doushaLog("[Dousha] AppDelegate.injectAndFinish: text=\"\(text.prefix(60))\"")
         status = .injecting
         injector.inject(text)
         // Brief green flash then back to idle.
@@ -313,7 +341,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func transitionToError(_ message: String) {
+        // Don't keep replacing the error on every cascading event — the
+        // upstream DoubaoASR can emit a flood of "expected seq=1" responses
+        // after a single session goes bad, and each one would re-defer the
+        // idle reset.
+        if case .error = status { return }
+
         status = .error(message)
+
+        // Critical: release the mic / WebSocket. Without this, the speech
+        // backend keeps holding the audio device, and the next handleStart
+        // would call speech.start on top of an already-live session — the
+        // user sees "press key, nothing happens".
+        speech.stop { _ in }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             guard let self = self else { return }
             if self.isErrorStatus(self.status) {

@@ -15,6 +15,7 @@ final class HotkeyEventDispatcher {
     }
 
     func handlePress() {
+        doushaLog("[Dousha] Dispatcher.handlePress: mode=\(mode.rawValue) wasActive=\(isActive)")
         switch mode {
         case .pushToTalk:
             if !isActive { isActive = true; onStart() }
@@ -25,12 +26,24 @@ final class HotkeyEventDispatcher {
     }
 
     func handleRelease() {
+        doushaLog("[Dousha] Dispatcher.handleRelease: mode=\(mode.rawValue) wasActive=\(isActive)")
         switch mode {
         case .pushToTalk:
             if isActive { isActive = false; onStop() }
         case .toggle:
             return // release is meaningless in toggle mode
         }
+    }
+
+    /// Forces internal state back to "no session active". Called by AppDelegate
+    /// when its own status returns to .idle, so a press that the AppDelegate
+    /// silently rejected (e.g. during .transcribing) doesn't leave the
+    /// dispatcher believing a session is still alive.
+    func forceIdle() {
+        if isActive {
+            doushaLog("[Dousha] Dispatcher.forceIdle: clearing stale isActive=true")
+        }
+        isActive = false
     }
 }
 
@@ -92,7 +105,7 @@ final class HotkeyMonitor {
     func start() -> Bool {
         guard eventTap == nil else { return true }
         guard Self.isAllowed(keyCode: config.keyCode) else {
-            NSLog("[Dousha] HotkeyMonitor: keyCode \(config.keyCode) is not in the modifier whitelist")
+            doushaLog("[Dousha] HotkeyMonitor: keyCode \(config.keyCode) is not in the modifier whitelist")
             return false
         }
 
@@ -113,7 +126,7 @@ final class HotkeyMonitor {
             callback: callback,
             userInfo: userInfo
         ) else {
-            NSLog("[Dousha] HotkeyMonitor: failed to create event tap (Accessibility permission required)")
+            doushaLog("[Dousha] HotkeyMonitor: failed to create event tap (Accessibility permission required)")
             return false
         }
 
@@ -121,6 +134,7 @@ final class HotkeyMonitor {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        doushaLog("[Dousha] HotkeyMonitor: tap installed for keyCode=\(config.keyCode) (\(Self.displayName(forKeyCode: config.keyCode))) mode=\(config.mode.rawValue)")
         return true
     }
 
@@ -134,6 +148,13 @@ final class HotkeyMonitor {
             eventTap = nil
         }
         isHeld = false
+    }
+
+    /// Forwards to the internal dispatcher's forceIdle. Called by AppDelegate
+    /// whenever its own status returns to .idle so dispatcher state stays in
+    /// sync with the truth.
+    func forceDispatcherIdle() {
+        dispatcher.forceIdle()
     }
 
     // MARK: - Event handling
@@ -154,12 +175,19 @@ final class HotkeyMonitor {
         }
 
         let nowHeld = event.flags.contains(bit)
+        doushaLog("[Dousha] HotkeyMonitor.handle: keyCode=\(keyCode) nowHeld=\(nowHeld) wasHeld=\(isHeld)")
         if nowHeld && !isHeld {
             isHeld = true
-            DispatchQueue.main.async { [weak self] in self?.dispatcher.handlePress() }
+            DispatchQueue.main.async { [weak self] in
+                doushaLog("[Dousha] HotkeyMonitor → dispatcher.handlePress")
+                self?.dispatcher.handlePress()
+            }
         } else if !nowHeld && isHeld {
             isHeld = false
-            DispatchQueue.main.async { [weak self] in self?.dispatcher.handleRelease() }
+            DispatchQueue.main.async { [weak self] in
+                doushaLog("[Dousha] HotkeyMonitor → dispatcher.handleRelease")
+                self?.dispatcher.handleRelease()
+            }
         }
 
         // Suppress the flagsChanged so the system doesn't trigger emoji picker /
