@@ -6,9 +6,10 @@ final class FloatingWindow {
     let model: FloatingHUDModel
     private var hosting: NSHostingController<FloatingHUDView>!
 
-    private static let panelWidth: CGFloat = 600
-    // Larger than the visible HUD (520×96) so outer glow shadows have room.
-    private static let panelHeight: CGFloat = 180
+    private static let panelWidth: CGFloat = 360
+    // Larger than the visible HUD (280×72) so AppKit's window shadow has
+    // room around the rounded edge.
+    private static let panelHeight: CGFloat = 140
 
     init(model: FloatingHUDModel) {
         self.model = model
@@ -22,7 +23,7 @@ final class FloatingWindow {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        panel.hasShadow = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = false
@@ -39,6 +40,9 @@ final class FloatingWindow {
         positionAtBottomCenter()
         panel.alphaValue = 0
         panel.orderFrontRegardless()
+        // Force AppKit to re-derive the shadow from the freshly-rendered
+        // rounded contentView; without this the shadow can lag on first show.
+        panel.invalidateShadow()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.20
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -62,7 +66,7 @@ final class FloatingWindow {
         let visible = screen.visibleFrame
         let size = panel.frame.size
         let x = visible.midX - size.width / 2
-        let y = visible.minY + 80
+        let y = visible.minY + 40
         panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
     }
 }
