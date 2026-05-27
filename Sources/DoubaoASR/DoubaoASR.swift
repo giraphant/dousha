@@ -189,6 +189,10 @@ public actor DoubaoASR {
             deliverError(error)
             await closeWebSocket()
             teardownAudio()
+            if let writer = self.wavWriter {
+                try? writer.close()
+                self.wavWriter = nil
+            }
             isRunning = false
             signalFinished()
         }
