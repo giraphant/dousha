@@ -3,19 +3,26 @@ import Carbon
 import Carbon.HIToolbox
 
 /// Injects text into the currently focused text field by:
-///   1. Saving clipboard + current input source
-///   2. Switching to ASCII keyboard if a CJK IME is active (so it does not eat ⌘V)
-///   3. Setting clipboard to text and posting ⌘V
-///   4. Restoring clipboard + input source
+///   1. Switching to ASCII keyboard if a CJK IME is active (so it does not eat ⌘V)
+///   2. Setting clipboard to text and posting ⌘V
+///   3. Restoring the IME afterwards
+///
+/// Note: deliberately does NOT snapshot + restore the user's previous clipboard
+/// contents. Mature competitors (Superwhisper / Vistaflow / Whispr) leave the
+/// dictated text in the clipboard. The "polite restore" pattern that SpeechMore
+/// inherited creates a timing race — if the target app processes ⌘V slower than
+/// the restore delay, the paste lands on the restored (old) clipboard content
+/// instead of the dictated text. Removing it is the correct fix.
 final class TextInjector {
     private static let cmdKey: CGKeyCode = 0x37  // kVK_Command
     private static let vKey:   CGKeyCode = 0x09  // kVK_ANSI_V
 
     func inject(_ text: String) {
-        guard !text.isEmpty else { return }
-
-        let pasteboard = NSPasteboard.general
-        let saved = snapshotPasteboard(pasteboard)
+        guard !text.isEmpty else {
+            doushaLog("[Dousha] TextInjector.inject: SKIPPED (empty text)")
+            return
+        }
+        doushaLog("[Dousha] TextInjector.inject: text=\"\(text.prefix(60))\" len=\(text.count)")
 
         let originalSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue()
         var didSwitchIME = false
@@ -24,18 +31,22 @@ final class TextInjector {
                 TISSelectInputSource(ascii)
                 didSwitchIME = true
                 usleep(40_000) // give the IME a moment to switch
+                doushaLog("[Dousha] TextInjector: switched IME to ASCII for paste")
             }
         }
 
+        let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        let setOK = pasteboard.setString(text, forType: .string)
+        doushaLog("[Dousha] TextInjector: pasteboard.setString OK=\(setOK)")
 
         postCmdV()
+        doushaLog("[Dousha] TextInjector: posted ⌘V")
 
-        // Restore clipboard + IME after the paste completes.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.restorePasteboard(pasteboard, snapshot: saved)
-            if didSwitchIME, let original = originalSource {
+        // Restore IME (if switched). No clipboard restore — text stays in
+        // clipboard, which is what every mature dictation app does.
+        if didSwitchIME, let original = originalSource {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 TISSelectInputSource(original)
             }
         }
@@ -57,38 +68,6 @@ final class TextInjector {
         vDown?.post(tap: .cghidEventTap)
         vUp?.post(tap: .cghidEventTap)
         cmdUp?.post(tap: .cghidEventTap)
-    }
-
-    // MARK: - Pasteboard snapshot/restore
-
-    private struct PasteboardSnapshot {
-        let items: [[String: Data]]
-    }
-
-    private func snapshotPasteboard(_ pb: NSPasteboard) -> PasteboardSnapshot {
-        let items = (pb.pasteboardItems ?? []).map { item -> [String: Data] in
-            var out: [String: Data] = [:]
-            for type in item.types {
-                if let data = item.data(forType: type) {
-                    out[type.rawValue] = data
-                }
-            }
-            return out
-        }
-        return PasteboardSnapshot(items: items)
-    }
-
-    private func restorePasteboard(_ pb: NSPasteboard, snapshot: PasteboardSnapshot) {
-        pb.clearContents()
-        guard !snapshot.items.isEmpty else { return }
-        let pbItems: [NSPasteboardItem] = snapshot.items.map { dict in
-            let item = NSPasteboardItem()
-            for (type, data) in dict {
-                item.setData(data, forType: NSPasteboard.PasteboardType(type))
-            }
-            return item
-        }
-        pb.writeObjects(pbItems)
     }
 
     // MARK: - Input source detection
