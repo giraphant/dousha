@@ -1,8 +1,8 @@
 import Foundation
 import AVFoundation
 
-/// Streams int16 PCM samples to a WAV file on disk. Uses AVAudioFile under the
-/// hood so we don't have to hand-write the RIFF header / fix up chunk sizes.
+/// Streams mono int16 PCM samples to a WAV file on disk. Uses AVAudioFile under
+/// the hood so we don't have to hand-write the RIFF header / fix up chunk sizes.
 ///
 /// **Threading contract:** `append` is safe to call from any thread (including
 /// AVAudioEngine's real-time mic tap callback) — it snapshots the samples and
@@ -14,10 +14,15 @@ import AVFoundation
 /// On any background write failure, the writer flips into a stopped state and
 /// silently swallows subsequent appends — failing per-frame writes would just
 /// spam logs, and the caller can detect partial output by checking file size.
+///
+/// **Lifecycle:** callers MUST call `close()` before releasing the writer if
+/// they need the file to be readable immediately afterward. Releasing the
+/// writer without calling `close()` leaves the WAV header un-finalised until
+/// the writer's deinit eventually fires (timing depends on whether pending
+/// writes are still in flight on the background queue).
 final class WavFileWriter {
     enum Error: Swift.Error {
         case formatBuildFailed
-        case bufferAllocFailed
     }
 
     private var file: AVAudioFile?
@@ -26,6 +31,7 @@ final class WavFileWriter {
     private var stopped = false   // touched only on `queue`
 
     init(url: URL, sampleRate: Int, channels: Int) throws {
+        precondition(channels == 1, "WavFileWriter currently only supports mono — the int16 copy path assumes a single channel.")
         guard let fmt = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
             sampleRate: Double(sampleRate),
@@ -33,7 +39,7 @@ final class WavFileWriter {
             interleaved: true
         ) else { throw Error.formatBuildFailed }
         self.format = fmt
-        self.queue = DispatchQueue(label: "com.dousha.wavwriter", qos: .utility)
+        self.queue = DispatchQueue(label: "com.dousha.wavwriter.\(url.lastPathComponent)", qos: .utility)
 
         // settings dict tells AVAudioFile to write a WAV container (default
         // for .wav extension); pass the int16 format explicitly so it doesn't
@@ -49,7 +55,11 @@ final class WavFileWriter {
     /// Append `count` int16 samples (mono — count == frame count for 1 channel).
     /// Returns immediately after snapshotting the bytes; the write happens on
     /// the writer's internal serial queue.
-    func append(int16Samples ptr: UnsafePointer<Int16>, count: Int) throws {
+    ///
+    /// Does not throw: write errors (PCM buffer alloc failure, AVAudioFile
+    /// write failure) are logged via `NSLog` and transition the writer into a
+    /// stopped state — subsequent appends are silently swallowed.
+    func append(int16Samples ptr: UnsafePointer<Int16>, count: Int) {
         // Snapshot synchronously so the caller's buffer can be reused/freed.
         let snapshot = Array(UnsafeBufferPointer(start: ptr, count: count))
         let fmt = self.format

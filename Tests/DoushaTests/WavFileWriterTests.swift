@@ -20,8 +20,8 @@ final class WavFileWriterTests: XCTestCase {
         let writer = try WavFileWriter(url: tmpURL, sampleRate: 16_000, channels: 1)
         // 0.5 seconds of silence
         let samples = [Int16](repeating: 0, count: 8_000)
-        try samples.withUnsafeBufferPointer { buf in
-            try writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+        samples.withUnsafeBufferPointer { buf in
+            writer.append(int16Samples: buf.baseAddress!, count: buf.count)
         }
         try writer.close()
 
@@ -36,8 +36,8 @@ final class WavFileWriterTests: XCTestCase {
         let writer = try WavFileWriter(url: tmpURL, sampleRate: 16_000, channels: 1)
         for _ in 0..<5 {
             let samples = [Int16](repeating: 100, count: 1_600) // 0.1s each
-            try samples.withUnsafeBufferPointer { buf in
-                try writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+            samples.withUnsafeBufferPointer { buf in
+                writer.append(int16Samples: buf.baseAddress!, count: buf.count)
             }
         }
         try writer.close()
@@ -45,23 +45,53 @@ final class WavFileWriterTests: XCTestCase {
         XCTAssertEqual(f.length, 8_000)
     }
 
-    /// The writer dispatches each append onto its own serial background queue
-    /// so the audio thread is never blocked. close() must barrier-wait until
-    /// all queued writes have landed before returning — otherwise calling
-    /// AVAudioFile(forReading:) right after close() can race and observe a
-    /// short file.
-    func testClose_barriersUntilAllPendingWritesLand() throws {
+    /// The barrier in close() must hold even when appends and close happen on
+    /// different threads. We fan out 50 appends onto a global concurrent queue
+    /// and call close() from this thread without waiting — if the barrier is
+    /// broken (e.g., queue.async in close instead of queue.sync), some writes
+    /// will land after AVAudioFile(forReading:) opens the file, and the length
+    /// will be less than 50 * 320.
+    func testClose_barriersConcurrentlyEnqueuedAppends() throws {
         let writer = try WavFileWriter(url: tmpURL, sampleRate: 16_000, channels: 1)
-        // Fire 50 appends back-to-back (typical real audio cadence is ~80 of
-        // these per second), then close immediately.
+        let group = DispatchGroup()
+        let producer = DispatchQueue(label: "test.producer", attributes: .concurrent)
         for _ in 0..<50 {
-            let samples = [Int16](repeating: 1, count: 320) // 20ms each
-            try samples.withUnsafeBufferPointer { buf in
-                try writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+            group.enter()
+            producer.async {
+                let samples = [Int16](repeating: 1, count: 320)
+                samples.withUnsafeBufferPointer { buf in
+                    writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+                }
+                group.leave()
             }
         }
+        // Wait for all appends to be ENQUEUED (not necessarily executed) before
+        // calling close. The barrier inside close() must then drain whatever's
+        // pending on the writer's serial queue.
+        group.wait()
         try writer.close()
         let f = try AVAudioFile(forReading: tmpURL)
         XCTAssertEqual(f.length, 50 * 320)
+    }
+
+    /// The class-level doc promises that appends after close() are silently
+    /// swallowed (the `stopped` flag short-circuits them on the serial queue).
+    /// Verify they neither crash nor extend the file.
+    func testAppend_afterClose_isSilentlySwallowed() throws {
+        let writer = try WavFileWriter(url: tmpURL, sampleRate: 16_000, channels: 1)
+        let firstBatch = [Int16](repeating: 1, count: 320)
+        firstBatch.withUnsafeBufferPointer { buf in
+            writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+        }
+        try writer.close()
+
+        // These should be silently ignored, not crash.
+        let postClose = [Int16](repeating: 2, count: 320)
+        postClose.withUnsafeBufferPointer { buf in
+            writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+        }
+
+        let f = try AVAudioFile(forReading: tmpURL)
+        XCTAssertEqual(f.length, 320, "Post-close appends must not change file length")
     }
 }
