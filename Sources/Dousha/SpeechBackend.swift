@@ -1,4 +1,5 @@
 import Foundation
+import DoubaoASR
 
 enum Engine: String, CaseIterable {
     case apple
@@ -17,7 +18,12 @@ protocol SpeechBackend: AnyObject {
     func start(onPartial: @escaping @Sendable (String) -> Void,
                onAudioLevel: @escaping @Sendable (Float) -> Void,
                onError: @escaping @Sendable (Error) -> Void)
-    func stop(completion: @escaping @Sendable (String) -> Void)
+    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void)
+
+    /// Re-runs ASR on the last saved WAV from the most recent recording, if
+    /// the backend supports it. Returns nil text if there is no saved audio
+    /// or the backend cannot replay it.
+    func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void)
 }
 
 enum SpeechBackendFactory {

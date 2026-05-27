@@ -82,7 +82,7 @@ public actor DoubaoASR {
     private(set) var lastTranscriptAt: Date?
 
     /// Path where the rolling per-session WAV gets written.
-    static var savedAudioURL: URL {
+    public static var savedAudioURL: URL {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Dousha", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -209,16 +209,24 @@ public actor DoubaoASR {
     ///
     /// Safe to call when not running — completion fires with whatever was
     /// already captured.
-    public nonisolated func stop(completion: @escaping @Sendable (String) -> Void) {
+    public nonisolated func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
         Task {
-            let final = await self._stop()
-            DispatchQueue.main.async { completion(final) }
+            let result = await self._stop()
+            DispatchQueue.main.async { completion(result) }
         }
     }
 
-    private func _stop() async -> String {
+    private func _stop() async -> TranscriptionResult {
         NSLog("[DoubaoASR] stop() isRunning=\(isRunning)")
-        guard isRunning else { return assembledText() }
+        guard isRunning else {
+            return TranscriptionResult(
+                text: assembledText(),
+                audioDuration: 0,
+                lastResponseAge: nil,
+                lastTranscriptAge: nil,
+                savedAudioURL: nil
+            )
+        }
         isRunning = false
 
         teardownAudio()
@@ -261,7 +269,19 @@ public actor DoubaoASR {
 
         let final = assembledText()
         NSLog("[DoubaoASR] stop() final='\(final)' segments=\(committedSegments.count)")
-        return final
+
+        let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
+        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
+        let savedURL: URL? = FileManager.default.fileExists(atPath: Self.savedAudioURL.path) ? Self.savedAudioURL : nil
+
+        return TranscriptionResult(
+            text: final,
+            audioDuration: audioDuration,
+            lastResponseAge: lastResponseAge,
+            lastTranscriptAge: lastTranscriptAge,
+            savedAudioURL: savedURL
+        )
     }
 
     private func teardownAudio() {
@@ -679,6 +699,133 @@ public actor DoubaoASR {
     private func deliverError(_ error: Error) {
         let cb = onError
         DispatchQueue.main.async { cb?(error) }
+    }
+
+    // MARK: - Retranscribe
+
+    /// Open a fresh session and stream the given WAV file's audio through Doubao,
+    /// returning the final transcript. Does NOT touch the mic or HUD. The caller
+    /// (DoubaoBackend) is responsible for showing whatever UI it wants.
+    ///
+    /// On any error, returns whatever partial text was assembled (possibly empty).
+    public func retranscribe(wavURL: URL) async -> String {
+        NSLog("[DoubaoASR] retranscribe(\(wavURL.lastPathComponent)) starting")
+
+        // Don't let a retranscribe stomp on a live recording session.
+        guard !isRunning else {
+            NSLog("[DoubaoASR] retranscribe rejected — session already running")
+            return ""
+        }
+
+        // Reset session state (mirrors what start() does, minus the mic tap).
+        self.committedSegments = []
+        self.currentInterim = ""
+        self.pcmBuffer = Data()
+        self.didSendFirstFrame = false
+        self.canSendAudio = false
+        self.didReceiveFinal = false
+        self.framesSentCount = 0
+        self.totalPcmBytesOut = 0
+        self.requestId = UUID().uuidString.lowercased()
+        self.finishedChannel = OneShotChannel<Void>()
+        self.lastResponseAt = nil
+        self.lastTranscriptAt = nil
+        self.audioStartedAt = Date()
+        self.isRunning = true
+        defer { self.isRunning = false }
+
+        do {
+            let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
+            self.token = creds.token
+            self.deviceId = creds.deviceId
+
+            self.opusEncoder = try OpusEncoder()
+
+            if self.ws == nil {
+                try openWebSocket()
+            }
+            try await sendInitialMessages(deviceId: self.deviceId)
+            self.canSendAudio = true
+
+            try await streamWavFile(at: wavURL)
+
+            try await sendFinishSession()
+
+            if let channel = finishedChannel {
+                _ = await waitWithTimeout(channel: channel, timeout: 5.0)
+            }
+        } catch {
+            NSLog("[DoubaoASR] retranscribe error: \(error.localizedDescription)")
+        }
+
+        await closeWebSocket()
+
+        let final = assembledText()
+        NSLog("[DoubaoASR] retranscribe done text.len=\(final.count)")
+        return final
+    }
+
+    /// Read a WAV file and push its int16 PCM through the existing send pipeline
+    /// in 20ms frames at ~realtime pace. We pace because Doubao's streaming ASR is
+    /// designed around mic-rate input, and feeding 30s of audio in a single burst
+    /// risks: (a) the server rejecting/throttling the connection, (b) the server's
+    /// VAD/partial-result loop collapsing into one giant utterance that returns
+    /// less granular text. Realtime pacing makes the replay indistinguishable from
+    /// a live mic session from the server's perspective.
+    private func streamWavFile(at url: URL) async throws {
+        let file = try AVAudioFile(forReading: url)
+        let frameCount = AVAudioFrameCount(file.length)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
+            throw NSError(domain: "DoubaoASR", code: -1, userInfo: [NSLocalizedDescriptionKey: "WAV buffer alloc failed"])
+        }
+        try file.read(into: buf)
+
+        // Convert to our send format (int16 16kHz mono interleaved) if needed.
+        let target = pcmTargetFormat ?? AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: Double(DoubaoConstants.sampleRate),
+            channels: AVAudioChannelCount(DoubaoConstants.channels),
+            interleaved: true
+        )!
+        let outBuf: AVAudioPCMBuffer
+        if buf.format == target {
+            outBuf = buf
+        } else {
+            guard let converter = AVAudioConverter(from: buf.format, to: target),
+                  let conv = AVAudioPCMBuffer(pcmFormat: target,
+                                              frameCapacity: AVAudioFrameCount(Double(buf.frameLength) * target.sampleRate / buf.format.sampleRate + 1024)) else {
+                throw NSError(domain: "DoubaoASR", code: -2, userInfo: [NSLocalizedDescriptionKey: "WAV converter init failed"])
+            }
+            var error: NSError?
+            var fed = false
+            converter.convert(to: conv, error: &error) { _, status in
+                if fed { status.pointee = .endOfStream; return nil }
+                fed = true
+                status.pointee = .haveData
+                return buf
+            }
+            if let e = error { throw e }
+            outBuf = conv
+        }
+
+        // Feed the buffer in ~20ms chunks at realtime pace.
+        guard let i16 = outBuf.int16ChannelData?[0] else { return }
+        let totalSamples = Int(outBuf.frameLength)
+        let samplesPerFrame = DoubaoConstants.sampleRate / 50  // 20ms @ sampleRate
+        let bytesPerSample = MemoryLayout<Int16>.size
+
+        var sampleIdx = 0
+        while sampleIdx < totalSamples {
+            let chunkSamples = min(samplesPerFrame, totalSamples - sampleIdx)
+            let bytePtr = UnsafeRawPointer(i16 + sampleIdx)
+            let chunkData = Data(bytes: bytePtr, count: chunkSamples * bytesPerSample)
+            self.pcmBuffer.append(chunkData)
+            self.totalPcmBytesOut += chunkData.count
+            try await flushPendingFrames()
+            sampleIdx += chunkSamples
+            try await Task.sleep(nanoseconds: 20_000_000)  // 20ms
+        }
+        try await flushAndSendLastFrame()
     }
 
     private enum WaitOutcome<T: Sendable>: Sendable {

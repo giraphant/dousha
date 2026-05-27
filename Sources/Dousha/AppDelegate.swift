@@ -298,11 +298,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         status = .transcribing
-        speech.stop { [weak self] finalText in
-            doushaLog("[Dousha] AppDelegate: speech.stop completion fired (text len=\(finalText.count))")
+        speech.stop { [weak self] result in
+            doushaLog("[Dousha] AppDelegate: speech.stop completion fired (text.len=\(result.text.count) dur=\(String(format: "%.1f", result.audioDuration))s lastTranscriptAge=\(result.lastTranscriptAge.map { String(format: "%.1f", $0) } ?? "nil") lastRespAge=\(result.lastResponseAge.map { String(format: "%.1f", $0) } ?? "nil"))")
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                let text = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
                 guard !text.isEmpty else {
                     self.status = .idle

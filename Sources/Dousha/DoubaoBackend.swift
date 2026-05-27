@@ -16,7 +16,19 @@ final class DoubaoBackend: SpeechBackend {
         asr.start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError)
     }
 
-    func stop(completion: @escaping @Sendable (String) -> Void) {
+    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
         asr.stop(completion: completion)
+    }
+
+    func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void) {
+        let url = DoubaoASR.savedAudioURL
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            completion(nil)
+            return
+        }
+        Task {
+            let text = await asr.retranscribe(wavURL: url)
+            DispatchQueue.main.async { completion(text) }
+        }
     }
 }

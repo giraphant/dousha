@@ -1,6 +1,7 @@
 import Foundation
 import Speech
 import AVFoundation
+import DoubaoASR
 
 final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
     private let audioEngine = AVAudioEngine()
@@ -82,9 +83,15 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
     }
 
     /// Stops capture and waits briefly for the final transcription before completing.
-    func stop(completion: @escaping @Sendable (String) -> Void) {
+    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
         guard isRunning else {
-            completion(lastText)
+            completion(TranscriptionResult(
+                text: lastText,
+                audioDuration: 0,
+                lastResponseAge: nil,
+                lastTranscriptAge: nil,
+                savedAudioURL: nil
+            ))
             return
         }
         isRunning = false
@@ -100,8 +107,18 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
             self.task?.cancel()
             self.task = nil
             self.request = nil
-            completion(final)
+            completion(TranscriptionResult(
+                text: final,
+                audioDuration: 0,
+                lastResponseAge: nil,
+                lastTranscriptAge: nil,
+                savedAudioURL: nil
+            ))
         }
+    }
+
+    func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void) {
+        completion(nil)  // Apple backend doesn't save WAVs
     }
 
     static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
