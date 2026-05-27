@@ -17,19 +17,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let llm = LLMRefiner()
     private let prefs = Preferences.shared
 
-    private let viewModel = FloatingViewModel()
+    private let hudModel = FloatingHUDModel()
     private var floatingWindow: FloatingWindow?
 
-    private var fnMonitor: FnKeyMonitor?
-    private var isRecording = false
-    private var pendingStop = false
+    private var hotkey: HotkeyMonitor?
+    private let focusTracker = AppFocusTracker(selfBundleId: "com.dousha.app")
+
+    private var status: RecordingStatus = .idle {
+        didSet {
+            hudModel.status = status
+            if status.isVisible {
+                floatingWindow?.show()
+            } else {
+                floatingWindow?.hide()
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupMenuBar()
-        floatingWindow = FloatingWindow(viewModel: viewModel)
+        floatingWindow = FloatingWindow(model: hudModel)
         requestSpeechAndMicPermissions()
-        startFnMonitor()
+
+        focusTracker.onChange = { [weak self] focus in
+            self?.hudModel.focus = focus
+        }
+        hudModel.focus = focusTracker.current
+        focusTracker.start()
+
+        startHotkeyMonitor()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleHotkeyConfigChanged),
+            name: .doushaHotkeyConfigChanged,
+            object: nil
+        )
+
         if prefs.engine == .doubao { DoubaoCredentialStore.shared.warmup() }
     }
 
@@ -48,7 +72,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rebuildMenu() {
         let menu = NSMenu()
 
-        let header = NSMenuItem(title: "Dousha — Hold Fn to record", action: nil, keyEquivalent: "")
+        let triggerLabel = HotkeyMonitor.displayName(forKeyCode: prefs.hotkey.keyCode)
+        let modeLabel = prefs.hotkey.mode == .pushToTalk ? "Hold" : "Tap"
+        let header = NSMenuItem(title: "Dousha — \(modeLabel) \(triggerLabel) to record",
+                                action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
 
@@ -149,7 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func resetDoubaoCredentials() {
         let alert = NSAlert()
         alert.messageText = "Reset Doubao credentials?"
-        alert.informativeText = "Deletes the cached device_id and token, then re-registers on next dictation. Use this if you see errors like ‘exceedconcurrentquota’."
+        alert.informativeText = "Deletes the cached device_id and token, then re-registers on next dictation. Use this if you see errors like 'exceedconcurrentquota'."
         alert.addButton(withTitle: "Reset")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
@@ -178,8 +205,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Dousha",
             .applicationVersion: "1.0",
-            .credits: NSAttributedString(string: "Hold Fn to dictate. Release to paste.",
-                                         attributes: [.foregroundColor: NSColor.secondaryLabelColor])
+            .credits: NSAttributedString(
+                string: "Hold a modifier key (or tap in toggle mode) to dictate. Release to paste.",
+                attributes: [.foregroundColor: NSColor.secondaryLabelColor])
         ])
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -193,89 +221,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = AXIsProcessTrustedWithOptions(opts)
     }
 
-    // MARK: - Fn key
+    // MARK: - Hotkey
 
-    private func startFnMonitor() {
-        let monitor = FnKeyMonitor(
-            onPress:   { [weak self] in DispatchQueue.main.async { self?.handleFnDown() } },
-            onRelease: { [weak self] in DispatchQueue.main.async { self?.handleFnUp() } }
+    private func startHotkeyMonitor() {
+        let monitor = HotkeyMonitor(
+            config: prefs.hotkey,
+            onStart: { [weak self] in self?.handleStart() },
+            onStop:  { [weak self] in self?.handleStop() }
         )
         if !monitor.start() {
-            // Likely missing accessibility permission. Retry shortly so the user can grant it
-            // and we recover without restarting the app.
+            // Most likely Accessibility permission isn't granted yet. Retry so
+            // the user can grant it without restarting the app.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                self?.startFnMonitor()
+                self?.startHotkeyMonitor()
             }
             return
         }
-        fnMonitor = monitor
+        hotkey = monitor
     }
 
-    private func handleFnDown() {
-        guard !isRecording else { return }
-        isRecording = true
-        pendingStop = false
+    @objc private func handleHotkeyConfigChanged() {
+        hotkey?.stop()
+        hotkey = nil
+        startHotkeyMonitor()
+        rebuildMenu()
+    }
 
+    private func handleStart() {
+        guard status == .idle || isErrorStatus(status) else { return }
+        status = .recording
         speech.setLanguage(prefs.language)
-        viewModel.reset()
-        floatingWindow?.show()
+        hudModel.resetLevels()
 
         speech.start(
-            onPartial: { [weak self] text in
-                self?.viewModel.transcript = text
+            onPartial: { _ in
+                // v1 HUD does not display partial transcript text.
             },
             onAudioLevel: { [weak self] level in
-                self?.viewModel.audioLevel = level
+                DispatchQueue.main.async { self?.hudModel.pushLevel(level) }
             },
             onError: { [weak self] error in
                 NSLog("[Dousha] recognition error: \(error.localizedDescription)")
-                self?.viewModel.transcript = "⚠︎ \(error.localizedDescription)"
+                DispatchQueue.main.async {
+                    self?.transitionToError(error.localizedDescription)
+                }
             }
         )
     }
 
-    private func handleFnUp() {
-        guard isRecording else { return }
-        isRecording = false
-        guard !pendingStop else { return }
-        pendingStop = true
-
+    private func handleStop() {
+        guard status == .recording else { return }
+        status = .transcribing
         speech.stop { [weak self] finalText in
-            guard let self = self else { return }
-            let text = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let text = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            guard !text.isEmpty else {
-                self.floatingWindow?.hide()
-                self.pendingStop = false
-                return
-            }
+                guard !text.isEmpty else {
+                    self.status = .idle
+                    return
+                }
 
-            if self.prefs.llmEnabled && self.llm.isConfigured {
-                self.viewModel.isRefining = true
-                self.llm.refine(text) { result in
-                    DispatchQueue.main.async {
-                        self.viewModel.isRefining = false
-                        let final: String
-                        switch result {
-                        case .success(let refined):
-                            final = refined
-                        case .failure(let err):
-                            NSLog("[Dousha] LLM refine failed: \(err.localizedDescription)")
-                            final = text
-                        }
-                        self.viewModel.transcript = final
-                        self.floatingWindow?.hide {
-                            self.injector.inject(final)
-                            self.pendingStop = false
+                if self.prefs.llmEnabled && self.llm.isConfigured {
+                    self.llm.refine(text) { result in
+                        DispatchQueue.main.async {
+                            let final: String
+                            switch result {
+                            case .success(let refined):
+                                final = refined
+                            case .failure(let err):
+                                NSLog("[Dousha] LLM refine failed: \(err.localizedDescription)")
+                                final = text
+                            }
+                            self.injectAndFinish(final)
                         }
                     }
-                }
-            } else {
-                self.floatingWindow?.hide {
-                    self.injector.inject(text)
-                    self.pendingStop = false
+                } else {
+                    self.injectAndFinish(text)
                 }
             }
         }
+    }
+
+    private func injectAndFinish(_ text: String) {
+        status = .injecting
+        injector.inject(text)
+        // Brief green flash then back to idle.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.status = .idle
+        }
+    }
+
+    private func transitionToError(_ message: String) {
+        status = .error(message)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self = self else { return }
+            if self.isErrorStatus(self.status) {
+                self.status = .idle
+            }
+        }
+    }
+
+    private func isErrorStatus(_ s: RecordingStatus) -> Bool {
+        if case .error = s { return true }
+        return false
     }
 }
