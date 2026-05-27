@@ -62,6 +62,33 @@ public actor DoubaoASR {
     private var framesSentCount = 0
     private var totalPcmBytesOut: Int = 0
 
+    // WAV side-recording for fallback re-transcription on WS drops.
+    // The writer is held as a const-after-init local in startMicTap so the audio
+    // tap closure (which is non-isolated and runs on the audio thread) can call
+    // .append() directly without hopping into the actor. The actor's reference
+    // is just for close() during _stop().
+    private var wavWriter: WavFileWriter?
+    private(set) var audioStartedAt: Date?
+
+    /// Any byte from the server (heartbeats included). For debugging "is the WS
+    /// alive at all" — NOT the heuristic's staleness signal (heartbeats would mask
+    /// real drops). See `lastTranscriptAt` for that.
+    private(set) var lastResponseAt: Date?
+
+    /// Wall-clock of the last server message that carried non-empty transcript
+    /// content (`results[].text` non-empty). This is what the incomplete-detector
+    /// looks at to decide "did the server stop producing text long before the
+    /// user released?".
+    private(set) var lastTranscriptAt: Date?
+
+    /// Path where the rolling per-session WAV gets written.
+    static var savedAudioURL: URL {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Dousha", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("last_recording.wav")
+    }
+
     /// Creates an idle recognizer. No mic access, network, or registration
     /// happens until `start()` is called.
     public init() {}
@@ -106,6 +133,10 @@ public actor DoubaoASR {
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
         self.finishedChannel = OneShotChannel<Void>()
+        self.audioStartedAt = nil
+        self.lastResponseAt = nil
+        self.lastTranscriptAt = nil
+        self.wavWriter = nil
 
         NSLog("[DoubaoASR] start() requestId=\(requestId)")
 
@@ -118,8 +149,26 @@ public actor DoubaoASR {
             self.opusEncoder = try OpusEncoder()
             NSLog("[DoubaoASR] opus encoder ready")
 
+            // Open the rolling WAV before the mic tap so that startMicTap can
+            // snapshot the writer reference into the tap closure.
+            do {
+                // Remove any prior file so AVAudioFile's "no overwrite" semantics don't bite us.
+                try? FileManager.default.removeItem(at: Self.savedAudioURL)
+                self.wavWriter = try WavFileWriter(
+                    url: Self.savedAudioURL,
+                    sampleRate: DoubaoConstants.sampleRate,
+                    channels: DoubaoConstants.channels
+                )
+                self.audioStartedAt = Date()
+                NSLog("[DoubaoASR] WAV side-recording opened at \(Self.savedAudioURL.path)")
+            } catch {
+                NSLog("[DoubaoASR] WAV writer failed to open: \(error.localizedDescription) — continuing without side recording")
+                self.wavWriter = nil
+            }
+
             // Start mic FIRST so audio buffers while we set up the WebSocket.
             // Doubao kills sessions that go ~900ms without audio after StartSession.
+            // (Must come after wavWriter is assigned so startMicTap can snapshot it.)
             try startMicTap()
             NSLog("[DoubaoASR] mic tap started (pre-WS)")
 
@@ -169,6 +218,14 @@ public actor DoubaoASR {
         isRunning = false
 
         teardownAudio()
+
+        if let writer = self.wavWriter {
+            // close() blocks until all queued writes have flushed — this is what
+            // makes it safe for the retranscribe path to read the file immediately
+            // after stop() returns.
+            try? writer.close()
+            self.wavWriter = nil
+        }
 
         // Drain remaining PCM as a final frame, then FinishSession.
         do {
@@ -386,6 +443,7 @@ public actor DoubaoASR {
     }
 
     private func handleResponseData(_ data: Data) {
+        self.lastResponseAt = Date()
         guard let resp = try? AsrResponse.decode(data) else {
             NSLog("[DoubaoASR] recv: decode failed (\(data.count) bytes)")
             return
@@ -447,6 +505,7 @@ public actor DoubaoASR {
         }
 
         if !text.isEmpty {
+            self.lastTranscriptAt = Date()
             // Doubao chunks long audio into VAD-bounded utterances. Each utterance has its
             // own cumulative `text` field that does NOT include prior utterances. So when
             // is_vad_finished=true && !is_interim, we commit `text` as a finalized
@@ -498,6 +557,7 @@ public actor DoubaoASR {
         let audioLevelCallback = self.onAudioLevel
         let capturedConverter = UncheckedSendable(converter)
         let capturedTarget = UncheckedSendable(target)
+        let capturedWavWriter = self.wavWriter   // may be nil — that's fine
 
         inputNode.removeTap(onBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { [weak self] buffer, _ in
@@ -529,6 +589,10 @@ public actor DoubaoASR {
             }
             let n = Int(outBuf.frameLength)
             guard n > 0, let src = outBuf.int16ChannelData?[0] else { return }
+
+            if let writer = capturedWavWriter {
+                writer.append(int16Samples: src, count: n)
+            }
 
             let byteCount = n * MemoryLayout<Int16>.size
             let chunk = Data(bytes: src, count: byteCount)
