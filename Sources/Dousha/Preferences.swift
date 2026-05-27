@@ -19,26 +19,31 @@ enum Language: String, CaseIterable {
 }
 
 final class Preferences {
-    static let shared = Preferences()
-    private let defaults = UserDefaults.standard
+    static let shared = Preferences(defaults: .standard)
+    private let defaults: UserDefaults
 
     private enum Keys {
-        static let language     = "language"
-        static let engine       = "engine"
-        static let llmEnabled   = "llmEnabled"
-        static let llmBaseURL   = "llmBaseURL"
-        static let llmAPIKey    = "llmAPIKey"
-        static let llmModel     = "llmModel"
+        static let language       = "language"
+        static let engine         = "engine"
+        static let llmEnabled     = "llmEnabled"
+        static let llmBaseURL     = "llmBaseURL"
+        static let llmAPIKey      = "llmAPIKey"
+        static let llmModel       = "llmModel"
+        static let hotkeyKeyCode  = "hotkey.keyCode"
+        static let hotkeyMode     = "hotkey.mode"
     }
 
-    private init() {
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
         defaults.register(defaults: [
-            Keys.language:   Language.zh_CN.rawValue,
-            Keys.engine:     Engine.apple.rawValue,
-            Keys.llmEnabled: false,
-            Keys.llmBaseURL: "https://api.openai.com/v1",
-            Keys.llmModel:   "gpt-4o-mini",
-            Keys.llmAPIKey:  ""
+            Keys.language:       Language.zh_CN.rawValue,
+            Keys.engine:         Engine.apple.rawValue,
+            Keys.llmEnabled:     false,
+            Keys.llmBaseURL:     "https://api.openai.com/v1",
+            Keys.llmModel:       "gpt-4o-mini",
+            Keys.llmAPIKey:      "",
+            Keys.hotkeyKeyCode:  Int(HotkeyConfig.default.keyCode),
+            Keys.hotkeyMode:     HotkeyConfig.default.mode.rawValue
         ])
     }
 
@@ -70,5 +75,18 @@ final class Preferences {
     var llmModel: String {
         get { defaults.string(forKey: Keys.llmModel) ?? "gpt-4o-mini" }
         set { defaults.set(newValue, forKey: Keys.llmModel) }
+    }
+
+    var hotkey: HotkeyConfig {
+        get {
+            let code = UInt16(defaults.integer(forKey: Keys.hotkeyKeyCode))
+            let mode = HotkeyMode(rawValue: defaults.string(forKey: Keys.hotkeyMode) ?? "")
+                ?? HotkeyConfig.default.mode
+            return HotkeyConfig(keyCode: code, mode: mode)
+        }
+        set {
+            defaults.set(Int(newValue.keyCode), forKey: Keys.hotkeyKeyCode)
+            defaults.set(newValue.mode.rawValue, forKey: Keys.hotkeyMode)
+        }
     }
 }
