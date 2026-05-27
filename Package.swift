@@ -39,7 +39,7 @@ let package = Package(
         ,
         .testTarget(
             name: "DoushaTests",
-            dependencies: ["Dousha"],
+            dependencies: ["Dousha", "DoubaoASR"],
             path: "Tests/DoushaTests"
         )
     ]
