@@ -24,6 +24,10 @@ struct SettingsView: View {
     @State private var isRecordingHotkey: Bool = false
     private let recorder = HotkeyRecorder()
 
+    @State private var cancelHotkey: CancelHotkeyConfig = Preferences.shared.cancelHotkey
+    @State private var isRecordingCancelHotkey: Bool = false
+    private let cancelRecorder = CancelKeyRecorder()
+
     @State private var baseURL: String = Preferences.shared.llmBaseURL
     @State private var apiKey:  String = Preferences.shared.llmAPIKey
     @State private var model:   String = Preferences.shared.llmModel
@@ -69,7 +73,29 @@ struct SettingsView: View {
                         NotificationCenter.default.post(name: .doushaHotkeyConfigChanged, object: nil)
                     }
                 }
+                field(label: "Cancel key") {
+                    HStack(spacing: 8) {
+                        Text(cancelHotkey.displayName)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.12)))
+                        Button(isRecordingCancelHotkey ? "Press any key…" : "Record") {
+                            toggleCancelHotkeyRecording()
+                        }
+                        Button("Off") {
+                            cancelHotkey = .disabled
+                            Preferences.shared.cancelHotkey = .disabled
+                            NotificationCenter.default.post(name: .doushaCancelHotkeyConfigChanged, object: nil)
+                        }
+                        .disabled(!cancelHotkey.isEnabled)
+                    }
+                }
             }
+            Text("Cancel discards the current recording without transcribing. Only fires while recording — passes through normally otherwise.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider().padding(.vertical, 4)
 
@@ -172,6 +198,22 @@ struct SettingsView: View {
             let cfg = HotkeyConfig(keyCode: newKeyCode, mode: hotkeyMode)
             Preferences.shared.hotkey = cfg
             NotificationCenter.default.post(name: .doushaHotkeyConfigChanged, object: nil)
+        }
+    }
+
+    private func toggleCancelHotkeyRecording() {
+        if isRecordingCancelHotkey {
+            cancelRecorder.cancel()
+            isRecordingCancelHotkey = false
+            return
+        }
+        isRecordingCancelHotkey = true
+        cancelRecorder.start { newKeyCode in
+            let cfg = CancelHotkeyConfig(keyCode: newKeyCode)
+            cancelHotkey = cfg
+            isRecordingCancelHotkey = false
+            Preferences.shared.cancelHotkey = cfg
+            NotificationCenter.default.post(name: .doushaCancelHotkeyConfigChanged, object: nil)
         }
     }
 }

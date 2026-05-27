@@ -20,6 +20,10 @@ final class DoubaoBackend: SpeechBackend {
         asr.stop(completion: completion)
     }
 
+    func cancel() {
+        asr.cancel()
+    }
+
     func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void) {
         let url = DoubaoASR.savedAudioURL
         guard FileManager.default.fileExists(atPath: url.path) else {

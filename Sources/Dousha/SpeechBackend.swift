@@ -20,6 +20,12 @@ protocol SpeechBackend: AnyObject {
                onError: @escaping @Sendable (Error) -> Void)
     func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void)
 
+    /// Aborts an in-flight session and discards everything captured so far.
+    /// MUST NOT call any of the start() callbacks, MUST NOT call any pending
+    /// stop() completion, and MUST leave no stale saved-audio file behind that
+    /// could fool retranscribe. Safe to call when not running (no-op).
+    func cancel()
+
     /// Re-runs ASR on the last saved WAV from the most recent recording, if
     /// the backend supports it. Returns nil text if there is no saved audio
     /// or the backend cannot replay it.

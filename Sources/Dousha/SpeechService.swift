@@ -2,6 +2,7 @@ import Foundation
 import Speech
 import AVFoundation
 import DoubaoASR
+import TalkerCommonSync
 
 final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
     private let audioEngine = AVAudioEngine()
@@ -16,7 +17,14 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
     /// still fire briefly after `task.cancel()` — and the delayed stop()
     /// completion both short-circuit instead of leaking into the caller's
     /// error/inject paths.
-    private var sessionGen: UInt64 = 0
+    ///
+    /// Three threads touch this value: main (start/stop/cancel), the audio
+    /// engine's render thread (the tap closure), and the Speech framework's
+    /// internal queue (the recognitionTask closure). An unsynchronized UInt64
+    /// would tear under contention on 32-bit platforms and risks stale reads
+    /// on 64-bit when paired with the unsynchronized write in cancel(). Lock<>
+    /// is the cheapest correct primitive available in this target.
+    private let sessionGen = Lock<UInt64>(0)
 
     init(language: String) {
         setLanguage(language)
@@ -56,9 +64,12 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         // task get dropped, and capture the new value for THIS session's task
         // closure. SFSpeechRecognitionTask's completion handler can fire a few
         // events after task.cancel(); we treat those as belonging to the
-        // outgoing generation and ignore them.
-        sessionGen &+= 1
-        let myGen = sessionGen
+        // outgoing generation and ignore them. Bump + read happen under the
+        // lock so the value we capture is the same one the closures will see.
+        let myGen: UInt64 = sessionGen.withLock { gen in
+            gen &+= 1
+            return gen
+        }
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -69,7 +80,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
             // self.request is nil-ed out by stop()/cancel(), so the append
             // would be a no-op anyway, but the gen check makes the intent
             // explicit and survives any future tap-retention changes.
-            guard self.sessionGen == myGen else { return }
+            guard self.sessionGen.value() == myGen else { return }
             self.request?.append(buffer)
             let level = AppleSpeechBackend.computeRMS(buffer)
             DispatchQueue.main.async { onAudioLevel(level) }
@@ -89,7 +100,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
             // error or final result arriving after cancel() would re-enter
             // AppDelegate's error path and flash the HUD red even though the
             // user explicitly discarded this recording.
-            guard self.sessionGen == myGen else { return }
+            guard self.sessionGen.value() == myGen else { return }
             if let result = result {
                 let text = result.bestTranscription.formattedString
                 self.lastText = text
@@ -126,7 +137,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         // grace window below, sessionGen will have advanced and we must NOT
         // fire the completion — otherwise the inject path would paste
         // whatever lastText held at the moment the user hit cancel.
-        let myGen = sessionGen
+        let myGen = sessionGen.value()
 
         audioEngine.inputNode.removeTap(onBus: 0)
         audioEngine.stop()
@@ -135,7 +146,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         // Give the recognizer a brief window to emit the final result.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self else { return }
-            guard self.sessionGen == myGen else {
+            guard self.sessionGen.value() == myGen else {
                 // Cancel ran while we were waiting — drop the completion.
                 return
             }
@@ -159,7 +170,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
 
         // Bump generation BEFORE the teardown so any callback that fires
         // synchronously off task.cancel() / endAudio is already orphaned.
-        sessionGen &+= 1
+        sessionGen.withLock { $0 &+= 1 }
 
         audioEngine.inputNode.removeTap(onBus: 0)
         audioEngine.stop()
