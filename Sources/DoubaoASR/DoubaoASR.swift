@@ -70,6 +70,11 @@ public actor DoubaoASR {
     private var wavWriter: WavFileWriter?
     private(set) var audioStartedAt: Date?
 
+    /// Wall-clock timestamps of every VAD-finalized segment commit during this
+    /// recording. Used by the detector to spot large gaps that indicate Doubao
+    /// silently dropped a chunk of audio mid-recording.
+    private(set) var segmentCommittedAt: [Date] = []
+
     /// Any byte from the server (heartbeats included). For debugging "is the WS
     /// alive at all" — NOT the heuristic's staleness signal (heartbeats would mask
     /// real drops). See `lastTranscriptAt` for that.
@@ -125,6 +130,7 @@ public actor DoubaoASR {
         self.onError = onError
         self.committedSegments = []
         self.currentInterim = ""
+        self.segmentCommittedAt = []
         self.pcmBuffer = Data()
         self.didSendFirstFrame = false
         self.canSendAudio = false
@@ -198,6 +204,53 @@ public actor DoubaoASR {
         }
     }
 
+    /// Aborts the current recording without sending `FinishSession`, discarding
+    /// any pending transcript and the side-recorded WAV. Closes the WebSocket
+    /// gracefully so Doubao's per-device concurrent-quota bookkeeping releases
+    /// the slot (a hard tear-down here leaves the server still counting us as
+    /// active for a while, and the next session fails with `exceedconcurrentquota`).
+    ///
+    /// Quarantines the live-session callbacks before the close handshake so any
+    /// stray server frame that arrives during teardown (e.g., a late TaskFailed)
+    /// cannot bleed into AppDelegate's error path and re-trigger UI state.
+    ///
+    /// Safe to call when not running — returns immediately.
+    public nonisolated func cancel() {
+        Task { await self._cancel() }
+    }
+
+    private func _cancel() async {
+        doushaLog("[DoubaoASR] cancel() isRunning=\(isRunning)")
+        guard isRunning else { return }
+        isRunning = false
+
+        // Quarantine callbacks FIRST so the close handshake can't deliver a
+        // stale error/partial up the stack.
+        self.onPartial = nil
+        self.onAudioLevel = nil
+        self.onError = nil
+
+        teardownAudio()
+
+        // Close & delete the WAV. close() is a barrier on the writer's serial
+        // queue; calling it ensures any in-flight append from the mic tap is
+        // flushed before we remove the file. Without this you can race with the
+        // tap's dispatched-async append and end up with a partially-written
+        // file resurfacing on disk after the unlink.
+        if let writer = self.wavWriter {
+            try? writer.close()
+            self.wavWriter = nil
+        }
+        try? FileManager.default.removeItem(at: Self.savedAudioURL)
+
+        // Graceful WS close — sends Normal Closure (1000) and waits for the
+        // server's ack so Doubao's concurrent-session counter clears promptly.
+        await closeWebSocket()
+
+        signalFinished()
+        doushaLog("[DoubaoASR] cancel() done")
+    }
+
     /// Stops capturing the microphone, sends `FinishSession`, and waits up to
     /// 2.5 s for the server to flush its final transcript.
     ///
@@ -224,6 +277,7 @@ public actor DoubaoASR {
                 audioDuration: 0,
                 lastResponseAge: nil,
                 lastTranscriptAge: nil,
+                maxSegmentGap: nil,
                 savedAudioURL: nil
             )
         }
@@ -299,11 +353,29 @@ public actor DoubaoASR {
         let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
         let savedURL: URL? = FileManager.default.fileExists(atPath: Self.savedAudioURL.path) ? Self.savedAudioURL : nil
 
+        let maxSegmentGap: TimeInterval? = {
+            guard let start = audioStartedAt else { return nil }
+            guard !segmentCommittedAt.isEmpty else {
+                // No segments committed — degenerate case, return nil so the
+                // detector's other signals (char rate, lastTranscriptAge) drive the call.
+                return nil
+            }
+            var prev = start
+            var maxGap: TimeInterval = 0
+            for commitAt in segmentCommittedAt {
+                let gap = commitAt.timeIntervalSince(prev)
+                if gap > maxGap { maxGap = gap }
+                prev = commitAt
+            }
+            return maxGap
+        }()
+
         return TranscriptionResult(
             text: final,
             audioDuration: audioDuration,
             lastResponseAge: lastResponseAge,
             lastTranscriptAge: lastTranscriptAge,
+            maxSegmentGap: maxSegmentGap,
             savedAudioURL: savedURL
         )
     }
@@ -561,6 +633,7 @@ public actor DoubaoASR {
             // final paste join all committed segments + the in-progress interim.
             if (!isInterim && vadFinished) || nonstreamResult {
                 committedSegments.append(text)
+                segmentCommittedAt.append(Date())
                 currentInterim = ""
                 doushaLog("[DoubaoASR] segment final='\(text)' totalSegments=\(committedSegments.count)")
             } else {

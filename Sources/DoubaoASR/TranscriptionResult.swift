@@ -16,6 +16,12 @@ import Foundation
 ///   uses: a large gap means the server stopped producing text well before
 ///   the user released the hotkey.
 ///
+/// - `maxSegmentGap`: largest wall-clock gap (in seconds) between two
+///   consecutive segment commits within this recording, OR between the start
+///   of audio and the first commit. nil if no segments were committed or
+///   diagnostics aren't available. Large gaps indicate Doubao silently
+///   dropped audio in that window.
+///
 /// `audioDuration` and `text.count` together drive the secondary char/sec
 /// heuristic.
 public struct TranscriptionResult: Sendable {
@@ -23,6 +29,7 @@ public struct TranscriptionResult: Sendable {
     public let audioDuration: TimeInterval
     public let lastResponseAge: TimeInterval?
     public let lastTranscriptAge: TimeInterval?
+    public let maxSegmentGap: TimeInterval?
     /// Path to the WAV that captured this session's mic input, or nil if the
     /// backend doesn't support WAV capture (e.g., Apple backend).
     public let savedAudioURL: URL?
@@ -32,12 +39,14 @@ public struct TranscriptionResult: Sendable {
         audioDuration: TimeInterval,
         lastResponseAge: TimeInterval?,
         lastTranscriptAge: TimeInterval?,
+        maxSegmentGap: TimeInterval? = nil,
         savedAudioURL: URL?
     ) {
         self.text = text
         self.audioDuration = audioDuration
         self.lastResponseAge = lastResponseAge
         self.lastTranscriptAge = lastTranscriptAge
+        self.maxSegmentGap = maxSegmentGap
         self.savedAudioURL = savedAudioURL
     }
 }

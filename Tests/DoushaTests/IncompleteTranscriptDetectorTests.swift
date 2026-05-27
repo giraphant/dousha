@@ -9,13 +9,15 @@ final class IncompleteTranscriptDetectorTests: XCTestCase {
         text: String,
         audioDuration: TimeInterval,
         lastTranscriptAge: TimeInterval? = nil,
-        lastResponseAge: TimeInterval? = nil
+        lastResponseAge: TimeInterval? = nil,
+        maxSegmentGap: TimeInterval? = nil
     ) -> TranscriptionResult {
         TranscriptionResult(
             text: text,
             audioDuration: audioDuration,
             lastResponseAge: lastResponseAge,
             lastTranscriptAge: lastTranscriptAge,
+            maxSegmentGap: maxSegmentGap,
             savedAudioURL: nil
         )
     }
@@ -83,6 +85,43 @@ final class IncompleteTranscriptDetectorTests: XCTestCase {
     func test_zeroAudioDuration_neverFlagged() {
         // Avoid division by zero / nonsense flags for instant stop().
         let result = r(text: "", audioDuration: 0, lastTranscriptAge: nil)
+        XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
+    }
+
+    // MARK: - Segment-gap signal
+
+    /// Real-world case from production logs: 68s recording, 146 chars (above floor),
+    /// but Doubao dropped a chunk in the middle. lastTranscriptAge looks fine because
+    /// the trailing segment came in just before stop. ONLY the gap signal can catch this.
+    func test_largeMidGap_flaggedEvenWhenRateIsNormal() {
+        let result = r(
+            text: String(repeating: "字", count: 146),
+            audioDuration: 68.0,
+            lastTranscriptAge: 0.5,
+            maxSegmentGap: 28.0   // 28s without a segment commit
+        )
+        XCTAssertTrue(det.isLikelyIncomplete(result: result, language: "zh-CN"))
+    }
+
+    func test_normalSegmentGaps_notFlagged() {
+        // Healthy VAD-segmented recording: gaps stay under 10s.
+        let result = r(
+            text: String(repeating: "字", count: 80),
+            audioDuration: 30.0,
+            lastTranscriptAge: 0.5,
+            maxSegmentGap: 4.5
+        )
+        XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
+    }
+
+    /// Boundary: exactly at the threshold should not fire (we use strict > not >=).
+    func test_segmentGapAtThreshold_notFlagged() {
+        let result = r(
+            text: String(repeating: "字", count: 80),
+            audioDuration: 30.0,
+            lastTranscriptAge: 0.5,
+            maxSegmentGap: 10.0
+        )
         XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
     }
 }

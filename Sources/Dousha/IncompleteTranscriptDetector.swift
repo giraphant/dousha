@@ -3,7 +3,7 @@ import DoubaoASR
 
 /// Heuristic check for "did the streaming ASR probably miss part of the audio?"
 ///
-/// Two independent signals; OR-combined:
+/// Three independent signals; OR-combined:
 ///
 /// 1. **Stale last-transcript**: if the server hasn't produced any new
 ///    non-empty transcript content for >3s before the user released the
@@ -12,14 +12,21 @@ import DoubaoASR
 ///    (not `lastResponseAge`) so the signal isn't masked by heartbeats from a
 ///    server whose ASR pipeline has stalled.
 ///
-/// 2. **Char-per-second floor**: normal human speech rates are bounded below.
+/// 2. **Segment-gap**: the largest wall-clock gap between consecutive VAD
+///    segment commits (or between audio start and the first commit) exceeds
+///    10s. Normal VAD-segmented speech commits every 3-5s; a >10s gap means
+///    Doubao silently dropped a chunk of audio in that window. This catches
+///    the case where surviving segments are dense enough that the char/sec
+///    rate looks normal even though a large middle portion was lost.
+///
+/// 3. **Char-per-second floor**: normal human speech rates are bounded below.
 ///    If transcript length divided by audio seconds is far below the language's
 ///    expected floor, something is missing.
 ///
-/// Both signals are gated on a minimum audio duration (5s) — short recordings
+/// All signals are gated on a minimum audio duration (5s) — short recordings
 /// are too noisy to judge.
 struct IncompleteTranscriptDetector {
-    /// Minimum audio length before either signal fires. Short clips are too
+    /// Minimum audio length before any signal fires. Short clips are too
     /// noisy (one-word commands, throat-clears, etc.).
     let minAudioDuration: TimeInterval = 5.0
 
@@ -28,6 +35,12 @@ struct IncompleteTranscriptDetector {
     /// cessation; >3s strongly suggests the stream stopped flowing well before
     /// the hotkey release.
     let maxLastTranscriptAge: TimeInterval = 3.0
+
+    /// Max acceptable gap between segment commits (or between audio start and
+    /// first commit). >10s means Doubao silently dropped a chunk of audio in
+    /// that window — the rate-based signal won't catch this when the surviving
+    /// segments are dense enough.
+    let maxSegmentGap: TimeInterval = 10.0
 
     /// Per-language chars-per-second floor. Recordings below this rate get
     /// flagged. Picked conservatively (about 50% of typical conversational
@@ -41,6 +54,10 @@ struct IncompleteTranscriptDetector {
         guard result.audioDuration >= minAudioDuration else { return false }
 
         if let age = result.lastTranscriptAge, age > maxLastTranscriptAge {
+            return true
+        }
+
+        if let gap = result.maxSegmentGap, gap > maxSegmentGap {
             return true
         }
 
