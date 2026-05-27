@@ -13,7 +13,7 @@ struct DeviceCredentials: Codable {
 
 /// Manages the anonymous device registration + JWT that Doubao requires
 /// before any ASR call. Credentials are cached to
-/// `~/Library/Application Support/SpeechMore/credentials.json` so subsequent
+/// `~/Library/Application Support/Dousha/credentials.json` so subsequent // dousha: was "SpeechMore" upstream
 /// app launches start in milliseconds.
 public actor DoubaoCredentialStore {
     /// Shared singleton. There is no reason to construct multiple instances —
