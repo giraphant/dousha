@@ -1,6 +1,7 @@
 import Cocoa
 import Carbon
 import Carbon.HIToolbox
+import TalkerCommonSync
 
 /// Injects text into the currently focused text field by:
 ///   1. Switching to ASCII keyboard if a CJK IME is active (so it does not eat ⌘V)

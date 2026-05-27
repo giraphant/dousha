@@ -138,16 +138,16 @@ public actor DoubaoASR {
         self.lastTranscriptAt = nil
         self.wavWriter = nil
 
-        NSLog("[DoubaoASR] start() requestId=\(requestId)")
+        doushaLog("[DoubaoASR] start() requestId=\(requestId)")
 
         do {
             let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
             self.token = creds.token
             self.deviceId = creds.deviceId
-            NSLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
+            doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
 
             self.opusEncoder = try OpusEncoder()
-            NSLog("[DoubaoASR] opus encoder ready")
+            doushaLog("[DoubaoASR] opus encoder ready")
 
             // Open the rolling WAV before the mic tap so that startMicTap can
             // snapshot the writer reference into the tap closure.
@@ -160,9 +160,9 @@ public actor DoubaoASR {
                     channels: DoubaoConstants.channels
                 )
                 self.audioStartedAt = Date()
-                NSLog("[DoubaoASR] WAV side-recording opened at \(Self.savedAudioURL.path)")
+                doushaLog("[DoubaoASR] WAV side-recording opened at \(Self.savedAudioURL.path)")
             } catch {
-                NSLog("[DoubaoASR] WAV writer failed to open: \(error.localizedDescription) — continuing without side recording")
+                doushaLog("[DoubaoASR] WAV writer failed to open: \(error.localizedDescription) — continuing without side recording")
                 self.wavWriter = nil
             }
 
@@ -170,22 +170,22 @@ public actor DoubaoASR {
             // Doubao kills sessions that go ~900ms without audio after StartSession.
             // (Must come after wavWriter is assigned so startMicTap can snapshot it.)
             try startMicTap()
-            NSLog("[DoubaoASR] mic tap started (pre-WS)")
+            doushaLog("[DoubaoASR] mic tap started (pre-WS)")
 
             if self.ws == nil {
                 try openWebSocket()
-                NSLog("[DoubaoASR] websocket opened (fresh)")
+                doushaLog("[DoubaoASR] websocket opened (fresh)")
             } else {
-                NSLog("[DoubaoASR] reusing existing websocket")
+                doushaLog("[DoubaoASR] reusing existing websocket")
             }
             try await sendInitialMessages(deviceId: self.deviceId)
-            NSLog("[DoubaoASR] StartTask + StartSession both succeeded; pcmBufferBytes=\(self.pcmBuffer.count)")
+            doushaLog("[DoubaoASR] StartTask + StartSession both succeeded; pcmBufferBytes=\(self.pcmBuffer.count)")
 
             // Now drain whatever audio accumulated during WS setup.
             self.canSendAudio = true
             try await flushPendingFrames()
         } catch {
-            NSLog("[DoubaoASR] start() failed: \(error.localizedDescription)")
+            doushaLog("[DoubaoASR] start() failed: \(error.localizedDescription)")
             deliverError(error)
             await closeWebSocket()
             teardownAudio()
@@ -217,7 +217,7 @@ public actor DoubaoASR {
     }
 
     private func _stop() async -> TranscriptionResult {
-        NSLog("[DoubaoASR] stop() isRunning=\(isRunning)")
+        doushaLog("[DoubaoASR] stop() isRunning=\(isRunning)")
         guard isRunning else {
             return TranscriptionResult(
                 text: assembledText(),
@@ -231,12 +231,15 @@ public actor DoubaoASR {
 
         teardownAudio()
 
-        // Pad ~1s of silence into both the WAV and the outbound PCM buffer.
+        // Pad ~2s of silence into both the WAV and the outbound PCM buffer.
         // Doubao's streaming ASR needs trailing silence for its VAD to finalize
         // the last utterance — without this, releasing the hotkey right at the
-        // end of a word loses the final 1-2 chars. The WAV also gets the padding
-        // so a future retranscribe of this recording can recover the same way.
-        let padSamples = DoubaoConstants.sampleRate          // 1 second = sampleRate samples
+        // end of a word loses the final 1-2 chars. 1s was insufficient in
+        // real-world testing (user had to deliberately wait 1-2s of silence
+        // before releasing or last char was eaten). 2s is the empirically-derived
+        // value that matches Doubao's VAD threshold. The WAV also gets the
+        // padding so a future retranscribe can recover the same way.
+        let padSamples = DoubaoConstants.sampleRate * 2       // 2 seconds
         let padBytes = padSamples * MemoryLayout<Int16>.size
         self.pcmBuffer.append(Data(count: padBytes))
         self.totalPcmBytesOut += padBytes
@@ -255,25 +258,26 @@ public actor DoubaoASR {
             self.wavWriter = nil
         }
 
-        // Drain ALL pending frames (including the silence padding we just added),
-        // then send the last partial. With 1s of padding = 50 full frames, the
-        // flushPendingFrames call is load-bearing — flushAndSendLastFrame alone
-        // would only handle the very last partial frame.
+        // Drain ALL pending frames (including the 2s silence padding we just
+        // added = 100 full frames at 320 samples/frame). flushPendingFrames is
+        // load-bearing here — flushAndSendLastFrame alone would only handle the
+        // very last partial frame.
         do {
             try await flushPendingFrames()
             try await flushAndSendLastFrame()
             try await sendFinishSession()
         } catch {
-            NSLog("[DoubaoASR] stop send error: \(error.localizedDescription)")
+            doushaLog("[DoubaoASR] stop send error: \(error.localizedDescription)")
         }
 
         // Wait for SessionFinished. Doubao streaming ASR has ~1.5-2s first-response
-        // latency, so for short utterances the server may not have produced any text
-        // by the time the user releases. Give it 2.5s after FinishSession to flush.
+        // latency, and long fast recordings can have several seconds of backlog
+        // to flush after the server sees FinishSession. 4s is wide enough to
+        // cover both short utterances and long-recording backlog drainage.
         let waitStart = Date()
         let outcomeStr: String
         if let channel = finishedChannel {
-            switch await waitWithTimeout(channel: channel, timeout: 2.5) {
+            switch await waitWithTimeout(channel: channel, timeout: 4.0) {
             case .signaled: outcomeStr = "signaled"
             case .timeout: outcomeStr = "timedOut"
             case .cancelled: outcomeStr = "cancelled"
@@ -282,13 +286,13 @@ public actor DoubaoASR {
         } else {
             outcomeStr = "no-channel"
         }
-        NSLog("[DoubaoASR] post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
+        doushaLog("[DoubaoASR] post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
 
         // Close the WebSocket after every session — see class doc.
         await closeWebSocket()
 
         let final = assembledText()
-        NSLog("[DoubaoASR] stop() final='\(final)' segments=\(committedSegments.count)")
+        doushaLog("[DoubaoASR] stop() final='\(final)' segments=\(committedSegments.count)")
 
         let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
@@ -331,7 +335,7 @@ public actor DoubaoASR {
         ws.cancel(with: .normalClosure, reason: nil)
 
         if case .timeout = await waitWithTimeout(channel: channel, timeout: 1.0) {
-            NSLog("[DoubaoASR] WS close handshake timed out — tearing down anyway")
+            doushaLog("[DoubaoASR] WS close handshake timed out — tearing down anyway")
         }
         wsClosedChannel = nil
 
@@ -371,14 +375,14 @@ public actor DoubaoASR {
             let resp = try await waitForResponse(timeout: 5.0) {
                 $0.messageType == "TaskStarted" || $0.messageType == "TaskFailed" || $0.messageType == "SessionFailed"
             }
-            NSLog("[DoubaoASR] StartTask resp messageType=\(resp.messageType) code=\(resp.statusCode) msg=\(resp.statusMessage)")
+            doushaLog("[DoubaoASR] StartTask resp messageType=\(resp.messageType) code=\(resp.statusCode) msg=\(resp.statusMessage)")
             if resp.messageType != "TaskStarted" {
                 throw NSError(domain: "DoubaoASR", code: Int(resp.statusCode),
                               userInfo: [NSLocalizedDescriptionKey: "StartTask: \(resp.statusMessage.isEmpty ? "failed" : resp.statusMessage) (\(resp.statusCode))"])
             }
             taskStarted = true
         } else {
-            NSLog("[DoubaoASR] reusing task on existing WebSocket — skipping StartTask")
+            doushaLog("[DoubaoASR] reusing task on existing WebSocket — skipping StartTask")
         }
 
         let configJSON = sessionConfigJSON(deviceId: deviceId)
@@ -386,7 +390,7 @@ public actor DoubaoASR {
         let resp2 = try await waitForResponse(timeout: 5.0) {
             $0.messageType == "SessionStarted" || $0.messageType == "TaskFailed" || $0.messageType == "SessionFailed"
         }
-        NSLog("[DoubaoASR] StartSession resp messageType=\(resp2.messageType) code=\(resp2.statusCode) msg=\(resp2.statusMessage)")
+        doushaLog("[DoubaoASR] StartSession resp messageType=\(resp2.messageType) code=\(resp2.statusCode) msg=\(resp2.statusMessage)")
         if resp2.messageType != "SessionStarted" {
             throw NSError(domain: "DoubaoASR", code: Int(resp2.statusCode),
                           userInfo: [NSLocalizedDescriptionKey: "StartSession: \(resp2.statusMessage.isEmpty ? "failed" : resp2.statusMessage) (\(resp2.statusCode))"])
@@ -468,7 +472,7 @@ public actor DoubaoASR {
                 startReceiveLoop()
             }
         case .failure(let err):
-            NSLog("[DoubaoASR] receive failed: \(err.localizedDescription)")
+            doushaLog("[DoubaoASR] receive failed: \(err.localizedDescription)")
             // Wake any closeWebSocket() awaiting the close handshake.
             wsClosedChannel?.finish(())
             if isRunning {
@@ -489,15 +493,15 @@ public actor DoubaoASR {
     private func handleResponseData(_ data: Data) {
         self.lastResponseAt = Date()
         guard let resp = try? AsrResponse.decode(data) else {
-            NSLog("[DoubaoASR] recv: decode failed (\(data.count) bytes)")
+            doushaLog("[DoubaoASR] recv: decode failed (\(data.count) bytes)")
             return
         }
-        NSLog("[DoubaoASR] recv requestId=\(resp.requestId) messageType=\(resp.messageType) code=\(resp.statusCode) jsonLen=\(resp.resultJson.count)")
+        doushaLog("[DoubaoASR] recv requestId=\(resp.requestId) messageType=\(resp.messageType) code=\(resp.statusCode) jsonLen=\(resp.resultJson.count)")
 
         // Drop responses for prior (closed) sessions on this reused WebSocket. Server
         // echoes our request_id; if it doesn't match the current session, it's stale.
         if !resp.requestId.isEmpty && !self.requestId.isEmpty && resp.requestId != self.requestId {
-            NSLog("[DoubaoASR] dropping stale (current=\(self.requestId))")
+            doushaLog("[DoubaoASR] dropping stale (current=\(self.requestId))")
             return
         }
 
@@ -512,11 +516,11 @@ public actor DoubaoASR {
 
         switch resp.messageType {
         case "SessionFinished":
-            NSLog("[DoubaoASR] SessionFinished code=\(resp.statusCode)")
+            doushaLog("[DoubaoASR] SessionFinished code=\(resp.statusCode)")
             signalFinished()
             return
         case "TaskFailed", "SessionFailed":
-            NSLog("[DoubaoASR] \(resp.messageType) statusCode=\(resp.statusCode) statusMessage=\(resp.statusMessage) resultJson=\(resp.resultJson)")
+            doushaLog("[DoubaoASR] \(resp.messageType) statusCode=\(resp.statusCode) statusMessage=\(resp.statusMessage) resultJson=\(resp.resultJson)")
             let msg = resp.statusMessage.isEmpty ? "ASR failed (\(resp.statusCode))" : "\(resp.statusMessage) (\(resp.statusCode))"
             deliverError(NSError(domain: "DoubaoASR", code: Int(resp.statusCode),
                                   userInfo: [NSLocalizedDescriptionKey: msg]))
@@ -558,7 +562,7 @@ public actor DoubaoASR {
             if (!isInterim && vadFinished) || nonstreamResult {
                 committedSegments.append(text)
                 currentInterim = ""
-                NSLog("[DoubaoASR] segment final='\(text)' totalSegments=\(committedSegments.count)")
+                doushaLog("[DoubaoASR] segment final='\(text)' totalSegments=\(committedSegments.count)")
             } else {
                 currentInterim = text
             }
@@ -628,7 +632,7 @@ public actor DoubaoASR {
                 return buffer
             }
             if let e = convError {
-                NSLog("[DoubaoASR] mic convert error: \(e)")
+                doushaLog("[DoubaoASR] mic convert error: \(e)")
                 return
             }
             let n = Int(outBuf.frameLength)
@@ -667,12 +671,12 @@ public actor DoubaoASR {
                 let state: FrameState = didSendFirstFrame ? .middle : .first
                 try await encodeAndSend(Data(frame), state: state)
                 if !didSendFirstFrame {
-                    NSLog("[DoubaoASR] sent FIRST frame")
+                    doushaLog("[DoubaoASR] sent FIRST frame")
                 }
                 didSendFirstFrame = true
                 framesSentCount += 1
             } catch {
-                NSLog("[DoubaoASR] encodeAndSend error: \(error.localizedDescription)")
+                doushaLog("[DoubaoASR] encodeAndSend error: \(error.localizedDescription)")
                 deliverError(error)
                 return
             }
@@ -680,14 +684,14 @@ public actor DoubaoASR {
     }
 
     private func flushAndSendLastFrame() async throws {
-        NSLog("[DoubaoASR] flushAndSendLastFrame framesSent=\(framesSentCount) pcmBufferRemaining=\(pcmBuffer.count) didSendFirst=\(didSendFirstFrame) totalPcmBytesOut=\(totalPcmBytesOut)")
+        doushaLog("[DoubaoASR] flushAndSendLastFrame framesSent=\(framesSentCount) pcmBufferRemaining=\(pcmBuffer.count) didSendFirst=\(didSendFirstFrame) totalPcmBytesOut=\(totalPcmBytesOut)")
         let frameSize = DoubaoConstants.bytesPerFrame
         if pcmBuffer.isEmpty {
             // Still need a LAST marker if any frames were sent.
             if didSendFirstFrame {
                 let silent = Data(count: frameSize)
                 try await encodeAndSend(silent, state: .last)
-                NSLog("[DoubaoASR] sent LAST silent")
+                doushaLog("[DoubaoASR] sent LAST silent")
             }
             return
         }
@@ -698,7 +702,7 @@ public actor DoubaoASR {
         let frame = Data(pcmBuffer.prefix(frameSize))
         pcmBuffer.removeAll()
         try await encodeAndSend(frame, state: .last)
-        NSLog("[DoubaoASR] sent LAST frame")
+        doushaLog("[DoubaoASR] sent LAST frame")
     }
 
     private func encodeAndSend(_ pcmFrame: Data, state: FrameState) async throws {
@@ -729,11 +733,11 @@ public actor DoubaoASR {
     ///
     /// On any error, returns whatever partial text was assembled (possibly empty).
     public func retranscribe(wavURL: URL) async -> String {
-        NSLog("[DoubaoASR] retranscribe(\(wavURL.lastPathComponent)) starting")
+        doushaLog("[DoubaoASR] retranscribe(\(wavURL.lastPathComponent)) starting")
 
         // Don't let a retranscribe stomp on a live recording session.
         guard !isRunning else {
-            NSLog("[DoubaoASR] retranscribe rejected — session already running")
+            doushaLog("[DoubaoASR] retranscribe rejected — session already running")
             return ""
         }
 
@@ -792,13 +796,13 @@ public actor DoubaoASR {
                 _ = await waitWithTimeout(channel: channel, timeout: 5.0)
             }
         } catch {
-            NSLog("[DoubaoASR] retranscribe error: \(error.localizedDescription)")
+            doushaLog("[DoubaoASR] retranscribe error: \(error.localizedDescription)")
         }
 
         await closeWebSocket()
 
         let final = assembledText()
-        NSLog("[DoubaoASR] retranscribe done text.len=\(final.count)")
+        doushaLog("[DoubaoASR] retranscribe done text.len=\(final.count)")
         return final
     }
 

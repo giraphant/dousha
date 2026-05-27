@@ -1,5 +1,6 @@
 import Cocoa
 import CoreGraphics
+import TalkerCommonSync
 
 /// Pure mode-aware dispatcher — extracted so it's testable without a real CGEvent tap.
 final class HotkeyEventDispatcher {

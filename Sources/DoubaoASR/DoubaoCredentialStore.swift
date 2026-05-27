@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Security
+import TalkerCommonSync
 
 struct DeviceCredentials: Codable {
     var deviceId: String
@@ -169,7 +170,7 @@ public actor DoubaoCredentialStore {
         } else {
             throw DoubaoError.registrationFailed("missing or zero device_id in response: \(json)")
         }
-        NSLog("[DoubaoASR] registered device_id=\(deviceId)")
+        doushaLog("[DoubaoASR] registered device_id=\(deviceId)")
         let installId: String
         if let s = json["install_id_str"] as? String, !s.isEmpty {
             installId = s

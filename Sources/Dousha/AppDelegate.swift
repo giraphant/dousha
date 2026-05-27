@@ -4,6 +4,7 @@ import Speech
 import AVFoundation
 import ApplicationServices
 import DoubaoASR
+import TalkerCommonSync
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!

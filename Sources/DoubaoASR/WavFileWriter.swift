@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import TalkerCommonSync
 
 /// Streams mono int16 PCM samples to a WAV file on disk. Uses AVAudioFile under
 /// the hood so we don't have to hand-write the RIFF header / fix up chunk sizes.
@@ -67,7 +68,7 @@ final class WavFileWriter {
             guard let self = self, !self.stopped else { return }
             guard let buffer = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(snapshot.count)) else {
                 self.stopped = true
-                NSLog("[WavFileWriter] PCM buffer alloc failed — stopping writes")
+                doushaLog("[WavFileWriter] PCM buffer alloc failed — stopping writes")
                 return
             }
             buffer.frameLength = AVAudioFrameCount(snapshot.count)
@@ -81,7 +82,7 @@ final class WavFileWriter {
                 try file.write(from: buffer)
             } catch {
                 self.stopped = true
-                NSLog("[WavFileWriter] write failed: \(error.localizedDescription) — stopping writes")
+                doushaLog("[WavFileWriter] write failed: \(error.localizedDescription) — stopping writes")
             }
         }
     }

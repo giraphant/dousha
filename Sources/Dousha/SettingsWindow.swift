@@ -1,6 +1,7 @@
 import Cocoa
 import CoreGraphics
 import SwiftUI
+import TalkerCommonSync
 
 enum SettingsWindowFactory {
     static func create(llmRefiner: LLMRefiner) -> NSWindow {
