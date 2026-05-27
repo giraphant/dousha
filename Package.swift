@@ -36,5 +36,11 @@ let package = Package(
                 .linkedFramework("AVFoundation")
             ]
         )
+        ,
+        .testTarget(
+            name: "DoushaTests",
+            dependencies: ["Dousha"],
+            path: "Tests/DoushaTests"
+        )
     ]
 )
