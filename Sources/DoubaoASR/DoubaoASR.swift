@@ -231,6 +231,22 @@ public actor DoubaoASR {
 
         teardownAudio()
 
+        // Pad ~1s of silence into both the WAV and the outbound PCM buffer.
+        // Doubao's streaming ASR needs trailing silence for its VAD to finalize
+        // the last utterance — without this, releasing the hotkey right at the
+        // end of a word loses the final 1-2 chars. The WAV also gets the padding
+        // so a future retranscribe of this recording can recover the same way.
+        let padSamples = DoubaoConstants.sampleRate          // 1 second = sampleRate samples
+        let padBytes = padSamples * MemoryLayout<Int16>.size
+        self.pcmBuffer.append(Data(count: padBytes))
+        self.totalPcmBytesOut += padBytes
+        if let writer = self.wavWriter {
+            let zeros = [Int16](repeating: 0, count: padSamples)
+            zeros.withUnsafeBufferPointer { buf in
+                writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+            }
+        }
+
         if let writer = self.wavWriter {
             // close() blocks until all queued writes have flushed — this is what
             // makes it safe for the retranscribe path to read the file immediately
@@ -239,8 +255,12 @@ public actor DoubaoASR {
             self.wavWriter = nil
         }
 
-        // Drain remaining PCM as a final frame, then FinishSession.
+        // Drain ALL pending frames (including the silence padding we just added),
+        // then send the last partial. With 1s of padding = 50 full frames, the
+        // flushPendingFrames call is load-bearing — flushAndSendLastFrame alone
+        // would only handle the very last partial frame.
         do {
+            try await flushPendingFrames()
             try await flushAndSendLastFrame()
             try await sendFinishSession()
         } catch {
