@@ -354,18 +354,18 @@ public actor DoubaoASR {
         let savedURL: URL? = FileManager.default.fileExists(atPath: Self.savedAudioURL.path) ? Self.savedAudioURL : nil
 
         let maxSegmentGap: TimeInterval? = {
-            guard let start = audioStartedAt else { return nil }
-            guard !segmentCommittedAt.isEmpty else {
-                // No segments committed — degenerate case, return nil so the
-                // detector's other signals (char rate, lastTranscriptAge) drive the call.
-                return nil
-            }
-            var prev = start
+            // Only meaningful with 2+ commits — the lead gap from audioStartedAt
+            // to the first commit is NOT a reliable signal (a user who talks
+            // continuously without pausing has a "lead gap" equal to the entire
+            // recording duration, but nothing was dropped). What IS a real signal
+            // is silence between two committed segments: Doubao normally commits
+            // every few seconds when VAD finalizes, so a >10s gap between two
+            // commits means something happened mid-recording.
+            guard segmentCommittedAt.count >= 2 else { return nil }
             var maxGap: TimeInterval = 0
-            for commitAt in segmentCommittedAt {
-                let gap = commitAt.timeIntervalSince(prev)
+            for i in 1..<segmentCommittedAt.count {
+                let gap = segmentCommittedAt[i].timeIntervalSince(segmentCommittedAt[i-1])
                 if gap > maxGap { maxGap = gap }
-                prev = commitAt
             }
             return maxGap
         }()
