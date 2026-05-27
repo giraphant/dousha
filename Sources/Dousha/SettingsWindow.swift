@@ -202,7 +202,7 @@ final class HotkeyRecorder {
             callback: callback,
             userInfo: userInfo
         ) else {
-            NSLog("[Dousha] HotkeyRecorder: failed to create event tap")
+            doushaLog("[Dousha] HotkeyRecorder: failed to create event tap")
             return
         }
         eventTap = tap
