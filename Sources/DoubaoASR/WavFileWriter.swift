@@ -30,6 +30,7 @@ final class WavFileWriter {
     private let format: AVAudioFormat
     private let queue: DispatchQueue
     private var stopped = false   // touched only on `queue`
+    private let url: URL
 
     init(url: URL, sampleRate: Int, channels: Int) throws {
         precondition(channels == 1, "WavFileWriter currently only supports mono — the int16 copy path assumes a single channel.")
@@ -40,6 +41,7 @@ final class WavFileWriter {
             interleaved: true
         ) else { throw Error.formatBuildFailed }
         self.format = fmt
+        self.url = url
         self.queue = DispatchQueue(label: "com.dousha.wavwriter.\(url.lastPathComponent)", qos: .utility)
 
         // settings dict tells AVAudioFile to write a WAV container (default
@@ -88,15 +90,67 @@ final class WavFileWriter {
     }
 
     /// Barrier: waits for all queued writes to complete, then marks the writer
-    /// stopped and releases the underlying `AVAudioFile`. AVAudioFile finalises
-    /// the WAV header (patches the RIFF/data chunk sizes) on deinit, so we
-    /// must drop our strong reference before returning — otherwise a caller
-    /// that immediately reopens the file via `AVAudioFile(forReading:)` will
-    /// see a zero-length data chunk.
+    /// stopped and releases the underlying `AVAudioFile`. After nil-ing the
+    /// AVAudioFile reference we also manually patch the WAV header via
+    /// FileHandle because AVAudioFile's deinit (which normally fixes up the
+    /// RIFF/data chunk sizes) does not always fire synchronously — empirically
+    /// the data chunk size can be left at 0 even though the PCM bytes are
+    /// physically on disk, causing AVAudioFile(forReading:) to return an empty
+    /// buffer and silently breaking the retranscribe path.
     func close() throws {
         queue.sync {
             self.stopped = true
             self.file = nil
+        }
+        patchWavHeaderSizes(at: url)
+    }
+
+    /// Manually walks the WAV chunk list and rewrites both the RIFF size field
+    /// and the data chunk size field to match the actual file length.
+    ///
+    /// This is necessary because AVAudioFile may insert JUNK/FLLR alignment
+    /// padding chunks before the data chunk, so the data chunk's position is
+    /// NOT fixed — it can appear at offset 36, 4088, or wherever AVFoundation
+    /// decides. We therefore scan from offset 12 (past the RIFF header) until
+    /// we find the chunk with id "data", then overwrite its size field.
+    private func patchWavHeaderSizes(at url: URL) {
+        guard let handle = try? FileHandle(forUpdating: url) else {
+            doushaLog("[WavFileWriter] header patch: couldn't open file for update")
+            return
+        }
+        defer { try? handle.close() }
+
+        do {
+            let fileSize = try handle.seekToEnd()
+            guard fileSize >= 44 else { return }   // way too small to be a valid WAV
+
+            // Patch RIFF size (defensive; AVFoundation usually gets this right)
+            let riffSize = UInt32(fileSize - 8).littleEndian
+            try handle.seek(toOffset: 4)
+            try handle.write(contentsOf: withUnsafeBytes(of: riffSize) { Data($0) })
+
+            // Scan chunks from offset 12 looking for 'data'
+            var pos: UInt64 = 12
+            while pos + 8 <= fileSize {
+                try handle.seek(toOffset: pos)
+                let header = try handle.read(upToCount: 8) ?? Data()
+                guard header.count == 8 else { break }
+                let chunkId = header[0..<4]
+                let chunkSize = header.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+
+                if chunkId.elementsEqual("data".utf8) {
+                    let dataPayloadSize = UInt32(fileSize - pos - 8).littleEndian
+                    try handle.seek(toOffset: pos + 4)
+                    try handle.write(contentsOf: withUnsafeBytes(of: dataPayloadSize) { Data($0) })
+                    return
+                }
+                // Advance past this chunk's payload. Chunk sizes are padded to 2-byte alignment.
+                let advance = UInt64(chunkSize) + (UInt64(chunkSize) & 1)
+                pos += 8 + advance
+            }
+            doushaLog("[WavFileWriter] header patch: no 'data' chunk found in \(fileSize)-byte file")
+        } catch {
+            doushaLog("[WavFileWriter] header patch failed: \(error.localizedDescription)")
         }
     }
 }

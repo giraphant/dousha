@@ -94,4 +94,42 @@ final class WavFileWriterTests: XCTestCase {
         let f = try AVAudioFile(forReading: tmpURL)
         XCTAssertEqual(f.length, 320, "Post-close appends must not change file length")
     }
+
+    /// Verifies that close() correctly patches the data chunk size regardless
+    /// of AVAudioFile deinit timing. AVFoundation may insert JUNK/FLLR padding
+    /// chunks before the data chunk, so we walk the chunk list to find it and
+    /// confirm its size field equals the actual PCM payload on disk.
+    func testClose_patchesDataChunkSize() throws {
+        let writer = try WavFileWriter(url: tmpURL, sampleRate: 16_000, channels: 1)
+        let samples = [Int16](repeating: 0, count: 1_000)
+        samples.withUnsafeBufferPointer { buf in
+            writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+        }
+        try writer.close()
+
+        // Open the file with FileHandle, walk chunks, verify data size is correct
+        let handle = try FileHandle(forReadingFrom: tmpURL)
+        defer { try? handle.close() }
+        let fileSize = try handle.seekToEnd()
+        var pos: UInt64 = 12
+        var dataChunkSize: UInt32 = 0
+        var dataChunkOffset: UInt64 = 0
+        while pos + 8 <= fileSize {
+            try handle.seek(toOffset: pos)
+            let header = try handle.read(upToCount: 8) ?? Data()
+            guard header.count == 8 else { break }
+            let id = header[0..<4]
+            let size = header.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            if id.elementsEqual("data".utf8) {
+                dataChunkSize = size
+                dataChunkOffset = pos
+                break
+            }
+            let advance = UInt64(size) + (UInt64(size) & 1)
+            pos += 8 + advance
+        }
+        XCTAssertGreaterThan(dataChunkOffset, 0, "data chunk not found")
+        let expectedSize = UInt32(fileSize - dataChunkOffset - 8)
+        XCTAssertEqual(dataChunkSize, expectedSize, "data chunk size should equal actual payload size")
+    }
 }
