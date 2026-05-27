@@ -146,6 +146,26 @@ final class WavFileWriterTests: XCTestCase {
         let f = try AVAudioFile(forReading: tmpURL)
         XCTAssertEqual(f.length, 8_000)
     }
+
+    /// The writer dispatches each append onto its own serial background queue
+    /// so the audio thread is never blocked. close() must barrier-wait until
+    /// all queued writes have landed before returning — otherwise calling
+    /// AVAudioFile(forReading:) right after close() can race and observe a
+    /// short file.
+    func testClose_barriersUntilAllPendingWritesLand() throws {
+        let writer = try WavFileWriter(url: tmpURL, sampleRate: 16_000, channels: 1)
+        // Fire 50 appends back-to-back (typical real audio cadence is ~80 of
+        // these per second), then close immediately.
+        for _ in 0..<50 {
+            let samples = [Int16](repeating: 1, count: 320) // 20ms each
+            try samples.withUnsafeBufferPointer { buf in
+                try writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+            }
+        }
+        try writer.close()
+        let f = try AVAudioFile(forReading: tmpURL)
+        XCTAssertEqual(f.length, 50 * 320)
+    }
 }
 ```
 
@@ -165,8 +185,16 @@ import AVFoundation
 /// Streams int16 PCM samples to a WAV file on disk. Uses AVAudioFile under the
 /// hood so we don't have to hand-write the RIFF header / fix up chunk sizes.
 ///
-/// Not thread-safe — caller must serialise append/close. In DoubaoASR all PCM
-/// production runs on the AVAudioEngine input tap, which is single-threaded.
+/// **Threading contract:** `append` is safe to call from any thread (including
+/// AVAudioEngine's real-time mic tap callback) — it snapshots the samples and
+/// dispatches the actual disk write onto an internal serial background queue
+/// so the audio thread never blocks on I/O. `close()` is a barrier: it waits
+/// for all enqueued writes to land before returning, so the caller can read
+/// the file back immediately afterward (the retranscribe path relies on this).
+///
+/// On any background write failure, the writer flips into a stopped state and
+/// silently swallows subsequent appends — failing per-frame writes would just
+/// spam logs, and the caller can detect partial output by checking file size.
 final class WavFileWriter {
     enum Error: Swift.Error {
         case formatBuildFailed
@@ -175,7 +203,8 @@ final class WavFileWriter {
 
     private let file: AVAudioFile
     private let format: AVAudioFormat
-    private var isOpen = true
+    private let queue: DispatchQueue
+    private var stopped = false   // touched only on `queue`
 
     init(url: URL, sampleRate: Int, channels: Int) throws {
         guard let fmt = AVAudioFormat(
@@ -185,6 +214,7 @@ final class WavFileWriter {
             interleaved: true
         ) else { throw Error.formatBuildFailed }
         self.format = fmt
+        self.queue = DispatchQueue(label: "com.dousha.wavwriter", qos: .utility)
 
         // settings dict tells AVAudioFile to write a WAV container (default
         // for .wav extension); pass the int16 format explicitly so it doesn't
@@ -198,26 +228,42 @@ final class WavFileWriter {
     }
 
     /// Append `count` int16 samples (mono — count == frame count for 1 channel).
+    /// Returns immediately after snapshotting the bytes; the write happens on
+    /// the writer's internal serial queue.
     func append(int16Samples ptr: UnsafePointer<Int16>, count: Int) throws {
-        guard isOpen else { return }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)) else {
-            throw Error.bufferAllocFailed
+        // Snapshot synchronously so the caller's buffer can be reused/freed.
+        let snapshot = Array(UnsafeBufferPointer(start: ptr, count: count))
+        let fmt = self.format
+        queue.async { [weak self] in
+            guard let self = self, !self.stopped else { return }
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(snapshot.count)) else {
+                self.stopped = true
+                NSLog("[WavFileWriter] PCM buffer alloc failed — stopping writes")
+                return
+            }
+            buffer.frameLength = AVAudioFrameCount(snapshot.count)
+            if let dst = buffer.int16ChannelData?[0] {
+                snapshot.withUnsafeBufferPointer { src in
+                    dst.update(from: src.baseAddress!, count: snapshot.count)
+                }
+            }
+            do {
+                try self.file.write(from: buffer)
+            } catch {
+                self.stopped = true
+                NSLog("[WavFileWriter] write failed: \(error.localizedDescription) — stopping writes")
+            }
         }
-        buffer.frameLength = AVAudioFrameCount(count)
-        if let dst = buffer.int16ChannelData?[0] {
-            dst.update(from: ptr, count: count)
-        }
-        try file.write(from: buffer)
     }
 
-    /// AVAudioFile finalises the WAV header in its deinit, but we expose an
-    /// explicit close so callers can force the flush before reading the file
-    /// back from the same session (e.g., retranscribe path).
+    /// Barrier: waits for all queued writes to complete, then marks the writer
+    /// stopped. After close() returns the file on disk is fully flushed
+    /// (AVAudioFile finalises the WAV header on deinit; releasing the last
+    /// strong reference to this writer triggers that).
     func close() throws {
-        isOpen = false
-        // AVAudioFile has no public close() — dropping the reference triggers
-        // the writer's deinit which flushes. The caller's `let writer = nil`
-        // assignment after close() does that work.
+        queue.sync {
+            self.stopped = true
+        }
     }
 }
 ```
@@ -225,7 +271,7 @@ final class WavFileWriter {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `swift test --filter WavFileWriterTests 2>&1 | tail -10`
-Expected: PASS (both test methods)
+Expected: PASS (all three test methods, including `testClose_barriersUntilAllPendingWritesLand`)
 
 - [ ] **Step 5: Commit**
 
@@ -250,24 +296,40 @@ import Foundation
 /// text plus the timing diagnostics the caller needs to decide whether the
 /// stream was probably truncated mid-recording (WebSocket drop, server error).
 ///
-/// `lastResponseAge` is the gap between the user releasing the hotkey and the
-/// last byte received from the server. A large gap is a strong signal that the
-/// WS dropped some time ago and the tail of the recording never got served.
+/// We track **two** server-side timestamps and they mean different things:
 ///
-/// `audioDuration` and `text.count` together drive the secondary heuristic
-/// (typing-speed floor).
+/// - `lastResponseAge`: age of the most recent byte from the server, including
+///   heartbeats / keepalives. Mostly useful for debugging "is the WS alive at
+///   all" — NOT used by the incomplete-detection heuristic, because a server
+///   that's still pinging us but not transcribing would mask a real drop.
+///
+/// - `lastTranscriptAge`: age of the most recent message that actually carried
+///   non-empty transcript content. THIS is the staleness signal the detector
+///   uses: a large gap means the server stopped producing text well before
+///   the user released the hotkey.
+///
+/// `audioDuration` and `text.count` together drive the secondary char/sec
+/// heuristic.
 public struct TranscriptionResult: Sendable {
     public let text: String
     public let audioDuration: TimeInterval
     public let lastResponseAge: TimeInterval?
+    public let lastTranscriptAge: TimeInterval?
     /// Path to the WAV that captured this session's mic input, or nil if the
     /// backend doesn't support WAV capture (e.g., Apple backend).
     public let savedAudioURL: URL?
 
-    public init(text: String, audioDuration: TimeInterval, lastResponseAge: TimeInterval?, savedAudioURL: URL?) {
+    public init(
+        text: String,
+        audioDuration: TimeInterval,
+        lastResponseAge: TimeInterval?,
+        lastTranscriptAge: TimeInterval?,
+        savedAudioURL: URL?
+    ) {
         self.text = text
         self.audioDuration = audioDuration
         self.lastResponseAge = lastResponseAge
+        self.lastTranscriptAge = lastTranscriptAge
         self.savedAudioURL = savedAudioURL
     }
 }
@@ -300,9 +362,23 @@ Find the `private` property block near the top of the `DoubaoASR` actor (around 
 
 ```swift
 // WAV side-recording for fallback re-transcription on WS drops.
+// The writer is held as a const-after-init local in startMicTap so the audio
+// tap closure (which is non-isolated and runs on the audio thread) can call
+// .append() directly without hopping into the actor. The actor's reference
+// is just for close() during _stop().
 private var wavWriter: WavFileWriter?
 private(set) var audioStartedAt: Date?
+
+/// Any byte from the server (heartbeats included). For debugging "is the WS
+/// alive at all" — NOT the heuristic's staleness signal (heartbeats would mask
+/// real drops). See `lastTranscriptAt` for that.
 private(set) var lastResponseAt: Date?
+
+/// Wall-clock of the last server message that carried non-empty transcript
+/// content (`results[].text` non-empty). This is what the incomplete-detector
+/// looks at to decide "did the server stop producing text long before the
+/// user released?".
+private(set) var lastTranscriptAt: Date?
 
 /// Path where the rolling per-session WAV gets written.
 static var savedAudioURL: URL {
@@ -342,53 +418,51 @@ In the same `start(...)` method, locate the existing block that resets per-sessi
 ```swift
 self.audioStartedAt = nil
 self.lastResponseAt = nil
+self.lastTranscriptAt = nil
 self.wavWriter = nil
 ```
 
 (`audioStartedAt` gets set later in Step 2's block; this just ensures the previous session's value doesn't leak.)
 
-- [ ] **Step 4: Tee PCM into the WAV writer**
+- [ ] **Step 4: Tee PCM into the WAV writer from the audio tap**
 
-Find `startMicTap` and the part where converted int16 PCM is queued for sending — look for where `pcmBuffer.append(...)` is called inside the converter callback or the post-conversion handler. Right before that append, write the same bytes to the WAV writer.
+Find `startMicTap` and locate the converter callback that produces the int16 PCM (the same buffer that gets enqueued for Doubao via `pcmBuffer.append(...)`). The audio tap closure is non-isolated and runs on the audio thread — but `WavFileWriter.append` is now thread-safe and dispatches the actual file write onto its own serial queue. So we can call it **directly** from the tap closure, no actor hop required.
 
-The exact integration point: in the converter callback in `startMicTap`, after converting the input buffer to the int16 target format, you'll have an `AVAudioPCMBuffer` named (per current code) something like `outBuf`. Pull its int16 channel data and dispatch a `Task { await self?.writeToWavFile(...) }` because the audio tap is non-isolated. Add a helper:
+Snapshot the writer reference for the tap closure alongside the existing `capturedConverter` / `audioLevelCallback` snapshots (so the closure doesn't reach into actor state):
 
 ```swift
-private func writeToWavFile(samples: [Int16]) {
-    guard let writer = wavWriter else { return }
+let capturedWavWriter = self.wavWriter   // may be nil — that's fine
+```
+
+Then inside the tap closure, right after the int16 conversion produces (per the current code) `outBuf: AVAudioPCMBuffer`, tee the samples to the writer:
+
+```swift
+if let writer = capturedWavWriter, let i16 = outBuf.int16ChannelData?[0] {
     do {
-        try samples.withUnsafeBufferPointer { buf in
-            try writer.append(int16Samples: buf.baseAddress!, count: buf.count)
-        }
+        try writer.append(int16Samples: i16, count: Int(outBuf.frameLength))
     } catch {
-        NSLog("[DoubaoASR] WAV write failed: \(error.localizedDescription) — disabling for this session")
-        self.wavWriter = nil
+        NSLog("[DoubaoASR] WAV append rejected: \(error.localizedDescription)")
     }
 }
 ```
 
-And in the tap closure, after conversion succeeds, snapshot the int16 samples into a Swift `[Int16]` array and dispatch:
+That's the entire integration — no helper method on the actor, no `Task { await self... }`. The writer's internal serial queue absorbs the cadence.
 
-```swift
-if let i16 = outBuf.int16ChannelData?[0] {
-    let count = Int(outBuf.frameLength)
-    let snapshot = Array(UnsafeBufferPointer(start: i16, count: count))
-    Task { [weak self] in await self?.writeToWavFile(samples: snapshot) }
-}
-```
-
-- [ ] **Step 5: Close the WAV writer in stop()**
+- [ ] **Step 5: Close the WAV writer in stop() (barrier-wait for drain)**
 
 In `_stop()` (the async actor method called from `stop(completion:)`), after `teardownAudio()` returns, add:
 
 ```swift
 if let writer = self.wavWriter {
+    // close() blocks until all queued writes have flushed — this is what
+    // makes it safe for the retranscribe path to read the file immediately
+    // after stop() returns.
     try? writer.close()
     self.wavWriter = nil
 }
 ```
 
-- [ ] **Step 6: Record `lastResponseAt` on every server message**
+- [ ] **Step 6: Record both `lastResponseAt` and `lastTranscriptAt` on server messages**
 
 In `handleResponseData(_ data: Data)`, at the very top (before the decode), add:
 
@@ -396,7 +470,15 @@ In `handleResponseData(_ data: Data)`, at the very top (before the decode), add:
 self.lastResponseAt = Date()
 ```
 
-(This counts heartbeats and stale-session responses — that's intentional: any byte from the server means the WS is alive. The point is to detect *silence* from the server, not specifically "useful payload".)
+(Counts heartbeats — useful only for debugging "is the connection alive at all".)
+
+Then find the existing block that parses `results[]` and commits a segment / updates `currentInterim` (around the `if !text.isEmpty { ... }` branch). Inside that branch, **after** confirming `!text.isEmpty`, add:
+
+```swift
+self.lastTranscriptAt = Date()
+```
+
+This is the signal the heuristic actually uses. By gating it on non-empty `text`, we defend against the case where Doubao keeps sending keepalive/heartbeat messages on a session whose ASR pipeline has stalled — `lastResponseAt` would look fresh but `lastTranscriptAt` would correctly age.
 
 - [ ] **Step 7: Verify build**
 
@@ -462,12 +544,14 @@ private func _stop() async -> TranscriptionResult {
 
     let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
     let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
+    let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
     let savedURL: URL? = FileManager.default.fileExists(atPath: Self.savedAudioURL.path) ? Self.savedAudioURL : nil
 
     return TranscriptionResult(
         text: final,
         audioDuration: audioDuration,
         lastResponseAge: lastResponseAge,
+        lastTranscriptAge: lastTranscriptAge,
         savedAudioURL: savedURL
     )
 }
@@ -477,7 +561,13 @@ Also update the early-return at the top:
 
 ```swift
 guard isRunning else {
-    return TranscriptionResult(text: assembledText(), audioDuration: 0, lastResponseAge: nil, savedAudioURL: nil)
+    return TranscriptionResult(
+        text: assembledText(),
+        audioDuration: 0,
+        lastResponseAge: nil,
+        lastTranscriptAge: nil,
+        savedAudioURL: nil
+    )
 }
 ```
 
@@ -562,6 +652,7 @@ func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
             text: final,
             audioDuration: 0,
             lastResponseAge: nil,
+            lastTranscriptAge: nil,
             savedAudioURL: nil
         ))
     }
@@ -683,8 +774,16 @@ public func retranscribe(wavURL: URL) async -> String {
 }
 
 /// Read a WAV file and push its int16 PCM through the existing send pipeline
-/// in 20ms frames. Sends as fast as the WebSocket accepts — Doubao buffers
-/// server-side, so realtime pacing isn't required for short clips.
+/// in 20ms frames at ~realtime pace. We pace because Doubao's streaming ASR is
+/// designed around mic-rate input, and feeding 30s of audio in a single burst
+/// risks: (a) the server rejecting/throttling the connection, (b) the server's
+/// VAD/partial-result loop collapsing into one giant utterance that returns
+/// less granular text. Realtime pacing makes the replay indistinguishable from
+/// a live mic session from the server's perspective.
+///
+/// The cost is that retranscribe takes roughly as long as the original
+/// recording. For a 30s drop, that's a 30s wait — acceptable for a fallback
+/// path that only fires on detected failures.
 private func streamWavFile(at url: URL) async throws {
     let file = try AVAudioFile(forReading: url)
     let frameCount = AVAudioFrameCount(file.length)
@@ -721,14 +820,25 @@ private func streamWavFile(at url: URL) async throws {
         outBuf = conv
     }
 
-    // Buffer everything then let the existing flushPendingFrames send 20ms frames.
-    if let i16 = outBuf.int16ChannelData?[0] {
-        let count = Int(outBuf.frameLength)
-        let data = Data(bytes: i16, count: count * MemoryLayout<Int16>.size)
-        self.pcmBuffer.append(data)
-        self.totalPcmBytesOut += data.count
+    // Feed the buffer in ~20ms chunks at realtime pace. We push 320 samples
+    // (20ms @ 16kHz) into pcmBuffer, flush, then sleep 20ms before the next
+    // chunk. This mimics what the live mic tap does.
+    guard let i16 = outBuf.int16ChannelData?[0] else { return }
+    let totalSamples = Int(outBuf.frameLength)
+    let samplesPerFrame = DoubaoConstants.sampleRate / 50  // 20ms @ sampleRate
+    let bytesPerSample = MemoryLayout<Int16>.size
+
+    var sampleIdx = 0
+    while sampleIdx < totalSamples {
+        let chunkSamples = min(samplesPerFrame, totalSamples - sampleIdx)
+        let bytePtr = UnsafeRawPointer(i16 + sampleIdx)
+        let chunkData = Data(bytes: bytePtr, count: chunkSamples * bytesPerSample)
+        self.pcmBuffer.append(chunkData)
+        self.totalPcmBytesOut += chunkData.count
+        try await flushPendingFrames()
+        sampleIdx += chunkSamples
+        try await Task.sleep(nanoseconds: 20_000_000)  // 20ms
     }
-    try await flushPendingFrames()
     try await flushAndSendLastFrame()
 }
 ```
@@ -783,58 +893,85 @@ import DoubaoASR
 final class IncompleteTranscriptDetectorTests: XCTestCase {
     private let det = IncompleteTranscriptDetector()
 
+    private func r(
+        text: String,
+        audioDuration: TimeInterval,
+        lastTranscriptAge: TimeInterval? = nil,
+        lastResponseAge: TimeInterval? = nil
+    ) -> TranscriptionResult {
+        TranscriptionResult(
+            text: text,
+            audioDuration: audioDuration,
+            lastResponseAge: lastResponseAge,
+            lastTranscriptAge: lastTranscriptAge,
+            savedAudioURL: nil
+        )
+    }
+
     // MARK: - Short recordings are exempt
 
     func test_shortRecording_belowMinDuration_neverFlagged() {
-        let r = TranscriptionResult(text: "嗯", audioDuration: 2.0, lastResponseAge: 10.0, savedAudioURL: nil)
-        XCTAssertFalse(det.isLikelyIncomplete(result: r, language: "zh-CN"))
+        let result = r(text: "嗯", audioDuration: 2.0, lastTranscriptAge: 10.0)
+        XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
     }
 
-    // MARK: - Last-response staleness signal
+    // MARK: - Stale-last-transcript signal (the strong WS-drop indicator)
 
-    func test_staleLastResponse_chineseRecording_flagged() {
-        // 30s recording, last response 20s ago → WS clearly dropped early
-        let r = TranscriptionResult(text: "你好世界你好世界你好世界", audioDuration: 30.0, lastResponseAge: 20.0, savedAudioURL: nil)
-        XCTAssertTrue(det.isLikelyIncomplete(result: r, language: "zh-CN"))
+    func test_staleLastTranscript_chineseRecording_flagged() {
+        // 30s recording, but server stopped producing text 20s ago → WS dropped
+        let result = r(text: "你好世界你好世界你好世界", audioDuration: 30.0, lastTranscriptAge: 20.0)
+        XCTAssertTrue(det.isLikelyIncomplete(result: result, language: "zh-CN"))
     }
 
-    func test_freshLastResponse_decentRatio_notFlagged() {
-        // 30s recording, last response 0.5s ago, text length within normal range
-        let r = TranscriptionResult(text: String(repeating: "字", count: 90), audioDuration: 30.0, lastResponseAge: 0.5, savedAudioURL: nil)
-        XCTAssertFalse(det.isLikelyIncomplete(result: r, language: "zh-CN"))
+    func test_freshLastTranscript_decentRatio_notFlagged() {
+        let result = r(text: String(repeating: "字", count: 90), audioDuration: 30.0, lastTranscriptAge: 0.5)
+        XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
+    }
+
+    /// Heartbeat-mask defense: server keeps pinging (lastResponseAge fresh)
+    /// but transcription pipeline has stalled (lastTranscriptAge old). The
+    /// detector must still fire because the transcript signal is stale.
+    func test_freshHeartbeatsButStaleTranscript_flagged() {
+        let result = r(
+            text: "你好世界",
+            audioDuration: 30.0,
+            lastTranscriptAge: 20.0,   // transcript pipeline stalled
+            lastResponseAge: 0.2       // but heartbeats still arriving
+        )
+        XCTAssertTrue(det.isLikelyIncomplete(result: result, language: "zh-CN"))
     }
 
     // MARK: - Char-per-second floor signal
 
     func test_chinese_belowFloor_flagged() {
         // 30s recording, only 10 chars → 0.33 chars/sec, way below 2.0 floor
-        let r = TranscriptionResult(text: String(repeating: "字", count: 10), audioDuration: 30.0, lastResponseAge: 0.5, savedAudioURL: nil)
-        XCTAssertTrue(det.isLikelyIncomplete(result: r, language: "zh-CN"))
+        let result = r(text: String(repeating: "字", count: 10), audioDuration: 30.0, lastTranscriptAge: 0.5)
+        XCTAssertTrue(det.isLikelyIncomplete(result: result, language: "zh-CN"))
     }
 
     func test_english_belowFloor_flagged() {
         // 30s recording, only 50 chars → ~1.7 chars/sec, below 8.0 floor
-        let r = TranscriptionResult(text: String(repeating: "a", count: 50), audioDuration: 30.0, lastResponseAge: 0.5, savedAudioURL: nil)
-        XCTAssertTrue(det.isLikelyIncomplete(result: r, language: "en-US"))
+        let result = r(text: String(repeating: "a", count: 50), audioDuration: 30.0, lastTranscriptAge: 0.5)
+        XCTAssertTrue(det.isLikelyIncomplete(result: result, language: "en-US"))
     }
 
     func test_english_aboveFloor_notFlagged() {
         // 30s recording, 300 chars (~10 chars/sec, normal)
-        let r = TranscriptionResult(text: String(repeating: "a", count: 300), audioDuration: 30.0, lastResponseAge: 0.5, savedAudioURL: nil)
-        XCTAssertFalse(det.isLikelyIncomplete(result: r, language: "en-US"))
+        let result = r(text: String(repeating: "a", count: 300), audioDuration: 30.0, lastTranscriptAge: 0.5)
+        XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "en-US"))
     }
 
     // MARK: - Missing diagnostics
 
-    func test_noLastResponseAge_fallsBackToRatioOnly() {
-        let r = TranscriptionResult(text: String(repeating: "字", count: 90), audioDuration: 30.0, lastResponseAge: nil, savedAudioURL: nil)
-        XCTAssertFalse(det.isLikelyIncomplete(result: r, language: "zh-CN"))
+    func test_noLastTranscriptAge_fallsBackToRatioOnly() {
+        let result = r(text: String(repeating: "字", count: 90), audioDuration: 30.0, lastTranscriptAge: nil)
+        XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
     }
 
     func test_zeroAudioDuration_neverFlagged() {
         // Avoid division by zero / nonsense flags for instant stop().
-        let r = TranscriptionResult(text: "", audioDuration: 0, lastResponseAge: nil, savedAudioURL: nil)
-        XCTAssertFalse(det.isLikelyIncomplete(result: r, language: "zh-CN"))
+        let result = r(text: "", audioDuration: 0, lastTranscriptAge: nil)
+        XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
     }
 }
 ```
@@ -856,9 +993,12 @@ import DoubaoASR
 ///
 /// Two independent signals; OR-combined:
 ///
-/// 1. **Stale last-response**: if the server hasn't sent anything for >3s
-///    before the user released the hotkey, the WebSocket probably dropped
-///    mid-session and the tail of the audio never reached the server.
+/// 1. **Stale last-transcript**: if the server hasn't produced any new
+///    non-empty transcript content for >3s before the user released the
+///    hotkey, the WebSocket / transcription pipeline likely dropped mid-session
+///    and the tail of the audio never got served. We use `lastTranscriptAge`
+///    (not `lastResponseAge`) so the signal isn't masked by heartbeats from a
+///    server whose ASR pipeline has stalled.
 ///
 /// 2. **Char-per-second floor**: normal human speech rates are bounded below.
 ///    If transcript length divided by audio seconds is far below the language's
@@ -871,10 +1011,11 @@ struct IncompleteTranscriptDetector {
     /// noisy (one-word commands, throat-clears, etc.).
     let minAudioDuration: TimeInterval = 5.0
 
-    /// Max acceptable gap between user releasing hotkey and the last server
-    /// response. Doubao normally responds within 1s of audio cessation; >3s
-    /// strongly suggests the WS dropped.
-    let maxLastResponseAge: TimeInterval = 3.0
+    /// Max acceptable gap between user releasing hotkey and the last non-empty
+    /// transcript response. Doubao normally produces text within 1-2s of audio
+    /// cessation; >3s strongly suggests the stream stopped flowing well before
+    /// the hotkey release.
+    let maxLastTranscriptAge: TimeInterval = 3.0
 
     /// Per-language chars-per-second floor. Recordings below this rate get
     /// flagged. Picked conservatively (about 50% of typical conversational
@@ -887,7 +1028,7 @@ struct IncompleteTranscriptDetector {
     func isLikelyIncomplete(result: TranscriptionResult, language: String) -> Bool {
         guard result.audioDuration >= minAudioDuration else { return false }
 
-        if let age = result.lastResponseAge, age > maxLastResponseAge {
+        if let age = result.lastTranscriptAge, age > maxLastTranscriptAge {
             return true
         }
 
@@ -907,7 +1048,7 @@ Note: the floor itself is `2.0` / `8.0`; we compare against `floor * 0.5` so the
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `swift test --filter IncompleteTranscriptDetectorTests 2>&1 | tail -5`
-Expected: PASS (all 7 test methods)
+Expected: PASS (all 9 test methods, including `test_freshHeartbeatsButStaleTranscript_flagged`)
 
 - [ ] **Step 5: Commit**
 
@@ -937,7 +1078,7 @@ Replace the existing `handleStop` body's completion block with:
 
 ```swift
 speech.stop { [weak self] result in
-    doushaLog("[Dousha] AppDelegate: speech.stop completion fired (text.len=\(result.text.count) dur=\(result.audioDuration) lastRespAge=\(result.lastResponseAge ?? -1))")
+    doushaLog("[Dousha] AppDelegate: speech.stop completion fired (text.len=\(result.text.count) dur=\(String(format: "%.1f", result.audioDuration))s lastTranscriptAge=\(result.lastTranscriptAge.map { String(format: "%.1f", $0) } ?? "nil") lastRespAge=\(result.lastResponseAge.map { String(format: "%.1f", $0) } ?? "nil"))")
     DispatchQueue.main.async {
         guard let self = self else { return }
         let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -945,12 +1086,19 @@ speech.stop { [weak self] result in
         // Heuristic: did the stream probably get truncated? If so, hold off
         // injection and re-transcribe from the saved WAV.
         if self.incompleteDetector.isLikelyIncomplete(result: result, language: self.prefs.language) {
-            doushaLog("[Dousha] heuristic flagged incomplete — triggering retranscribe")
+            doushaLog("[Dousha] heuristic flagged incomplete (originalText.len=\(text.count)) — triggering retranscribe")
             // Keep HUD in transcribing state — don't drop to idle while retrying.
             self.speech.retranscribeLastRecording { retried in
                 DispatchQueue.main.async {
-                    let finalText = (retried?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-                        ?? text  // Fall back to the original if retry produced nothing.
+                    let retriedText = (retried?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+                    let finalText: String
+                    if let r = retriedText {
+                        doushaLog("[Dousha] retranscribe succeeded: original.len=\(text.count) retried.len=\(r.count)")
+                        finalText = r
+                    } else {
+                        doushaLog("[Dousha] retranscribe returned empty — falling back to original (len=\(text.count))")
+                        finalText = text
+                    }
                     guard !finalText.isEmpty else {
                         self.status = .idle
                         return
@@ -1158,15 +1306,21 @@ git status
 **Spec coverage:**
 - WAV to `~/Library/Caches/Dousha/` per session — Tasks 2, 4 ✓
 - Heuristic: char/sec floor — Task 8 ✓
-- Heuristic: last-response staleness (added by Claude, not in original spec) — Task 8 ✓
+- Heuristic: stale-last-transcript signal (defends against heartbeat-mask) — Task 8 ✓
 - On detection: don't inject incomplete, re-transcribe automatically — Task 9 ✓
 - Menu item as manual escape hatch — Task 10 ✓
 - No hotkey (per user direction) — confirmed absent ✓
 
+**Codex review amendments incorporated (2026-05-27):**
+- `WavFileWriter` owns a serial background `DispatchQueue` and `close()` is a barrier. Audio tap calls `.append()` directly, no actor hop on the audio thread. Defends against disk-write backpressure stealing from Opus/WS work.
+- `retranscribe` paces at ~20ms per frame via `Task.sleep`, mimicking mic-rate input. Defends against Doubao throttling / VAD collapse on burst replay.
+- `lastResponseAt` (any byte) split from `lastTranscriptAt` (non-empty result only). Heuristic uses `lastTranscriptAt` so server heartbeats can't mask a stalled transcription pipeline.
+- AppDelegate logs `original.len` vs `retried.len` on retry so production diagnostics can distinguish "retry helped" from "retry no-op'd".
+
 **Open risks called out in plan:**
-- Doubao's tolerance for faster-than-realtime audio replay in `retranscribe` is unverified — Task 7 sends "as fast as the WS accepts"; if it errors, Task 7 needs a `Task.sleep(20ms)` between frames.
 - WAV writer is best-effort: if it fails to open, recording continues but retranscribe will report "no saved audio" on the next failure — acceptable.
 - The heuristic only runs for Doubao; Apple backend never triggers retry. Documented in the detector + plan.
+- `SpeechBackend` protocol now imports `DoubaoASR` for `TranscriptionResult`. Acknowledged coupling — small price for not introducing a third shared module for one struct. If a future third backend lands, lift the type into TalkerCommonSync.
 
 **Type consistency:** `TranscriptionResult` defined in Task 3, used identically in Tasks 5/6/8/9. `retranscribeLastRecording` signature matches across protocol (Task 6) and call sites (Tasks 9, 10).
 
