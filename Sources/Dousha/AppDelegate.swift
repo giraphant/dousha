@@ -146,6 +146,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         llmItem.submenu = llmMenu
         menu.addItem(llmItem)
 
+        // Re-transcribe Last Recording — manual escape hatch for incomplete detection misses
+        let retranscribeItem = NSMenuItem(
+            title: "Re-transcribe Last Recording",
+            action: #selector(retranscribeLastRecording),
+            keyEquivalent: ""
+        )
+        retranscribeItem.target = self
+        // Disable when there's no saved WAV yet, when a session is live, or when the
+        // current engine isn't Doubao (Apple backend doesn't save WAVs).
+        let canRetry = FileManager.default.fileExists(atPath: DoubaoASR.savedAudioURL.path)
+            && prefs.engine == .doubao
+            && (status == .idle || isErrorStatus(status))
+        retranscribeItem.isEnabled = canRetry
+        menu.addItem(retranscribeItem)
+
         menu.addItem(.separator())
 
         // Top-level Settings — hosts hotkey + LLM config. ⌘, is the macOS convention.
@@ -205,6 +220,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleLLM() {
         prefs.llmEnabled.toggle()
         rebuildMenu()
+    }
+
+    @objc private func retranscribeLastRecording() {
+        guard status == .idle || isErrorStatus(status) else {
+            doushaLog("[Dousha] retranscribe menu rejected — busy (status=\(status))")
+            return
+        }
+        doushaLog("[Dousha] retranscribe menu fired")
+        status = .transcribing
+        speech.retranscribeLastRecording { [weak self] text in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                    doushaLog("[Dousha] retranscribe returned empty — back to idle")
+                    self.status = .idle
+                    return
+                }
+                self.refineAndInject(text)
+            }
+        }
     }
 
     @objc private func openSettings() {
