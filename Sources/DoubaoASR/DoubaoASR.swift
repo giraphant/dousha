@@ -849,23 +849,20 @@ public actor DoubaoASR {
             outBuf = conv
         }
 
-        // Feed the buffer in ~20ms chunks at realtime pace.
+        // Burst the entire WAV through the existing send pipeline. We previously
+        // paced each 20ms frame with a 20ms sleep "to match mic rate" out of
+        // caution about Doubao throttling, but the resulting ~realtime latency
+        // (30s replay for a 30s recording) was the dominant UX problem when the
+        // heuristic-retry kicks in. Burst-sending should be fine — Doubao's WS
+        // protocol doesn't advertise a rate limit, and any backpressure would
+        // surface as a WS error we can react to. Re-add pacing if that happens.
         guard let i16 = outBuf.int16ChannelData?[0] else { return }
         let totalSamples = Int(outBuf.frameLength)
-        let samplesPerFrame = DoubaoConstants.sampleRate / 50  // 20ms @ sampleRate
-        let bytesPerSample = MemoryLayout<Int16>.size
-
-        var sampleIdx = 0
-        while sampleIdx < totalSamples {
-            let chunkSamples = min(samplesPerFrame, totalSamples - sampleIdx)
-            let bytePtr = UnsafeRawPointer(i16 + sampleIdx)
-            let chunkData = Data(bytes: bytePtr, count: chunkSamples * bytesPerSample)
-            self.pcmBuffer.append(chunkData)
-            self.totalPcmBytesOut += chunkData.count
-            try await flushPendingFrames()
-            sampleIdx += chunkSamples
-            try await Task.sleep(nanoseconds: 20_000_000)  // 20ms
-        }
+        let totalBytes = totalSamples * MemoryLayout<Int16>.size
+        let allData = Data(bytes: UnsafeRawPointer(i16), count: totalBytes)
+        self.pcmBuffer.append(allData)
+        self.totalPcmBytesOut += totalBytes
+        try await flushPendingFrames()
         try await flushAndSendLastFrame()
     }
 
