@@ -717,6 +717,20 @@ public actor DoubaoASR {
             return ""
         }
 
+        // Quarantine the live-session callbacks so a server error during retranscribe
+        // doesn't bleed into AppDelegate's recording-error handler. Restored on exit.
+        let savedOnPartial = self.onPartial
+        let savedOnAudioLevel = self.onAudioLevel
+        let savedOnError = self.onError
+        defer {
+            self.onPartial = savedOnPartial
+            self.onAudioLevel = savedOnAudioLevel
+            self.onError = savedOnError
+        }
+        self.onPartial = { _ in }
+        self.onAudioLevel = { _ in }
+        self.onError = { _ in }
+
         // Reset session state (mirrors what start() does, minus the mic tap).
         self.committedSegments = []
         self.currentInterim = ""
@@ -741,9 +755,12 @@ public actor DoubaoASR {
 
             self.opusEncoder = try OpusEncoder()
 
-            if self.ws == nil {
-                try openWebSocket()
-            }
+            // Always force a fresh WebSocket + task for retranscribe — Doubao binds
+            // tasks to connections, and reusing a half-closed WS would silently skip
+            // StartTask via sendInitialMessages and run on stale task state.
+            await closeWebSocket()
+            self.taskStarted = false
+            try openWebSocket()
             try await sendInitialMessages(deviceId: self.deviceId)
             self.canSendAudio = true
 
