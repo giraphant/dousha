@@ -46,5 +46,6 @@ One-time setup (already done on <redacted> machine, document for fresh clones):
 
 ## Other notes
 
-- Codesign identity `Dousha Local Dev` keeps TCC grants stable across rebuilds of `make install`. If it's missing the Makefile falls back to ad-hoc and the user has to re-grant permissions every install — flag this if you see the ad-hoc fallback message.
+- Single signing identity for everything: `Developer ID Application: <Your Name> (<TEAMID>)`. Both `make install` (local dev) and `make release` (DMG) sign with it. TCC grants persist across both because the csreq is anchored to the team ID, not the cdhash — so a fresh local build and the latest DMG release share Mic / Speech / Accessibility approvals.
+- If the Developer ID cert is missing from the keychain (fresh clone / CI), the Makefile falls back to ad-hoc signing and TCC grants reset on every rebuild. Flag this if you see the ad-hoc fallback message.
 - `make reset-perms` wipes Mic / SpeechRecognition / Accessibility grants for `com.dousha.app`. Don't run it without asking.
