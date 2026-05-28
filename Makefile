@@ -52,7 +52,8 @@ install: build
 dist:
 	@$(MAKE) build \
 		CODESIGN_IDENTITY="$(DEVELOPER_ID_IDENTITY)" \
-		CODESIGN_OPTIONS="--options runtime --timestamp"
+		CODESIGN_OPTIONS="--options runtime --timestamp" \
+		CODESIGN_ENTITLEMENTS="--entitlements Resources/Dousha.entitlements"
 	@rm -rf "$(DIST_DIR)" "$(DMG_STAGING)"
 	@mkdir -p "$(DIST_DIR)" "$(DMG_STAGING)"
 	@cp -R "$(APP_BUNDLE)" "$(DIST_APP)"
