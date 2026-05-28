@@ -3,7 +3,7 @@ import SwiftUI
 final class FloatingHUDModel: ObservableObject {
     @Published var status: RecordingStatus = .idle
     @Published var focus: AppFocusTracker.Focus?
-    @Published var audioLevel: Float = 0
+    var audioLevel: Float = 0
 
     /// Whether the HUD is currently expanded to show the finish/cancel buttons.
     /// Driven by SwiftUI .onHover on the visible HUD body; only meaningful while
@@ -19,19 +19,22 @@ final class FloatingHUDModel: ObservableObject {
     /// handleCancel(), which discards audio + skips ASR + returns to idle.
     var onCancel: (@MainActor () -> Void)?
 
-    /// Ring buffer of the last 30 RMS samples driving the bar meter.
-    @Published private(set) var levelHistory: [Float] = Array(repeating: 0, count: 30)
+    /// Ring buffer of the last 40 RMS samples driving the bar meter.
+    @Published private(set) var levelHistory: [Float] = Array(repeating: 0, count: 40)
+    private(set) var levelUpdatedAt: TimeInterval = Date.timeIntervalSinceReferenceDate
 
     func pushLevel(_ level: Float) {
         var h = levelHistory
         h.removeFirst()
         h.append(level)
+        levelUpdatedAt = Date.timeIntervalSinceReferenceDate
         levelHistory = h
         audioLevel = level
     }
 
     func resetLevels() {
-        levelHistory = Array(repeating: 0, count: 30)
+        levelUpdatedAt = Date.timeIntervalSinceReferenceDate
+        levelHistory = Array(repeating: 0, count: 40)
         audioLevel = 0
     }
 }
@@ -39,25 +42,22 @@ final class FloatingHUDModel: ObservableObject {
 struct FloatingHUDView: View {
     @ObservedObject var model: FloatingHUDModel
 
-    private let cornerRadius: CGFloat = 16
-    private let barCount: Int = 24
-    private let barWidth: CGFloat = 2.5
+    private static let hudCornerRadius: CGFloat = 16
+    private let cornerRadius: CGFloat = Self.hudCornerRadius
+    private let barCount: Int = 30
+    private let barWidth: CGFloat = 5.5
     private let barSpacing: CGFloat = 3
 
-    /// Compact HUD: focus app + bar meter. Always present when the panel is shown.
-    static let compactHeight: CGFloat = 60
-    /// Each action button row (finish or cancel) in the expanded section.
-    static let buttonRowHeight: CGFloat = 32
-    /// Vertical padding inside the buttons section (top + bottom).
-    static let buttonsSectionVPadding: CGFloat = 6
-    /// Total height of the expanded buttons section, including padding.
-    /// Two button rows + ~1px gap between them + 2 * vpadding.
-    static let buttonsSectionHeight: CGFloat = buttonRowHeight * 2 + 6 + buttonsSectionVPadding * 2
-
+    /// Baseline compact HUD height before the hover actions are shown.
+    static let compactHeight: CGFloat = 71
+    static let cardHeight: CGFloat = 71
     static let cardWidth: CGFloat = 280
-    /// Max card height — buttons section + divider gap + compact HUD.
-    static let cardMaxHeight: CGFloat = buttonsSectionHeight + 9 + compactHeight
-    private static let hudShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+    static let cardMaxHeight: CGFloat = cardHeight
+    static let contextRowCenterYRatio: CGFloat = 0.30
+    static let levelMeterCenterYRatio: CGFloat = 0.70
+    private static let actionDividerHeight: CGFloat = 0.5
+    private static let actionRowHeight: CGFloat = (cardHeight - actionDividerHeight) / 2
+    private static let hudShape = RoundedRectangle(cornerRadius: hudCornerRadius, style: .continuous)
 
     /// Hover-driven expansion is only meaningful while recording. In other
     /// states the FloatingWindow disables mouse events on the panel, so this
@@ -70,204 +70,329 @@ struct FloatingHUDView: View {
     }
 
     private var isExpandedNow: Bool { canExpand && model.isExpanded }
+    private var isProcessing: Bool {
+        switch model.status {
+        case .transcribing, .injecting:
+            return true
+        default:
+            return false
+        }
+    }
 
     var body: some View {
-        // Outer container fills the NSHostingController view and pins the HUD
-        // to bottom-center. The panel is sized once (always at expanded
-        // height during recording) so SwiftUI never has to fight a concurrent
-        // AppKit panel-resize animation — that was the source of the jitter.
         VStack(spacing: 0) {
             Spacer(minLength: 0)
             hudCard
-            // 40px shadow margin between card bottom and panel bottom,
-            // matching FloatingWindow.panelVerticalMargin.
             Spacer(minLength: 40)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var hudCard: some View {
-        VStack(spacing: 0) {
-            // Buttons section — always present in the layout so SwiftUI can
-            // animate its height/opacity smoothly instead of inserting /
-            // removing the subtree on hover (which is what was causing the
-            // visible jitter in v1).
-            actionButtonsSection
-                .frame(height: isExpandedNow ? Self.buttonsSectionHeight : 0)
-                .opacity(isExpandedNow ? 1 : 0)
-                .clipped()
-                .allowsHitTesting(isExpandedNow)
+        HUDChrome(
+            cornerRadius: cornerRadius,
+            glowColor: model.status.glowColor,
+            beamOpacity: isExpandedNow ? 0.92 : 0.72
+        ) {
+            ZStack {
+                compactSection
 
-            // Dashed divider — the "切割成上下两部分" visual cue that distinguishes
-            // the button section from the compact HUD section, à la Spokenly.
-            // Faded out when collapsed.
-            DashedHRule(color: Color.primary.opacity(0.18))
-                .frame(height: isExpandedNow ? 9 : 0)
-                .opacity(isExpandedNow ? 1 : 0)
-                .padding(.horizontal, 12)
-                .clipped()
-
-            // Compact HUD — focus app + audio bar meter.
-            compactSection
-                .frame(height: Self.compactHeight)
+                recordingActionOverlay
+                    .opacity(isExpandedNow ? 1 : 0)
+                    .allowsHitTesting(isExpandedNow)
+            }
         }
-        .frame(width: Self.cardWidth)
-        // Clip the NSVisualEffectView blur at the AppKit layer level
-        // (cornerRadius + masksToBounds on the view's CALayer). SwiftUI's
-        // .background(.material, in: shape) leaves visible 1-2px material
-        // peeking out past the rounded corner — this approach is bulletproof.
-        .background(BlurredRoundedBackground(cornerRadius: cornerRadius))
-        .overlay(
-            Self.hudShape
-                .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.5)
-        )
-        .clipShape(Self.hudShape)
-        // Constrain hover hit-testing to the visible rounded HUD body. Without
-        // this, the SwiftUI layout's full available width (including the
-        // transparent shadow margin around the rounded corners) would register
-        // as hover area, and brushing near the panel corner would expand the
-        // HUD without the user actually being over the visible card.
+        .frame(width: Self.cardWidth, height: Self.cardHeight)
         .contentShape(Self.hudShape)
         .onHover { hovering in
-            // Gate on canExpand so a stale hover signal during transcribing/
-            // injecting can't desync isExpanded from the actual UI we render.
             guard canExpand else {
                 if model.isExpanded { model.isExpanded = false }
                 return
             }
             model.isExpanded = hovering
         }
-        .animation(.easeInOut(duration: 0.18), value: isExpandedNow)
+        .animation(.easeInOut(duration: 0.14), value: isExpandedNow)
         .animation(.easeInOut(duration: 0.25), value: model.status)
     }
 
     private var compactSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            focusAppRow
-            barMeter
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let height = proxy.size.height
+
+            compactContextRow
+                .frame(width: width - 28, height: 18, alignment: .center)
+                .position(x: width / 2, y: height * Self.contextRowCenterYRatio)
+
+            levelMeter(opacity: 0.74, minHeight: 3.5, maxHeight: 17)
+                .frame(width: width - 28)
                 .frame(height: 18)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var focusAppRow: some View {
-        if let focus = model.focus {
-            HStack(spacing: 6) {
-                Image(nsImage: focus.icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 16, height: 16)
-                Text(focus.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
-            }
-        } else {
-            // Reserve the row height so the bar meter doesn't jump up when
-            // focus tracker hasn't seeded yet.
-            Color.clear.frame(height: 16)
+                .position(x: width / 2, y: height * Self.levelMeterCenterYRatio)
         }
     }
 
-    private var barMeter: some View {
-        HStack(alignment: .center, spacing: barSpacing) {
-            ForEach(0..<barCount, id: \.self) { i in
-                // Sample the most recent `barCount` slots of the ring buffer
-                // (skip the older head of the 30-slot history).
-                let offset = max(0, model.levelHistory.count - barCount)
-                let lvl = CGFloat(model.levelHistory[i + offset])
-                let h = max(2, min(16, 2 + lvl * 16))
-                RoundedRectangle(cornerRadius: barWidth / 2, style: .continuous)
-                    .fill(Color.primary.opacity(0.55))
-                    .frame(width: barWidth, height: h)
-            }
+    private var compactContextRow: some View {
+        HStack(spacing: 0) {
+            HUDAppBadge(
+                focus: model.focus,
+                fallback: nil,
+                foregroundOpacity: 0.78,
+                iconSize: 23,
+                fontSize: 14,
+                spacing: 7
+            )
+            .frame(maxWidth: 112, alignment: .leading)
+
+            Spacer(minLength: 0)
+
+            HUDAppBadge(
+                focus: nil,
+                fallback: "Dousha",
+                systemImage: "waveform",
+                foregroundOpacity: 0.38,
+                iconSize: 17,
+                fontSize: 14,
+                spacing: 7
+            )
+            .frame(maxWidth: 104, alignment: .trailing)
         }
-        .frame(maxWidth: .infinity)
-        .animation(.linear(duration: 0.05), value: model.levelHistory)
+        .frame(height: 18)
     }
 
-    private var actionButtonsSection: some View {
+    private func levelMeter(opacity: Double, minHeight: CGFloat, maxHeight: CGFloat) -> some View {
+        HUDLevelMeter(
+            levels: model.levelHistory,
+            updatedAt: model.levelUpdatedAt,
+            barCount: barCount,
+            barWidth: barWidth,
+            barSpacing: barSpacing,
+            opacity: opacity,
+            minHeight: minHeight,
+            maxHeight: maxHeight,
+            isProcessing: isProcessing
+        )
+    }
+
+    private var recordingActionOverlay: some View {
         VStack(spacing: 0) {
-            HUDActionButton(
+            HUDActionRow(
                 title: "完成录音",
                 systemImage: "checkmark.circle.fill",
-                tint: Color(red: 0.20, green: 0.55, blue: 0.95),
-                rowHeight: Self.buttonRowHeight
+                tint: Color(red: 0.05, green: 0.50, blue: 1.00),
+                backgroundOpacity: 0.16
             ) {
                 model.onFinish?()
             }
-            // Thin solid hairline between the two action buttons. The bigger
-            // dashed divider (below) is what splits the action area from the
-            // compact HUD; this one just separates the two buttons within
-            // the same section.
+            .frame(height: Self.actionRowHeight)
+
             Rectangle()
-                .fill(Color.primary.opacity(0.10))
-                .frame(height: 0.5)
-                .padding(.horizontal, 12)
-            HUDActionButton(
+                .fill(Color(red: 0.32, green: 0.48, blue: 0.72).opacity(0.20))
+                .frame(height: Self.actionDividerHeight)
+
+            HUDActionRow(
                 title: "取消录音",
                 systemImage: "xmark.circle.fill",
-                tint: Color(red: 0.95, green: 0.30, blue: 0.30),
-                rowHeight: Self.buttonRowHeight
+                tint: Color(red: 1.00, green: 0.27, blue: 0.27),
+                backgroundOpacity: 0.14
             ) {
                 model.onCancel?()
             }
+            .frame(height: Self.actionRowHeight)
         }
-        .padding(.vertical, Self.buttonsSectionVPadding)
+        .frame(height: Self.cardHeight)
     }
 }
 
-/// Pure SwiftUI dashed horizontal rule. Built explicitly rather than using
-/// `Divider()` because Divider() is solid; the design language we're matching
-/// uses a dashed line as the visual "split" between the action area and the
-/// compact HUD.
-private struct DashedHRule: View {
-    let color: Color
+private struct HUDChrome<Content: View>: View {
+    let cornerRadius: CGFloat
+    let glowColor: Color?
+    let beamOpacity: Double
+    let content: Content
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    }
+
+    init(
+        cornerRadius: CGFloat,
+        glowColor: Color?,
+        beamOpacity: Double,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.cornerRadius = cornerRadius
+        self.glowColor = glowColor
+        self.beamOpacity = beamOpacity
+        self.content = content()
+    }
 
     var body: some View {
-        GeometryReader { geo in
-            Path { path in
-                let midY = geo.size.height / 2
-                path.move(to: CGPoint(x: 0, y: midY))
-                path.addLine(to: CGPoint(x: geo.size.width, y: midY))
+        ZStack {
+            content
+                .background(BlurredRoundedBackground(cornerRadius: cornerRadius))
+                .overlay(
+                    shape
+                        .strokeBorder(Color.black.opacity(0.16), lineWidth: 0.6)
+                )
+                .clipShape(shape)
+
+            if let glowColor {
+                HUDBorderBeam(
+                    cornerRadius: cornerRadius,
+                    baseColor: glowColor,
+                    lineWidth: 0.95,
+                    glowRadius: 5.5,
+                    duration: 2.45
+                )
+                .padding(-0.35)
+                .opacity(beamOpacity)
+                .allowsHitTesting(false)
             }
-            .stroke(color, style: StrokeStyle(lineWidth: 0.5, lineCap: .round, dash: [3, 3]))
         }
     }
 }
 
-private struct HUDActionButton: View {
+private struct HUDActionRow: View {
     let title: String
     let systemImage: String
     let tint: Color
-    let rowHeight: CGFloat
+    let backgroundOpacity: Double
+    var idleBackgroundOpacity: Double = 0.74
     let action: @MainActor () -> Void
 
     @State private var hovering: Bool = false
 
     var body: some View {
         Button(action: { action() }) {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
             }
             .foregroundColor(tint)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(tint.opacity(hovering ? 0.18 : 0.0))
-                    .padding(.horizontal, 8)
+                ZStack {
+                    Color.white.opacity(idleBackgroundOpacity)
+                    tint.opacity(hovering ? backgroundOpacity : 0)
+                }
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .frame(height: rowHeight)
         .onHover { hovering = $0 }
+        .animation(.easeInOut(duration: 0.12), value: hovering)
+    }
+}
+
+private struct HUDLevelMeter: View {
+    let levels: [Float]
+    let updatedAt: TimeInterval
+    let barCount: Int
+    let barWidth: CGFloat
+    let barSpacing: CGFloat
+    let opacity: Double
+    let minHeight: CGFloat
+    let maxHeight: CGFloat
+    let isProcessing: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: false)) { timeline in
+            Canvas(opaque: false, rendersAsynchronously: true) { context, size in
+                let phase = reduceMotion
+                    ? 1
+                    : min(1, max(0, (timeline.date.timeIntervalSinceReferenceDate - updatedAt) / 0.032))
+                drawBars(
+                    in: context,
+                    size: size,
+                    phase: CGFloat(phase),
+                    date: timeline.date
+                )
+            }
+        }
+    }
+
+    private func drawBars(
+        in context: GraphicsContext,
+        size: CGSize,
+        phase: CGFloat,
+        date: Date
+    ) {
+        guard barCount > 0, !levels.isEmpty else { return }
+
+        let totalWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barSpacing
+        let startX = max(0, (size.width - totalWidth) / 2)
+        let baseY = size.height / 2
+        let offset = max(0, levels.count - barCount - 1)
+
+        for i in 0..<barCount {
+            let boosted = isProcessing
+                ? processingLevel(for: i, at: date)
+                : recordedLevel(for: i, offset: offset, phase: phase)
+            let barHeight = minHeight + boosted * (maxHeight - minHeight)
+            let fillOpacity = opacity * (0.58 + min(0.42, Double(boosted) * 0.65))
+            let x = startX + CGFloat(i) * (barWidth + barSpacing)
+            let rect = CGRect(
+                x: x,
+                y: baseY - barHeight / 2,
+                width: barWidth,
+                height: barHeight
+            )
+            let path = Path(roundedRect: rect, cornerRadius: barWidth / 2)
+            context.fill(path, with: .color(Color.primary.opacity(fillOpacity)))
+        }
+    }
+
+    private func recordedLevel(for index: Int, offset: Int, phase: CGFloat) -> CGFloat {
+        let currentIndex = min(levels.count - 1, offset + index + 1)
+        let previousIndex = max(0, currentIndex - 1)
+        let previous = CGFloat(levels[previousIndex])
+        let current = CGFloat(levels[currentIndex])
+        let level = previous + (current - previous) * phase
+        return min(1, pow(min(1, max(0, level)), 0.62) * 1.25)
+    }
+
+    private func processingLevel(for index: Int, at date: Date) -> CGFloat {
+        guard !reduceMotion else { return 0.14 }
+
+        let t = date.timeIntervalSinceReferenceDate
+        let wave = sin(t * 5.4 + Double(index) * 0.42)
+        let shimmer = sin(t * 2.2 + Double(index) * 0.13)
+        let level = 0.12 + 0.055 * wave + 0.025 * shimmer
+        return min(0.24, max(0.055, CGFloat(level)))
+    }
+}
+
+private struct HUDAppBadge: View {
+    let focus: AppFocusTracker.Focus?
+    let fallback: String?
+    var systemImage: String? = nil
+    var foregroundOpacity: Double = 0.16
+    var iconSize: CGFloat = 15
+    var fontSize: CGFloat = 12
+    var spacing: CGFloat = 6
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            if let focus {
+                Image(nsImage: focus.icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: iconSize, height: iconSize)
+                Text(focus.name)
+            } else if let systemImage, let fallback {
+                Image(systemName: systemImage)
+                    .font(.system(size: iconSize, weight: .medium))
+                Text(fallback)
+            } else if let fallback {
+                Text(fallback)
+            }
+        }
+        .font(.system(size: fontSize, weight: .semibold))
+        .foregroundColor(.primary.opacity(foregroundOpacity))
+        .lineLimit(1)
     }
 }
 

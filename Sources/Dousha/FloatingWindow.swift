@@ -18,10 +18,7 @@ final class FloatingWindow {
     private static var panelWidth: CGFloat {
         FloatingHUDView.cardWidth + panelHorizontalMargin * 2
     }
-    /// The panel is sized once and never resized during a session. SwiftUI
-    /// animates only the inner card height — keeping the panel static is the
-    /// fix for the v1 jitter where SwiftUI's content animation and AppKit's
-    /// panel.setFrame animation ran on different clocks and visibly drifted.
+    /// The panel is sized once and never resized during a session.
     private static var panelHeight: CGFloat {
         FloatingHUDView.cardMaxHeight + panelVerticalMargin * 2
     }
@@ -77,8 +74,6 @@ final class FloatingWindow {
         panel.alphaValue = 0
         positionAtBottomCenter()
         panel.orderFrontRegardless()
-        // Force AppKit to re-derive the shadow from the freshly-rendered
-        // rounded contentView; without this the shadow can lag on first show.
         panel.invalidateShadow()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.20

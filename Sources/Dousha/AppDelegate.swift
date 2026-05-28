@@ -155,13 +155,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Language submenu
         let langItem = NSMenuItem(title: "Language", action: nil, keyEquivalent: "")
         let langMenu = NSMenu()
-        for lang in Language.allCases {
-            let item = NSMenuItem(title: lang.displayName,
+        for option in LanguageMenu.options(for: prefs.engine, selectedLanguage: prefs.language) {
+            let item = NSMenuItem(title: option.title,
                                   action: #selector(selectLanguage(_:)),
                                   keyEquivalent: "")
             item.target = self
-            item.representedObject = lang.rawValue
-            if lang.rawValue == prefs.language { item.state = .on }
+            item.representedObject = option.rawValue
+            if option.isSelected { item.state = .on }
             langMenu.addItem(item)
         }
         langItem.submenu = langMenu
@@ -225,7 +225,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func selectLanguage(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String else { return }
+        guard let raw = sender.representedObject as? String,
+              raw != LanguageMenu.autoIdentifier else { return }
         prefs.language = raw
         speech.setLanguage(raw)
         rebuildMenu()
@@ -473,13 +474,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let detectorLanguage = LanguageMenu.detectorLanguage(for: self.prefs.engine, selectedLanguage: self.prefs.language)
+                let decision = self.incompleteDetector.decision(for: result, language: detectorLanguage)
+                let traceId = result.traceId ?? "none"
+                doushaLog("[Dousha] traceId=\(traceId) detector incomplete=\(decision.isIncomplete) stale=\(decision.staleLastTranscript) segmentGap=\(decision.largeSegmentGap) charFloor=\(decision.belowCharFloor) cps=\(String(format: "%.2f", decision.charsPerSecond)) text.len=\(text.count) dur=\(String(format: "%.1f", result.audioDuration))s lastTranscriptAge=\(result.lastTranscriptAge.map { String(format: "%.1f", $0) } ?? "nil") lastRespAge=\(result.lastResponseAge.map { String(format: "%.1f", $0) } ?? "nil") maxSegmentGap=\(result.maxSegmentGap.map { String(format: "%.1f", $0) } ?? "nil")")
 
                 // Heuristic: did the stream probably get truncated? If so, hold off
                 // injection and re-transcribe from the saved WAV.
-                if self.incompleteDetector.isLikelyIncomplete(result: result, language: self.prefs.language) {
-                    doushaLog("[Dousha] heuristic flagged incomplete (originalText.len=\(text.count)) — triggering retranscribe")
+                if decision.isIncomplete && self.prefs.smartRetranscribeEnabled {
+                    doushaLog("[Dousha] traceId=\(traceId) heuristic flagged incomplete originalText.len=\(text.count) — triggering retranscribe")
                     // Keep HUD in transcribing state — don't drop to idle while retrying.
-                    self.speech.retranscribeLastRecording { retried in
+                    self.speech.retranscribeLastRecording(parentTraceId: traceId) { retried in
                         DispatchQueue.main.async {
                             let retriedText = (retried?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
                             let finalText: String
@@ -489,13 +494,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             // and in those cases we'd be replacing a good original
                             // transcript with a shorter, worse one.
                             if let r = retriedText, r.count > text.count {
-                                doushaLog("[Dousha] retranscribe succeeded: original.len=\(text.count) retried.len=\(r.count) — using retried")
+                                doushaLog("[Dousha] traceId=\(traceId) retranscribe adopted original.len=\(text.count) retried.len=\(r.count)")
                                 finalText = r
                             } else if let r = retriedText {
-                                doushaLog("[Dousha] retranscribe shorter than original (original.len=\(text.count) retried.len=\(r.count)) — keeping original")
+                                doushaLog("[Dousha] traceId=\(traceId) retranscribe shorter original.len=\(text.count) retried.len=\(r.count) — keeping original")
                                 finalText = text
                             } else {
-                                doushaLog("[Dousha] retranscribe returned empty — falling back to original (len=\(text.count))")
+                                doushaLog("[Dousha] traceId=\(traceId) retranscribe empty — falling back to original len=\(text.count)")
                                 finalText = text
                             }
                             guard !finalText.isEmpty else {
@@ -506,6 +511,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                     return
+                }
+
+                if decision.isIncomplete {
+                    doushaLog("[Dousha] traceId=\(traceId) heuristic flagged incomplete but 智能重录 disabled — using original len=\(text.count)")
                 }
 
                 guard !text.isEmpty else {

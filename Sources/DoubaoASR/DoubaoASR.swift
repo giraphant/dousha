@@ -152,7 +152,7 @@ public actor DoubaoASR {
         self.lastTranscriptAt = nil
         self.wavWriter = nil
 
-        doushaLog("[DoubaoASR] start() requestId=\(requestId)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) start")
 
         do {
             let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
@@ -193,7 +193,7 @@ public actor DoubaoASR {
                 doushaLog("[DoubaoASR] reusing existing websocket")
             }
             try await sendInitialMessages(deviceId: self.deviceId)
-            doushaLog("[DoubaoASR] StartTask + StartSession both succeeded; pcmBufferBytes=\(self.pcmBuffer.count)")
+            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms StartTask+StartSession ok pcmBufferBytes=\(self.pcmBuffer.count)")
 
             // Now drain whatever audio accumulated during WS setup.
             self.canSendAudio = true
@@ -286,7 +286,8 @@ public actor DoubaoASR {
                 lastResponseAge: nil,
                 lastTranscriptAge: nil,
                 maxSegmentGap: nil,
-                savedAudioURL: nil
+                savedAudioURL: nil,
+                traceId: requestId
             )
         }
         isRunning = false
@@ -350,13 +351,13 @@ public actor DoubaoASR {
         } else {
             outcomeStr = "no-channel"
         }
-        doushaLog("[DoubaoASR] post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
 
         // Close the WebSocket after every session — see class doc.
         await closeWebSocket()
 
         let final = assembledText()
-        doushaLog("[DoubaoASR] stop() final='\(final)' segments=\(committedSegments.count)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms stop final text.len=\(final.count) segments=\(committedSegments.count)")
 
         let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
@@ -386,7 +387,8 @@ public actor DoubaoASR {
             lastResponseAge: lastResponseAge,
             lastTranscriptAge: lastTranscriptAge,
             maxSegmentGap: maxSegmentGap,
-            savedAudioURL: savedURL
+            savedAudioURL: savedURL,
+            traceId: requestId
         )
     }
 
@@ -617,7 +619,7 @@ public actor DoubaoASR {
             doushaLog("[DoubaoASR] recv: decode failed (\(data.count) bytes)")
             return
         }
-        doushaLog("[DoubaoASR] recv requestId=\(resp.requestId) messageType=\(resp.messageType) code=\(resp.statusCode) jsonLen=\(resp.resultJson.count)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms recv messageType=\(resp.messageType) code=\(resp.statusCode) jsonLen=\(resp.resultJson.count)")
 
         // Drop responses for prior (closed) sessions on this reused WebSocket. Server
         // echoes our request_id; if it doesn't match the current session, it's stale.
@@ -676,13 +678,6 @@ public actor DoubaoASR {
         if !text.isEmpty {
             self.lastTranscriptAt = Date()
 
-            // Debug instrumentation: per-recv parsed flags + text preview. Helps us
-            // see WHEN Doubao actually flips is_vad_finished, vs. when it just
-            // resets text mid-stream without warning. Trimmable once segment
-            // handling is fully understood.
-            let preview = text.prefix(40).replacingOccurrences(of: "\n", with: " ")
-            doushaLog("[DoubaoASR] result isInterim=\(isInterim) vadFinished=\(vadFinished) nonstream=\(nonstreamResult) textLen=\(text.count) preview=\(preview)")
-
             // Doubao chunks long audio into VAD-bounded utterances. Each utterance has its
             // own cumulative `text` field that does NOT include prior utterances. So when
             // is_vad_finished=true && !is_interim, we commit `text` as a finalized
@@ -702,19 +697,22 @@ public actor DoubaoASR {
                 && text.count * 2 < currentInterim.count
                 && !currentInterim.hasPrefix(text)
 
+            let preview = text.prefix(40).replacingOccurrences(of: "\n", with: " ")
+            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms result isInterim=\(isInterim) vadFinished=\(vadFinished) nonstream=\(nonstreamResult) textLen=\(text.count) currentInterimLen=\(currentInterim.count) newUtterance=\(looksLikeNewUtterance) preview=\(preview)")
+
             if looksLikeNewUtterance {
                 let rescued = currentInterim
                 committedSegments.append(rescued)
                 segmentCommittedAt.append(Date())
                 currentInterim = text
-                doushaLog("[DoubaoASR] segment final (rescued from interim, newText.len=\(text.count))='\(rescued)' totalSegments=\(committedSegments.count)")
+                doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment rescued index=\(committedSegments.count) text.len=\(rescued.count) newText.len=\(text.count)")
                 // Note: deliberately did NOT also commit `text` here — it's the
                 // new utterance's in-progress interim, not a finalized segment.
             } else if isVadCommit {
                 committedSegments.append(text)
                 segmentCommittedAt.append(Date())
                 currentInterim = ""
-                doushaLog("[DoubaoASR] segment final='\(text)' totalSegments=\(committedSegments.count)")
+                doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment final index=\(committedSegments.count) text.len=\(text.count)")
             } else {
                 currentInterim = text
             }
@@ -726,6 +724,11 @@ public actor DoubaoASR {
 
     private func assembledText() -> String {
         committedSegments.joined() + currentInterim
+    }
+
+    private func traceElapsedMs(now: Date = Date()) -> Int {
+        guard let audioStartedAt else { return 0 }
+        return Int(now.timeIntervalSince(audioStartedAt) * 1000)
     }
 
     private func signalFinished() {
@@ -822,11 +825,11 @@ public actor DoubaoASR {
             do {
                 let state: FrameState = didSendFirstFrame ? .middle : .first
                 try await encodeAndSend(Data(frame), state: state)
-                if !didSendFirstFrame {
-                    doushaLog("[DoubaoASR] sent FIRST frame")
-                }
                 didSendFirstFrame = true
                 framesSentCount += 1
+                if framesSentCount == 1 || framesSentCount % 100 == 0 {
+                    doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms sent frame state=\(state.rawValue) frames=\(framesSentCount) pcmBytesOut=\(totalPcmBytesOut) pcmBufferBytes=\(pcmBuffer.count)")
+                }
             } catch {
                 doushaLog("[DoubaoASR] encodeAndSend error: \(error.localizedDescription)")
                 deliverError(error)
@@ -836,14 +839,14 @@ public actor DoubaoASR {
     }
 
     private func flushAndSendLastFrame() async throws {
-        doushaLog("[DoubaoASR] flushAndSendLastFrame framesSent=\(framesSentCount) pcmBufferRemaining=\(pcmBuffer.count) didSendFirst=\(didSendFirstFrame) totalPcmBytesOut=\(totalPcmBytesOut)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms flushLast framesSent=\(framesSentCount) pcmBufferRemaining=\(pcmBuffer.count) didSendFirst=\(didSendFirstFrame) totalPcmBytesOut=\(totalPcmBytesOut)")
         let frameSize = DoubaoConstants.bytesPerFrame
         if pcmBuffer.isEmpty {
             // Still need a LAST marker if any frames were sent.
             if didSendFirstFrame {
                 let silent = Data(count: frameSize)
                 try await encodeAndSend(silent, state: .last)
-                doushaLog("[DoubaoASR] sent LAST silent")
+                doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms sent LAST silent")
             }
             return
         }
@@ -854,7 +857,7 @@ public actor DoubaoASR {
         let frame = Data(pcmBuffer.prefix(frameSize))
         pcmBuffer.removeAll()
         try await encodeAndSend(frame, state: .last)
-        doushaLog("[DoubaoASR] sent LAST frame")
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms sent LAST frame")
     }
 
     private func encodeAndSend(_ pcmFrame: Data, state: FrameState) async throws {
@@ -884,8 +887,7 @@ public actor DoubaoASR {
     /// (DoubaoBackend) is responsible for showing whatever UI it wants.
     ///
     /// On any error, returns whatever partial text was assembled (possibly empty).
-    public func retranscribe(wavURL: URL) async -> String {
-        doushaLog("[DoubaoASR] retranscribe(\(wavURL.lastPathComponent)) starting")
+    public func retranscribe(wavURL: URL, parentTraceId: String? = nil) async -> String {
 
         // Don't let a retranscribe stomp on a live recording session.
         guard !isRunning else {
@@ -917,6 +919,8 @@ public actor DoubaoASR {
         self.framesSentCount = 0
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
+        let parentTraceField = parentTraceId.map { " parent_traceId=\($0)" } ?? ""
+        doushaLog("[DoubaoASR] traceId=\(requestId)\(parentTraceField) retranscribe \(wavURL.lastPathComponent) starting")
         self.finishedChannel = OneShotChannel<Void>()
         self.lastResponseAt = nil
         self.lastTranscriptAt = nil
@@ -952,13 +956,13 @@ public actor DoubaoASR {
                 _ = await waitWithTimeout(channel: channel, timeout: 10.0)
             }
         } catch {
-            doushaLog("[DoubaoASR] retranscribe error: \(error.localizedDescription)")
+            doushaLog("[DoubaoASR] traceId=\(requestId)\(parentTraceField) t=\(traceElapsedMs())ms retranscribe error=\(error.localizedDescription)")
         }
 
         await closeWebSocket()
 
         let final = assembledText()
-        doushaLog("[DoubaoASR] retranscribe done text.len=\(final.count)")
+        doushaLog("[DoubaoASR] traceId=\(requestId)\(parentTraceField) t=\(traceElapsedMs())ms retranscribe done text.len=\(final.count)")
         return final
     }
 

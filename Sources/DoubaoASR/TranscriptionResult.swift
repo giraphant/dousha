@@ -33,6 +33,8 @@ public struct TranscriptionResult: Sendable {
     /// Path to the WAV that captured this session's mic input, or nil if the
     /// backend doesn't support WAV capture (e.g., Apple backend).
     public let savedAudioURL: URL?
+    /// Doubao request_id for trace correlation across logs and results.
+    public let traceId: String?
 
     public init(
         text: String,
@@ -40,7 +42,8 @@ public struct TranscriptionResult: Sendable {
         lastResponseAge: TimeInterval?,
         lastTranscriptAge: TimeInterval?,
         maxSegmentGap: TimeInterval? = nil,
-        savedAudioURL: URL?
+        savedAudioURL: URL?,
+        traceId: String? = nil
     ) {
         self.text = text
         self.audioDuration = audioDuration
@@ -48,5 +51,6 @@ public struct TranscriptionResult: Sendable {
         self.lastTranscriptAge = lastTranscriptAge
         self.maxSegmentGap = maxSegmentGap
         self.savedAudioURL = savedAudioURL
+        self.traceId = traceId
     }
 }

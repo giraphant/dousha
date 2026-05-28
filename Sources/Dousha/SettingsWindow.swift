@@ -11,7 +11,7 @@ enum SettingsWindowFactory {
         window.title = "Dousha — Settings"
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
-        window.setContentSize(NSSize(width: 520, height: 480))
+        window.setContentSize(NSSize(width: 520, height: 560))
         return window
     }
 }
@@ -27,6 +27,8 @@ struct SettingsView: View {
     @State private var cancelHotkey: CancelHotkeyConfig = Preferences.shared.cancelHotkey
     @State private var isRecordingCancelHotkey: Bool = false
     private let cancelRecorder = CancelKeyRecorder()
+
+    @State private var smartRetranscribeEnabled: Bool = Preferences.shared.smartRetranscribeEnabled
 
     @State private var baseURL: String = Preferences.shared.llmBaseURL
     @State private var apiKey:  String = Preferences.shared.llmAPIKey
@@ -93,6 +95,25 @@ struct SettingsView: View {
                 }
             }
             Text("Cancel discards the current recording without transcribing. Only fires while recording — passes through normally otherwise.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider().padding(.vertical, 4)
+
+            Text("Transcription")
+                .font(.title3).bold()
+
+            VStack(alignment: .leading, spacing: 10) {
+                field(label: "智能重录") {
+                    Toggle("检测到可能漏转写时，自动用上一段录音重新转写", isOn: $smartRetranscribeEnabled)
+                        .onChange(of: smartRetranscribeEnabled) { _, newValue in
+                            Preferences.shared.smartRetranscribeEnabled = newValue
+                        }
+                }
+            }
+
+            Text("关闭后，Dousha 会直接使用首次转写结果；菜单里的手动 Re-transcribe Last Recording 仍可使用。")
                 .font(.callout)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

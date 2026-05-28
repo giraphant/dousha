@@ -75,6 +75,10 @@ final class IncompleteTranscriptDetectorTests: XCTestCase {
         XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "en-US"))
     }
 
+    func test_autoLanguage_usesConservativeMixedChineseEnglishFloor() {
+        XCTAssertEqual(det.charFloor(forLanguage: "auto"), 2.0, accuracy: 0.001)
+    }
+
     // MARK: - Missing diagnostics
 
     func test_noLastTranscriptAge_fallsBackToRatioOnly() {
@@ -123,5 +127,59 @@ final class IncompleteTranscriptDetectorTests: XCTestCase {
             maxSegmentGap: 25.0
         )
         XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
+    }
+
+    // MARK: - Decision diagnostics
+
+    func test_decision_reportsStaleTranscriptReason() {
+        let result = r(text: String(repeating: "字", count: 90), audioDuration: 30.0, lastTranscriptAge: 20.0)
+
+        let decision = det.decision(for: result, language: "zh-CN")
+
+        XCTAssertTrue(decision.isIncomplete)
+        XCTAssertTrue(decision.staleLastTranscript)
+        XCTAssertFalse(decision.largeSegmentGap)
+        XCTAssertFalse(decision.belowCharFloor)
+        XCTAssertEqual(decision.charsPerSecond, 3.0, accuracy: 0.001)
+    }
+
+    func test_decision_reportsSegmentGapReason() {
+        let result = r(
+            text: String(repeating: "字", count: 90),
+            audioDuration: 30.0,
+            lastTranscriptAge: 0.5,
+            maxSegmentGap: 28.0
+        )
+
+        let decision = det.decision(for: result, language: "zh-CN")
+
+        XCTAssertTrue(decision.isIncomplete)
+        XCTAssertFalse(decision.staleLastTranscript)
+        XCTAssertTrue(decision.largeSegmentGap)
+        XCTAssertFalse(decision.belowCharFloor)
+    }
+
+    func test_decision_reportsCharFloorReason() {
+        let result = r(text: String(repeating: "字", count: 10), audioDuration: 30.0, lastTranscriptAge: 0.5)
+
+        let decision = det.decision(for: result, language: "zh-CN")
+
+        XCTAssertTrue(decision.isIncomplete)
+        XCTAssertFalse(decision.staleLastTranscript)
+        XCTAssertFalse(decision.largeSegmentGap)
+        XCTAssertTrue(decision.belowCharFloor)
+        XCTAssertEqual(decision.charsPerSecond, 0.333, accuracy: 0.001)
+    }
+
+    func test_decision_shortRecordingSuppressesAllReasons() {
+        let result = r(text: "嗯", audioDuration: 2.0, lastTranscriptAge: 20.0, maxSegmentGap: 28.0)
+
+        let decision = det.decision(for: result, language: "zh-CN")
+
+        XCTAssertFalse(decision.isIncomplete)
+        XCTAssertFalse(decision.staleLastTranscript)
+        XCTAssertFalse(decision.largeSegmentGap)
+        XCTAssertFalse(decision.belowCharFloor)
+        XCTAssertEqual(decision.charsPerSecond, 0.5, accuracy: 0.001)
     }
 }

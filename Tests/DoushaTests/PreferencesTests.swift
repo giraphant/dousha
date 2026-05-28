@@ -30,4 +30,25 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(fresh.hotkey.keyCode, 63)
         XCTAssertEqual(fresh.hotkey.mode, .toggle)
     }
+
+    func testSmartRetranscribe_defaultsToEnabled() {
+        XCTAssertTrue(prefs.smartRetranscribeEnabled)
+    }
+
+    func testSmartRetranscribe_persistsDisabledAcrossInstances() {
+        prefs.smartRetranscribeEnabled = false
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertFalse(fresh.smartRetranscribeEnabled)
+    }
+
+    func testSmartRetranscribe_canBeReenabledAfterDisabling() {
+        prefs.smartRetranscribeEnabled = false
+        prefs.smartRetranscribeEnabled = true
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertTrue(fresh.smartRetranscribeEnabled)
+    }
 }

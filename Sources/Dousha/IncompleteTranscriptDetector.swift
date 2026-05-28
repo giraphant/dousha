@@ -13,9 +13,9 @@ import DoubaoASR
 ///    server whose ASR pipeline has stalled.
 ///
 /// 2. **Segment-gap**: the largest wall-clock gap between consecutive VAD
-///    segment commits (or between audio start and the first commit) exceeds
-///    10s. Normal VAD-segmented speech commits every 3-5s; a >10s gap means
-///    Doubao silently dropped a chunk of audio in that window. This catches
+///    segment commits exceeds the configured threshold. Doubao normally
+///    commits frequently enough that a very large gap can mean it silently
+///    dropped a chunk of audio in that window. This catches
 ///    the case where surviving segments are dense enough that the char/sec
 ///    rate looks normal even though a large middle portion was lost.
 ///
@@ -52,27 +52,49 @@ struct IncompleteTranscriptDetector {
     /// flagged. Picked conservatively (about 50% of typical conversational
     /// rates) so false positives stay rare.
     func charFloor(forLanguage lang: String) -> Double {
-        if lang.lowercased().hasPrefix("zh") { return 2.0 }       // Chinese 字/秒
-        return 8.0                                                 // English/Latin chars/秒
+        let normalized = lang.lowercased()
+        if normalized == LanguageMenu.autoIdentifier || normalized.hasPrefix("zh") { return 2.0 }
+        return 8.0
+    }
+
+    struct Decision: Equatable {
+        let isIncomplete: Bool
+        let staleLastTranscript: Bool
+        let largeSegmentGap: Bool
+        let belowCharFloor: Bool
+        let charsPerSecond: Double
+    }
+
+    func decision(for result: TranscriptionResult, language: String) -> Decision {
+        let observedRate = result.audioDuration > 0
+            ? Double(result.text.count) / result.audioDuration
+            : 0
+
+        guard result.audioDuration >= minAudioDuration else {
+            return Decision(
+                isIncomplete: false,
+                staleLastTranscript: false,
+                largeSegmentGap: false,
+                belowCharFloor: false,
+                charsPerSecond: observedRate
+            )
+        }
+
+        let stale = result.lastTranscriptAge.map { $0 > maxLastTranscriptAge } ?? false
+        let largeGap = result.maxSegmentGap.map { $0 > maxSegmentGap } ?? false
+        let floor = charFloor(forLanguage: language)
+        let belowFloor = observedRate < floor * 0.5
+
+        return Decision(
+            isIncomplete: stale || largeGap || belowFloor,
+            staleLastTranscript: stale,
+            largeSegmentGap: largeGap,
+            belowCharFloor: belowFloor,
+            charsPerSecond: observedRate
+        )
     }
 
     func isLikelyIncomplete(result: TranscriptionResult, language: String) -> Bool {
-        guard result.audioDuration >= minAudioDuration else { return false }
-
-        if let age = result.lastTranscriptAge, age > maxLastTranscriptAge {
-            return true
-        }
-
-        if let gap = result.maxSegmentGap, gap > maxSegmentGap {
-            return true
-        }
-
-        let floor = charFloor(forLanguage: language)
-        let observedRate = Double(result.text.count) / result.audioDuration
-        if observedRate < floor * 0.5 {
-            return true
-        }
-
-        return false
+        decision(for: result, language: language).isIncomplete
     }
 }

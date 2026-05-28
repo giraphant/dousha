@@ -23,19 +23,20 @@ final class Preferences {
     private let defaults: UserDefaults
 
     private enum Keys {
-        static let language              = "language"
-        static let engine                = "engine"
-        static let llmEnabled            = "llmEnabled"
-        static let llmBaseURL            = "llmBaseURL"
-        static let llmAPIKey             = "llmAPIKey"
-        static let llmModel              = "llmModel"
-        static let hotkeyKeyCode         = "hotkey.keyCode"
-        static let hotkeyMode            = "hotkey.mode"
+        static let language                  = "language"
+        static let engine                    = "engine"
+        static let llmEnabled                = "llmEnabled"
+        static let llmBaseURL                = "llmBaseURL"
+        static let llmAPIKey                 = "llmAPIKey"
+        static let llmModel                  = "llmModel"
+        static let smartRetranscribeEnabled  = "smartRetranscribeEnabled"
+        static let hotkeyKeyCode             = "hotkey.keyCode"
+        static let hotkeyMode                = "hotkey.mode"
         // Sentinel: -1 stored under `cancelHotkey.keyCode` means "disabled".
         // We do not use absence-of-key because UserDefaults.register seeds the
         // default value, which would re-enable Esc whenever a user explicitly
         // turned cancel off and the app restarted.
-        static let cancelHotkeyKeyCode   = "cancelHotkey.keyCode"
+        static let cancelHotkeyKeyCode       = "cancelHotkey.keyCode"
     }
 
     /// Stored value used to represent a disabled cancel hotkey. Picked because
@@ -45,15 +46,16 @@ final class Preferences {
     init(defaults: UserDefaults) {
         self.defaults = defaults
         defaults.register(defaults: [
-            Keys.language:             Language.zh_CN.rawValue,
-            Keys.engine:               Engine.apple.rawValue,
-            Keys.llmEnabled:           false,
-            Keys.llmBaseURL:           "https://api.openai.com/v1",
-            Keys.llmModel:             "gpt-4o-mini",
-            Keys.llmAPIKey:            "",
-            Keys.hotkeyKeyCode:        Int(HotkeyConfig.default.keyCode),
-            Keys.hotkeyMode:           HotkeyConfig.default.mode.rawValue,
-            Keys.cancelHotkeyKeyCode:  Int(CancelHotkeyConfig.escKeyCode)
+            Keys.language:                 Language.zh_CN.rawValue,
+            Keys.engine:                   Engine.apple.rawValue,
+            Keys.llmEnabled:               false,
+            Keys.llmBaseURL:               "https://api.openai.com/v1",
+            Keys.llmModel:                 "gpt-4o-mini",
+            Keys.llmAPIKey:                "",
+            Keys.smartRetranscribeEnabled: true,
+            Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
+            Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
+            Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode)
         ])
     }
 
@@ -70,6 +72,11 @@ final class Preferences {
     var llmEnabled: Bool {
         get { defaults.bool(forKey: Keys.llmEnabled) }
         set { defaults.set(newValue, forKey: Keys.llmEnabled) }
+    }
+
+    var smartRetranscribeEnabled: Bool {
+        get { defaults.bool(forKey: Keys.smartRetranscribeEnabled) }
+        set { defaults.set(newValue, forKey: Keys.smartRetranscribeEnabled) }
     }
 
     var llmBaseURL: String {

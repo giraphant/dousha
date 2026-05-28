@@ -24,14 +24,14 @@ final class DoubaoBackend: SpeechBackend {
         asr.cancel()
     }
 
-    func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void) {
+    func retranscribeLastRecording(parentTraceId: String?, completion: @escaping @Sendable (String?) -> Void) {
         let url = DoubaoASR.savedAudioURL
         guard FileManager.default.fileExists(atPath: url.path) else {
             completion(nil)
             return
         }
         Task {
-            let text = await asr.retranscribe(wavURL: url)
+            let text = await asr.retranscribe(wavURL: url, parentTraceId: parentTraceId)
             DispatchQueue.main.async { completion(text) }
         }
     }

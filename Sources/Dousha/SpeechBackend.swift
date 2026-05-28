@@ -29,7 +29,20 @@ protocol SpeechBackend: AnyObject {
     /// Re-runs ASR on the last saved WAV from the most recent recording, if
     /// the backend supports it. Returns nil text if there is no saved audio
     /// or the backend cannot replay it.
-    func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void)
+    ///
+    /// - Parameter parentTraceId: The trace ID of the original recording that
+    ///   triggered this replay, if known. Backends that create a new trace ID
+    ///   for the replay session log the parent alongside it so `grep` on the
+    ///   original ID also finds the replay entry.
+    func retranscribeLastRecording(parentTraceId: String?, completion: @escaping @Sendable (String?) -> Void)
+}
+
+extension SpeechBackend {
+    /// Convenience overload for callers that have no parent trace ID (e.g.
+    /// manual menu actions). Delegates to the required method with `nil`.
+    func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void) {
+        retranscribeLastRecording(parentTraceId: nil, completion: completion)
+    }
 }
 
 enum SpeechBackendFactory {

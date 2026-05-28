@@ -8,3 +8,6 @@ icon.iconset/
 # Reverse-engineering artifacts (large binaries, decompiled output)
 *.apk
 DoubaoIME-decompiled/
+
+# Third-party reference projects kept locally for inspiration
+BorderBeam/

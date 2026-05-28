@@ -181,7 +181,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         lastText = ""
     }
 
-    func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void) {
+    func retranscribeLastRecording(parentTraceId: String?, completion: @escaping @Sendable (String?) -> Void) {
         completion(nil)  // Apple backend doesn't save WAVs
     }
 
