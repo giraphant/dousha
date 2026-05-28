@@ -112,9 +112,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let btn = statusItem.button {
-            btn.image = NSImage(systemSymbolName: "mic.fill",
-                                accessibilityDescription: "Dousha")
-            btn.image?.isTemplate = true
+            if let url = Bundle.main.url(forResource: "MenuIcon", withExtension: "png"),
+               let img = NSImage(contentsOf: url) {
+                img.size = NSSize(width: 20, height: 20)
+                img.isTemplate = true
+                btn.image = img
+            } else {
+                btn.image = NSImage(systemSymbolName: "mic.fill",
+                                    accessibilityDescription: "Dousha")
+                btn.image?.isTemplate = true
+            }
         }
         rebuildMenu()
     }
