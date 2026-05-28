@@ -675,12 +675,42 @@ public actor DoubaoASR {
 
         if !text.isEmpty {
             self.lastTranscriptAt = Date()
+
+            // Debug instrumentation: per-recv parsed flags + text preview. Helps us
+            // see WHEN Doubao actually flips is_vad_finished, vs. when it just
+            // resets text mid-stream without warning. Trimmable once segment
+            // handling is fully understood.
+            let preview = text.prefix(40).replacingOccurrences(of: "\n", with: " ")
+            doushaLog("[DoubaoASR] result isInterim=\(isInterim) vadFinished=\(vadFinished) nonstream=\(nonstreamResult) textLen=\(text.count) preview=\(preview)")
+
             // Doubao chunks long audio into VAD-bounded utterances. Each utterance has its
             // own cumulative `text` field that does NOT include prior utterances. So when
             // is_vad_finished=true && !is_interim, we commit `text` as a finalized
             // segment; the next utterance's interims start from empty again. The HUD and
             // final paste join all committed segments + the in-progress interim.
-            if (!isInterim && vadFinished) || nonstreamResult {
+            //
+            // Heuristic rescue: in long recordings Doubao has been observed to start
+            // a new utterance WITHOUT first sending is_vad_finished=true for the
+            // previous one. We detect this as a dramatic text-shrinkage relative
+            // to the current interim and commit the previous interim as a segment
+            // before adopting the new text. Without this, multi-minute recordings
+            // lose every utterance except the last one (the only one that gets the
+            // explicit finalization signal at session-end).
+            let isVadCommit = (!isInterim && vadFinished) || nonstreamResult
+            let looksLikeNewUtterance = !isVadCommit
+                && !currentInterim.isEmpty
+                && text.count * 2 < currentInterim.count
+                && !currentInterim.hasPrefix(text)
+
+            if looksLikeNewUtterance {
+                let rescued = currentInterim
+                committedSegments.append(rescued)
+                segmentCommittedAt.append(Date())
+                currentInterim = text
+                doushaLog("[DoubaoASR] segment final (rescued from interim, newText.len=\(text.count))='\(rescued)' totalSegments=\(committedSegments.count)")
+                // Note: deliberately did NOT also commit `text` here — it's the
+                // new utterance's in-progress interim, not a finalized segment.
+            } else if isVadCommit {
                 committedSegments.append(text)
                 segmentCommittedAt.append(Date())
                 currentInterim = ""
