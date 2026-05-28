@@ -4,3 +4,7 @@ Package.resolved
 *.xcodeproj/
 .DS_Store
 icon.iconset/
+
+# Reverse-engineering artifacts (large binaries, decompiled output)
+*.apk
+DoubaoIME-decompiled/
