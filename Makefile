@@ -8,12 +8,17 @@ DIST_APP    := $(DIST_DIR)/$(APP_NAME).app
 DIST_DMG    := $(DIST_DIR)/$(APP_NAME).dmg
 DMG_STAGING := $(BUILD_DIR)/dmg-staging
 
+# Per-developer signing config lives in Makefile.local (gitignored). It
+# defines DEVELOPER_ID_IDENTITY and NOTARY_PROFILE for your Apple account.
+# If absent, the public defaults below act as placeholders and the codesign
+# step falls back to ad-hoc — see AGENTS.md release workflow for setup.
+-include Makefile.local
+
 # Single signing identity for both local dev installs and release DMGs.
 # Same cert + team identifier means TCC grants persist across `make install`
 # and `make release`, since the TCC csreq is anchored to the team ID.
-# Falls back to ad-hoc if the cert isn't in the keychain (fresh clone / CI).
 DEVELOPER_ID_IDENTITY ?= Developer ID Application: <Your Name> (<TEAMID>)
-NOTARY_PROFILE        ?= DoushaNotaryProfile
+NOTARY_PROFILE        ?= <YourNotaryProfile>
 
 CODESIGN_IDENTITY     ?= $(DEVELOPER_ID_IDENTITY)
 CODESIGN_OPTIONS      ?= --options runtime

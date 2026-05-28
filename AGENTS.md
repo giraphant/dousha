@@ -29,14 +29,19 @@ Per-release checklist:
 2. Commit + push the bump.
 3. Run `make release VERSION=X.Y.Z`. Notarization usually takes 2–5 min; the target blocks until Accepted.
 
-One-time setup (already done on <redacted> machine, document for fresh clones):
+One-time setup (per dev machine):
 
-- Developer ID cert `Developer ID Application: <Your Name> (<TEAMID>)` must be in the login keychain with its private key.
-- Notary credentials stored as keychain profile `DoushaNotaryProfile`:
+- Apple Developer ID cert must be in the login keychain with its private key.
+- Notary credentials stored as a keychain profile:
   ```
-  xcrun notarytool store-credentials DoushaNotaryProfile \
-    --apple-id <apple id> --team-id <TEAMID> \
+  xcrun notarytool store-credentials <YourNotaryProfile> \
+    --apple-id <your apple id> --team-id <YourTeamID> \
     --password <app-specific password>
+  ```
+- Create a `Makefile.local` (gitignored) overriding the public Makefile placeholders:
+  ```
+  DEVELOPER_ID_IDENTITY := Developer ID Application: <Your Name> (<TEAMID>)
+  NOTARY_PROFILE        := <YourNotaryProfile>
   ```
 
 ### Release gotchas — do not regress
