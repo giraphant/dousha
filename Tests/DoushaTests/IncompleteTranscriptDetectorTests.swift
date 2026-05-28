@@ -104,7 +104,7 @@ final class IncompleteTranscriptDetectorTests: XCTestCase {
     }
 
     func test_normalSegmentGaps_notFlagged() {
-        // Healthy VAD-segmented recording: gaps stay under 10s.
+        // Healthy VAD-segmented recording: gaps stay well under threshold.
         let result = r(
             text: String(repeating: "字", count: 80),
             audioDuration: 30.0,
@@ -120,7 +120,7 @@ final class IncompleteTranscriptDetectorTests: XCTestCase {
             text: String(repeating: "字", count: 80),
             audioDuration: 30.0,
             lastTranscriptAge: 0.5,
-            maxSegmentGap: 10.0
+            maxSegmentGap: 25.0
         )
         XCTAssertFalse(det.isLikelyIncomplete(result: result, language: "zh-CN"))
     }

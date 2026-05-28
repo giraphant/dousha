@@ -37,10 +37,16 @@ struct IncompleteTranscriptDetector {
     let maxLastTranscriptAge: TimeInterval = 3.0
 
     /// Max acceptable gap between segment commits (or between audio start and
-    /// first commit). >10s means Doubao silently dropped a chunk of audio in
-    /// that window — the rate-based signal won't catch this when the surviving
-    /// segments are dense enough.
-    let maxSegmentGap: TimeInterval = 10.0
+    /// first commit). Loosely intended as "if no segment was finalized for >N
+    /// seconds, Doubao probably dropped audio in that window".
+    ///
+    /// Tuned to 25s because DoubaoASR's interim-rescue logic creates segment
+    /// boundaries whenever the server starts a new utterance — those rescues
+    /// can be 20+ seconds apart during normal continuous speech, so a stricter
+    /// threshold trips false-positive retranscribes constantly. The rate-based
+    /// signal (char/sec floor) covers the "real chunk dropped" case better
+    /// anyway.
+    let maxSegmentGap: TimeInterval = 25.0
 
     /// Per-language chars-per-second floor. Recordings below this rate get
     /// flagged. Picked conservatively (about 50% of typical conversational

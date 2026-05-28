@@ -483,9 +483,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         DispatchQueue.main.async {
                             let retriedText = (retried?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
                             let finalText: String
-                            if let r = retriedText {
-                                doushaLog("[Dousha] retranscribe succeeded: original.len=\(text.count) retried.len=\(r.count)")
+                            // Only adopt the retry if it actually recovered more
+                            // text. The retranscribe path itself can be truncated
+                            // (server drops, our own finish-wait expiring early)
+                            // and in those cases we'd be replacing a good original
+                            // transcript with a shorter, worse one.
+                            if let r = retriedText, r.count > text.count {
+                                doushaLog("[Dousha] retranscribe succeeded: original.len=\(text.count) retried.len=\(r.count) — using retried")
                                 finalText = r
+                            } else if let r = retriedText {
+                                doushaLog("[Dousha] retranscribe shorter than original (original.len=\(text.count) retried.len=\(r.count)) — keeping original")
+                                finalText = text
                             } else {
                                 doushaLog("[Dousha] retranscribe returned empty — falling back to original (len=\(text.count))")
                                 finalText = text
