@@ -54,6 +54,14 @@ public actor DoubaoASR {
     /// the URLSession.
     private var wsClosedChannel: OneShotChannel<Void>?
 
+    /// Periodic WebSocket-level PING. Lifecycle is tied to the WS itself: started
+    /// in openWebSocket() and cancelled in closeWebSocket() and on receive-loop
+    /// failure. The official Doubao IME client sets a 3s ping interval via
+    /// SAMICore — without it the server tears down idle sessions, which on a
+    /// long recording with mid-sentence pauses manifests as the recording
+    /// "getting cut off" before the user finishes.
+    private var pingTask: Task<Void, Never>?
+
     // Callbacks (assigned in start)
     private var onPartial: (@Sendable (String) -> Void)?
     private var onAudioLevel: (@Sendable (Float) -> Void)?
@@ -326,12 +334,14 @@ public actor DoubaoASR {
 
         // Wait for SessionFinished. Doubao streaming ASR has ~1.5-2s first-response
         // latency, and long fast recordings can have several seconds of backlog
-        // to flush after the server sees FinishSession. 4s is wide enough to
-        // cover both short utterances and long-recording backlog drainage.
+        // to flush after the server sees FinishSession. The official Doubao IME
+        // client sets SAMICoreAsrContextCreateParameter.finish_wait_timeout = 10000,
+        // so we mirror that — 4s was empirically too short for ~30s+ recordings
+        // where the server backlog took longer to drain than the wait allowed.
         let waitStart = Date()
         let outcomeStr: String
         if let channel = finishedChannel {
-            switch await waitWithTimeout(channel: channel, timeout: 4.0) {
+            switch await waitWithTimeout(channel: channel, timeout: 10.0) {
             case .signaled: outcomeStr = "signaled"
             case .timeout: outcomeStr = "timedOut"
             case .cancelled: outcomeStr = "cancelled"
@@ -388,6 +398,7 @@ public actor DoubaoASR {
     }
 
     private func closeWebSocket() async {
+        stopPingLoop()
         guard let ws = ws else {
             session?.invalidateAndCancel()
             session = nil
@@ -437,6 +448,37 @@ public actor DoubaoASR {
         self.ws?.resume()
         // The receive loop is shared across all sessions on this connection.
         startReceiveLoop()
+        startPingLoop()
+    }
+
+    private func startPingLoop() {
+        pingTask?.cancel()
+        let intervalNs = UInt64(DoubaoConstants.websocketPingIntervalSeconds * 1_000_000_000)
+        pingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalNs)
+                if Task.isCancelled { return }
+                await self?.sendKeepalivePing()
+            }
+        }
+    }
+
+    private func stopPingLoop() {
+        pingTask?.cancel()
+        pingTask = nil
+    }
+
+    /// Fire-and-forget WS-level PING. URLSessionWebSocketTask calls the pong
+    /// handler when the server replies (or with an error if the WS is dead);
+    /// we only log on error — the receive loop is the canonical "WS died"
+    /// signal, this is just for visibility.
+    private func sendKeepalivePing() {
+        guard let ws = ws else { return }
+        ws.sendPing { error in
+            if let error = error {
+                doushaLog("[DoubaoASR] ws ping failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func sendInitialMessages(deviceId: String) async throws {
@@ -489,6 +531,10 @@ public actor DoubaoASR {
     }
 
     private func sessionConfigJSON(deviceId: String) -> String {
+        // `end_smooth_window_ms` and `use_twopass_retry` mirror the official
+        // Doubao IME client's StartSession config. Without `end_smooth_window_ms`
+        // the server falls back to a default VAD finalization window that has
+        // been observed to truncate the tail of long utterances.
         let payload: [String: Any] = [
             "audio_info": [
                 "channel": DoubaoConstants.channels,
@@ -503,7 +549,9 @@ public actor DoubaoASR {
                 "did": deviceId,
                 "enable_asr_threepass": true,
                 "enable_asr_twopass": true,
-                "input_mode": "tool"
+                "end_smooth_window_ms": 800,
+                "input_mode": "tool",
+                "use_twopass_retry": true
             ]
         ]
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
@@ -551,6 +599,7 @@ public actor DoubaoASR {
                 deliverError(err)
             }
             // Connection is dead — drop references so next start() reopens.
+            stopPingLoop()
             ws = nil
             session?.invalidateAndCancel()
             session = nil
@@ -865,8 +914,12 @@ public actor DoubaoASR {
 
             try await sendFinishSession()
 
+            // Match the main session's 10s wait — retranscribe burst-sends the
+            // whole WAV in one shot, so the server's post-finish processing
+            // backlog can be substantial. 5s was observed to cut the server off
+            // mid-decode on long recordings (jsonLen still growing when we hung up).
             if let channel = finishedChannel {
-                _ = await waitWithTimeout(channel: channel, timeout: 5.0)
+                _ = await waitWithTimeout(channel: channel, timeout: 10.0)
             }
         } catch {
             doushaLog("[DoubaoASR] retranscribe error: \(error.localizedDescription)")

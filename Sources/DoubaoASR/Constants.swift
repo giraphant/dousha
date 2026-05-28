@@ -46,4 +46,10 @@ enum DoubaoConstants {
     static let frameDurationMs = 20
     static var samplesPerFrame: Int { sampleRate * frameDurationMs / 1000 }   // 320
     static var bytesPerFrame: Int { samplesPerFrame * 2 }                     // 640 (Int16)
+
+    // WebSocket keepalive. Matches the official Doubao IME client's
+    // SAMICore.UpdateFrontierClientPingInterval(3000) — without periodic pings
+    // the server tears down long-running sessions mid-stream and the tail
+    // of a long recording silently disappears.
+    static let websocketPingIntervalSeconds: TimeInterval = 3.0
 }

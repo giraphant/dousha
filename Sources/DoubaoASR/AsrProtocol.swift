@@ -85,10 +85,15 @@ enum AsrMessageBuilder {
     }
 
     static func taskRequest(audio: Data, requestId: String, frameState: FrameState, timestampMs: Int64) -> Data {
+        // The official Android client signals end-of-audio via `finish_audio: true`
+        // in the per-block extra JSON in addition to the protobuf frame_state.
+        // Without this hint, the server's VAD has been observed to leave the
+        // tail utterance unfinalized on long recordings.
+        let extraJSON = frameState == .last ? "{\"finish_audio\":true}" : "{}"
         var r = AsrRequest()
         r.serviceName = "ASR"
         r.methodName = "TaskRequest"
-        r.payload = "{\"extra\":{},\"timestamp_ms\":\(timestampMs)}"
+        r.payload = "{\"extra\":\(extraJSON),\"timestamp_ms\":\(timestampMs)}"
         r.audioData = audio
         r.requestId = requestId
         r.frameState = frameState
