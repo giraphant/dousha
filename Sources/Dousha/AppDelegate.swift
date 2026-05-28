@@ -126,20 +126,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    /// Builds an SF Symbol image rendered as a template (auto light/dark) at menu size.
+    private func menuIcon(_ symbol: String) -> NSImage? {
+        guard let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else { return nil }
+        img.isTemplate = true
+        return img
+    }
+
     private func rebuildMenu() {
         let menu = NSMenu()
 
         let triggerLabel = HotkeyMonitor.displayName(forKeyCode: prefs.hotkey.keyCode)
-        let modeLabel = prefs.hotkey.mode == .pushToTalk ? "Hold" : "Tap"
-        let header = NSMenuItem(title: "Dousha — \(modeLabel) \(triggerLabel) to record",
+        let modeLabel = prefs.hotkey.mode == .pushToTalk ? "长按" : "轻点"
+        let header = NSMenuItem(title: "豆沙 · \(modeLabel) \(triggerLabel) 听写",
                                 action: nil, keyEquivalent: "")
+        header.image = menuIcon("mic.fill")
         header.isEnabled = false
         menu.addItem(header)
 
         menu.addItem(.separator())
 
-        // Engine submenu
-        let engineItem = NSMenuItem(title: "Engine", action: nil, keyEquivalent: "")
+        // 引擎 — 子菜单，标题右侧带当前选中值
+        let engineItem = NSMenuItem(title: "引擎：\(prefs.engine.displayName)",
+                                    action: nil, keyEquivalent: "")
+        engineItem.image = menuIcon("waveform")
         let engineMenu = NSMenu()
         for e in Engine.allCases {
             let item = NSMenuItem(title: e.displayName,
@@ -151,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engineMenu.addItem(item)
         }
         engineMenu.addItem(.separator())
-        let resetItem = NSMenuItem(title: "Reset Doubao Credentials…",
+        let resetItem = NSMenuItem(title: "重置豆包凭据…",
                                    action: #selector(resetDoubaoCredentials),
                                    keyEquivalent: "")
         resetItem.target = self
@@ -159,10 +169,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engineItem.submenu = engineMenu
         menu.addItem(engineItem)
 
-        // Language submenu
-        let langItem = NSMenuItem(title: "Language", action: nil, keyEquivalent: "")
+        // 语言 — 子菜单，标题右侧带当前选中值
+        let langOptions = LanguageMenu.options(for: prefs.engine, selectedLanguage: prefs.language)
+        let currentLang = langOptions.first(where: { $0.isSelected })?.title ?? "自动"
+        let langItem = NSMenuItem(title: "语言：\(currentLang)", action: nil, keyEquivalent: "")
+        langItem.image = menuIcon("globe")
         let langMenu = NSMenu()
-        for option in LanguageMenu.options(for: prefs.engine, selectedLanguage: prefs.language) {
+        for option in langOptions {
             let item = NSMenuItem(title: option.title,
                                   action: #selector(selectLanguage(_:)),
                                   keyEquivalent: "")
@@ -174,29 +187,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         langItem.submenu = langMenu
         menu.addItem(langItem)
 
-        // LLM Refinement submenu (just the toggle + status — Settings is now top-level)
-        let llmItem = NSMenuItem(title: "LLM Refinement", action: nil, keyEquivalent: "")
-        let llmMenu = NSMenu()
-        let toggle = NSMenuItem(title: "Enable LLM Refinement",
-                                action: #selector(toggleLLM),
-                                keyEquivalent: "")
-        toggle.target = self
-        toggle.state = prefs.llmEnabled ? .on : .off
-        llmMenu.addItem(toggle)
-        let configured = NSMenuItem(
-            title: llm.isConfigured ? "Status: Configured" : "Status: Not configured",
-            action: nil, keyEquivalent: "")
-        configured.isEnabled = false
-        llmMenu.addItem(configured)
-        llmItem.submenu = llmMenu
+        // 润色 — 顶层项，状态写在标题里（和 引擎：/语言： 统一）
+        let llmItem = NSMenuItem(title: "润色：\(prefs.llmEnabled ? "开启" : "关闭")",
+                                 action: #selector(toggleLLM),
+                                 keyEquivalent: "")
+        llmItem.image = menuIcon("sparkles")
+        llmItem.target = self
         menu.addItem(llmItem)
 
-        // Re-transcribe Last Recording — manual escape hatch for incomplete detection misses
+        // 重新转写 — 漏检时的手动补救入口
         let retranscribeItem = NSMenuItem(
-            title: "Re-transcribe Last Recording",
+            title: "重新转写",
             action: #selector(retranscribeLastRecording),
             keyEquivalent: ""
         )
+        retranscribeItem.image = menuIcon("arrow.clockwise")
         retranscribeItem.target = self
         // Disable when there's no saved WAV yet, when a session is live, or when the
         // current engine isn't Doubao (Apple backend doesn't save WAVs).
@@ -208,24 +213,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        // Top-level Settings — hosts hotkey + LLM config. ⌘, is the macOS convention.
-        let settingsItem = NSMenuItem(title: "Settings…",
+        // 设置 — 热键 + LLM 配置。⌘, 是 macOS 惯例。
+        let settingsItem = NSMenuItem(title: "设置…",
                                       action: #selector(openSettings),
                                       keyEquivalent: ",")
+        settingsItem.image = menuIcon("gearshape")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
         menu.addItem(.separator())
 
-        let about = NSMenuItem(title: "About Dousha",
+        let about = NSMenuItem(title: "关于",
                                action: #selector(showAbout),
                                keyEquivalent: "")
+        about.image = menuIcon("info.circle")
         about.target = self
         menu.addItem(about)
 
-        let quit = NSMenuItem(title: "Quit Dousha",
+        let quit = NSMenuItem(title: "退出",
                               action: #selector(NSApplication.terminate(_:)),
                               keyEquivalent: "q")
+        quit.image = menuIcon("power")
         menu.addItem(quit)
 
         statusItem.menu = menu

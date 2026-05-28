@@ -8,7 +8,7 @@ enum Engine: String, CaseIterable {
     var displayName: String {
         switch self {
         case .apple:  return "Apple Speech"
-        case .doubao: return "Doubao IME"
+        case .doubao: return "豆包"
         }
     }
 }

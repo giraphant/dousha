@@ -14,3 +14,6 @@ BorderBeam/
 
 # Per-developer signing config (Apple Developer ID, notary profile)
 Makefile.local
+
+# Internal docs (reverse-engineering notes, manual test logs) — not for public repo
+docs/

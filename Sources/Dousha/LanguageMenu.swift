@@ -20,7 +20,7 @@ struct LanguageMenu {
                 )
             }
         case .doubao:
-            return [Option(title: "Auto", rawValue: autoIdentifier, isSelected: true)]
+            return [Option(title: "自动", rawValue: autoIdentifier, isSelected: true)]
         }
     }
 

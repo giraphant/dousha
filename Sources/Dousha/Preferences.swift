@@ -52,7 +52,7 @@ final class Preferences {
             Keys.llmBaseURL:               "https://api.openai.com/v1",
             Keys.llmModel:                 "gpt-4o-mini",
             Keys.llmAPIKey:                "",
-            Keys.smartRetranscribeEnabled: true,
+            Keys.smartRetranscribeEnabled: false,
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
             Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
             Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode)

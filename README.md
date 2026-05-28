@@ -1,21 +1,29 @@
-# 豆沙 (Dousha)
+<p align="center">
+  <img src="Resources/icon.png" width="128" alt="Dousha logo">
+</p>
 
-A macOS menu-bar dictation utility. Hold a configurable modifier key (or click once in toggle mode) to record; release to transcribe and paste into the focused text field.
+<h1 align="center">豆沙 (Dousha)</h1>
 
-Spiritual fork of [SpeechMore](https://github.com/gfreezy/SpeechMore) with vendored [DoubaoASR](https://github.com/gfreezy/DoubaoASR), both by [@gfreezy](https://github.com/gfreezy), MIT.
+A tiny macOS menu-bar app that gives you Doubao's voice dictation **without installing the Doubao IME**. Doubao (豆包) minus its wrapper = Dousha (豆沙) — just the filling, no bun.
 
-## Build
+Hold a key, talk, release — the transcript pastes into whatever you're typing in.
+
+Spiritual fork of [SpeechMore](https://github.com/gfreezy/SpeechMore) + [DoubaoASR](https://github.com/gfreezy/DoubaoASR) by [@gfreezy](https://github.com/gfreezy).
+
+## Install
+
+Download the DMG from the [latest release](https://github.com/giraphant/dousha/releases/latest), drag to `/Applications`, and grant Microphone + Accessibility when asked.
+
+Or build it yourself (macOS 14+):
 
 ```sh
-make build        # produces .build/Dousha.app
-make run          # build and open
-make install      # build and install to /Applications
-make clean
-make reset-perms  # clear TCC grants if behavior gets weird
+make install
 ```
 
-Requires macOS 14+. After first launch grant Microphone, Speech Recognition, and Accessibility permissions.
+## Use
 
-## Design
+Hold **Right Shift**, speak, release. That's it. Open Settings from the menu bar to change the key, switch to toggle mode, or pick a language / engine.
 
-See `docs/superpowers/specs/2026-05-27-dousha-design.md`.
+## License
+
+MIT.
