@@ -12,7 +12,13 @@ Spiritual fork of [SpeechMore](https://github.com/gfreezy/SpeechMore) + [DoubaoA
 
 ## Install
 
-Download the DMG from the [latest release](https://github.com/giraphant/dousha/releases/latest), drag to `/Applications`, and grant Microphone + Accessibility when asked.
+Via [Homebrew](https://brew.sh) (easiest — `brew upgrade` keeps it current):
+
+```sh
+brew install --cask giraphant/tap/dousha
+```
+
+Or download the DMG from the [latest release](https://github.com/giraphant/dousha/releases/latest), drag to `/Applications`, and grant Microphone + Accessibility when asked.
 
 Or build it yourself (macOS 14+):
 
