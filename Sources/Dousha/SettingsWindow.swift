@@ -40,6 +40,7 @@ struct SettingsView: View {
     @State private var isTesting: Bool = false
 
     @State private var sonioxAPIKey: String = Preferences.shared.sonioxAPIKey
+    @State private var sonioxMode: SonioxMode = Preferences.shared.sonioxMode
     @State private var sonioxStatus: String = ""
     @State private var sonioxStatusIsError: Bool = false
     @State private var isTestingSoniox: Bool = false
@@ -186,6 +187,15 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 10) {
+                field(label: "模式") {
+                    Picker("", selection: $sonioxMode) {
+                        Text("实时").tag(SonioxMode.realtime)
+                        Text("高精度（异步）").tag(SonioxMode.async)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .help("实时：边说边转写，低延迟。高精度（异步）：停止后整段上传，精度更高但无实时反馈。")
+                }
                 field(label: "API 密钥") {
                     HStack(spacing: 6) {
                         SecureField("soniox API key", text: $sonioxAPIKey)
@@ -251,6 +261,7 @@ struct SettingsView: View {
         Preferences.shared.llmAPIKey  = apiKey
         Preferences.shared.llmModel   = model
         Preferences.shared.sonioxAPIKey = sonioxAPIKey
+        Preferences.shared.sonioxMode = sonioxMode
         status = "已保存。"
         statusIsError = false
         sonioxStatus = "已保存。"

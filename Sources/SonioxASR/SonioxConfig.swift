@@ -1,5 +1,14 @@
 import Foundation
 
+/// How Soniox transcribes a recording.
+/// - `realtime`: stream PCM live over the WebSocket (`stt-rt-v4`), low latency.
+/// - `async`: capture to a WAV, then upload the whole file to the async REST
+///   API (`stt-async-v4`) on stop — higher accuracy, no live feedback.
+public enum SonioxMode: String, Sendable, CaseIterable {
+    case realtime
+    case async
+}
+
 /// Soniox real-time STT constants and the first-message config builder.
 ///
 /// The protocol is far simpler than Doubao: raw PCM s16le over a plain
@@ -11,6 +20,11 @@ public enum SonioxConfig {
     public static let model = "stt-rt-v4"
     public static let sampleRate = 16_000
     public static let channels = 1
+
+    /// Async (batch) REST API. Higher accuracy than real-time, no live feedback:
+    /// the whole WAV is uploaded on stop, transcribed server-side, then polled.
+    public static let asyncBaseURL = "https://api.soniox.com"
+    public static let asyncModel = "stt-async-v4"
 
     /// 20ms of int16 mono @16kHz = 320 samples = 640 bytes. Matches Doubao's
     /// framing so the existing mic-tap → PCM pipeline drops in unchanged.

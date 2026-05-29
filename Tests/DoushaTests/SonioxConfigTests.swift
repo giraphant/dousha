@@ -35,6 +35,17 @@ final class SonioxConfigTests: XCTestCase {
         XCTAssertEqual(SonioxConfig.bytesPerFrame, 640)
     }
 
+    func test_asyncConstants() {
+        XCTAssertEqual(SonioxConfig.asyncBaseURL, "https://api.soniox.com")
+        XCTAssertEqual(SonioxConfig.asyncModel, "stt-async-v4")
+    }
+
+    func test_sonioxModeRawValuesRoundTrip() {
+        XCTAssertEqual(SonioxMode(rawValue: "realtime"), .realtime)
+        XCTAssertEqual(SonioxMode(rawValue: "async"), .async)
+        XCTAssertEqual(SonioxMode.allCases.count, 2)
+    }
+
     func test_keepaliveMessageShape() throws {
         let obj = try JSONSerialization.jsonObject(with: Data(SonioxConfig.keepaliveMessageJSON.utf8)) as? [String: Any]
         XCTAssertEqual(obj?["type"] as? String, "keepalive")

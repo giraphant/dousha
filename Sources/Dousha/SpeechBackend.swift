@@ -64,7 +64,8 @@ enum SpeechBackendFactory {
         case .doubao:
             return DoubaoBackend(language: language)
         case .soniox:
-            return SonioxBackend(apiKey: Preferences.shared.sonioxAPIKey)
+            return SonioxBackend(apiKey: Preferences.shared.sonioxAPIKey,
+                                 mode: Preferences.shared.sonioxMode)
         }
     }
 }

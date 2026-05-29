@@ -13,6 +13,7 @@ import ASRSupport
 /// binary frame (`.data(Data())`), matching the JS reference's `ArrayBuffer(0)`.
 public actor SonioxASR {
     private let apiKey: String
+    private let mode: SonioxMode
 
     private let audioEngine = AVAudioEngine()
     private var pcmConverter: AVAudioConverter?
@@ -76,9 +77,11 @@ public actor SonioxASR {
     }
 
     /// Creates an idle recognizer. No mic, network, or key validation happens
-    /// until `start()`.
-    public init(apiKey: String) {
+    /// until `start()`. `mode` picks real-time WebSocket streaming or async
+    /// (batch) upload-on-stop.
+    public init(apiKey: String, mode: SonioxMode = .realtime) {
         self.apiKey = apiKey
+        self.mode = mode
     }
 
     // MARK: - Lifecycle
@@ -139,6 +142,13 @@ public actor SonioxASR {
             // Start mic FIRST so audio buffers while the WS sets up.
             try startMicTap()
             doushaLog("[SonioxASR] mic tap started (pre-WS)")
+
+            // Async mode captures to the WAV only — no live WebSocket. The whole
+            // file is uploaded to the batch REST API on stop().
+            guard mode == .realtime else {
+                doushaLog("[SonioxASR] traceId=\(requestId) async mode — WAV-only capture, no WS")
+                return
+            }
 
             try openWebSocket()
             try await sendConfigMessage()
@@ -219,6 +229,10 @@ public actor SonioxASR {
             self.wavWriter = nil
         }
 
+        if mode == .async {
+            return await stopAsync()
+        }
+
         do {
             try await flushPendingFrames()
             try await flushLastPartialFrame()
@@ -234,11 +248,66 @@ public actor SonioxASR {
         }
         doushaLog("[SonioxASR] traceId=\(requestId) post-EOS wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms finished=\(parser.isFinished)")
 
-        await closeWebSocket()
-
+        // The transcript is final once the finished-wait returns, so build the
+        // result and hand it back NOW. The WS close handshake (up to 1s) runs
+        // detached so it never delays the paste. We unhook the socket/session
+        // from actor state SYNCHRONOUSLY here so a fast restart can't be torn
+        // down by the trailing close (see detachAndCloseWebSocketInBackground).
         let result = makeResult()
         doushaLog("[SonioxASR] traceId=\(requestId) stop final text.len=\(result.text.count)")
+        detachAndCloseWebSocketInBackground()
         return result
+    }
+
+    /// Synchronously unhooks the current socket/session from actor state and
+    /// bumps the generation, then runs the up-to-1s WS close handshake in a
+    /// detached task. Because `self.ws`/`self.session` are cleared before this
+    /// returns, a reentrant `_start()` that opens a fresh socket can't be
+    /// clobbered by the trailing close — the handshake operates only on the
+    /// captured handles.
+    private func detachAndCloseWebSocketInBackground() {
+        stopKeepalive()
+        guard let closing = ws else {
+            session?.invalidateAndCancel()
+            session = nil
+            return
+        }
+        let closingSession = session
+        self.ws = nil
+        self.session = nil
+        wsGeneration += 1
+
+        let channel = OneShotChannel<Void>()
+        wsClosedChannel = channel
+        closing.cancel(with: .normalClosure, reason: nil)
+        Task {
+            if case .timeout = await self.waitWithTimeout(channel: channel, timeout: 1.0) {
+                doushaLog("[SonioxASR] WS close handshake timed out — tearing down anyway")
+            }
+            closingSession?.invalidateAndCancel()
+        }
+    }
+
+    /// Async-mode stop: the WAV is already closed; upload it to the batch REST
+    /// API and return the server transcript. On any error, surfaces it via
+    /// onError and returns an empty-text result (the WAV is preserved so the
+    /// retranscribe path can retry).
+    private func stopAsync() async -> TranscriptionResult {
+        let savedURL = Self.savedAudioURL
+        guard FileManager.default.fileExists(atPath: savedURL.path) else {
+            doushaLog("[SonioxASR] traceId=\(requestId) async stop — no WAV captured")
+            return makeResult()
+        }
+        let client = SonioxAsyncClient(apiKey: apiKey)
+        do {
+            let text = try await client.transcribe(fileURL: savedURL, traceId: requestId)
+            parser.ingest(object: ["tokens": [["text": text, "is_final": true]], "finished": true])
+            doushaLog("[SonioxASR] traceId=\(requestId) async stop text.len=\(text.count)")
+        } catch {
+            doushaLog("[SonioxASR] traceId=\(requestId) async stop error=\(error.localizedDescription)")
+            deliverError(error)
+        }
+        return makeResult()
     }
 
     private func makeResult() -> TranscriptionResult {
@@ -506,6 +575,9 @@ public actor SonioxASR {
 
     private func appendAndDrainPCM(_ data: Data) async {
         guard isRunning else { return }
+        // Async mode never streams PCM — the WAV side-recording is the payload.
+        // Skip buffering so a long recording can't grow an unbounded Data.
+        guard mode == .realtime else { return }
         totalPcmBytesOut += data.count
         pcmBuffer.append(data)
         try? await flushPendingFrames()
@@ -557,6 +629,20 @@ public actor SonioxASR {
         guard !apiKey.isEmpty else {
             doushaLog("[SonioxASR] retranscribe rejected — missing API key")
             return ""
+        }
+
+        // Async mode replays through the batch REST API for accuracy parity with
+        // a live async recording, rather than streaming the WAV over the RT WS.
+        if mode == .async {
+            self.requestId = UUID().uuidString.lowercased()
+            let parentField = parentTraceId.map { " parent_traceId=\($0)" } ?? ""
+            doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) async retranscribe \(wavURL.lastPathComponent) starting")
+            do {
+                return try await SonioxAsyncClient(apiKey: apiKey).transcribe(fileURL: wavURL, traceId: requestId)
+            } catch {
+                doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) async retranscribe error=\(error.localizedDescription)")
+                return ""
+            }
         }
 
         let savedOnPartial = self.onPartial

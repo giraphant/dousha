@@ -8,8 +8,8 @@ import ASRSupport
 final class SonioxBackend: SpeechBackend {
     private let asr: SonioxASR
 
-    init(apiKey: String) {
-        self.asr = SonioxASR(apiKey: apiKey)
+    init(apiKey: String, mode: SonioxMode) {
+        self.asr = SonioxASR(apiKey: apiKey, mode: mode)
     }
 
     func setLanguage(_ identifier: String) {}

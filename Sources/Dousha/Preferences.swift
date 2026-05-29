@@ -1,4 +1,5 @@
 import Foundation
+import SonioxASR
 
 enum Language: String, CaseIterable {
     case en_US = "en-US"
@@ -30,6 +31,7 @@ final class Preferences {
         static let llmAPIKey                 = "llmAPIKey"
         static let llmModel                  = "llmModel"
         static let sonioxAPIKey              = "sonioxAPIKey"
+        static let sonioxMode                = "sonioxMode"
         static let smartRetranscribeEnabled  = "smartRetranscribeEnabled"
         static let hotkeyKeyCode             = "hotkey.keyCode"
         static let hotkeyMode                = "hotkey.mode"
@@ -54,6 +56,7 @@ final class Preferences {
             Keys.llmModel:                 "gpt-4o-mini",
             Keys.llmAPIKey:                "",
             Keys.sonioxAPIKey:             "",
+            Keys.sonioxMode:               SonioxMode.realtime.rawValue,
             Keys.smartRetranscribeEnabled: false,
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
             Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
@@ -99,6 +102,11 @@ final class Preferences {
     var sonioxAPIKey: String {
         get { defaults.string(forKey: Keys.sonioxAPIKey) ?? "" }
         set { defaults.set(newValue, forKey: Keys.sonioxAPIKey) }
+    }
+
+    var sonioxMode: SonioxMode {
+        get { SonioxMode(rawValue: defaults.string(forKey: Keys.sonioxMode) ?? "") ?? .realtime }
+        set { defaults.set(newValue.rawValue, forKey: Keys.sonioxMode) }
     }
 
     var hotkey: HotkeyConfig {

@@ -1,4 +1,5 @@
 import XCTest
+import SonioxASR
 @testable import Dousha
 
 final class PreferencesTests: XCTestCase {
@@ -62,5 +63,26 @@ final class PreferencesTests: XCTestCase {
         let fresh = Preferences(defaults: defaults)
 
         XCTAssertEqual(fresh.sonioxAPIKey, "soniox-secret")
+    }
+
+    func testSonioxMode_defaultsToRealtime() {
+        XCTAssertEqual(prefs.sonioxMode, .realtime)
+    }
+
+    func testSonioxMode_persistsAsyncAcrossInstances() {
+        prefs.sonioxMode = .async
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.sonioxMode, .async)
+    }
+
+    func testSonioxMode_canSwitchBackToRealtime() {
+        prefs.sonioxMode = .async
+        prefs.sonioxMode = .realtime
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.sonioxMode, .realtime)
     }
 }
