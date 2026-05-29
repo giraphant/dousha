@@ -1,9 +1,33 @@
 import SwiftUI
+import ASRSupport
 
 final class FloatingHUDModel: ObservableObject {
     @Published var status: RecordingStatus = .idle
     @Published var focus: AppFocusTracker.Focus?
     var audioLevel: Float = 0
+
+    /// Live transcript snapshot (final + interim). One published value so a
+    /// final+interim change is a single atomic redraw rather than two.
+    @Published private(set) var transcript: PartialTranscript = .empty
+
+    /// Whether any transcript text exists — drives logo-vs-text in the view.
+    var hasTranscript: Bool { !transcript.combined.isEmpty }
+
+    /// Live update during recording (interim grows, final grows as the server
+    /// finalizes chunks).
+    func updateTranscript(_ partial: PartialTranscript) {
+        transcript = partial
+    }
+
+    /// Release path: the final ASR text replaces everything; interim cleared.
+    func setFinalTranscript(_ text: String) {
+        transcript = PartialTranscript(finalText: text, interimText: "")
+    }
+
+    /// Start of a session (and on error): clear so the logo placeholder shows.
+    func resetTranscript() {
+        transcript = .empty
+    }
 
     /// Whether the HUD is currently expanded to show the finish/cancel buttons.
     /// Driven by SwiftUI .onHover on the visible HUD body; only meaningful while
