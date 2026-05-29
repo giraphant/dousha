@@ -87,8 +87,9 @@ struct FloatingHUDView: View {
     private static let actionDividerHeight: CGFloat = 0.5
 
     // MARK: Live-transcript growth (only used once text arrives)
-    /// Single transcript line box (15pt font + lineSpacing).
-    static let transcriptLineHeight: CGFloat = 21
+    static let transcriptFontSize: CGFloat = 14
+    /// Single transcript line box (font + lineSpacing).
+    static let transcriptLineHeight: CGFloat = 20
     /// Hard cap on visible transcript lines; older lines fade off the top.
     static let maxTranscriptLines: Int = 5
     static let transcriptTopPadding: CGFloat = 14
@@ -126,9 +127,12 @@ struct FloatingHUDView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Single flexible spacer above + fixed gap below = the card is pinned
+            // to the bottom and grows strictly UPWARD. (Two flexible spacers would
+            // center it and make it grow both ways.)
             Spacer(minLength: 0)
             hudCard
-            Spacer(minLength: 40)
+                .padding(.bottom, 40)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -168,7 +172,7 @@ struct FloatingHUDView: View {
             model.isExpanded = hovering
         }
         .animation(.easeInOut(duration: 0.14), value: isExpandedNow)
-        .animation(.easeInOut(duration: 0.18), value: currentCardHeight)
+        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: currentCardHeight)
         .animation(.easeInOut(duration: 0.25), value: model.status)
     }
 
@@ -288,19 +292,19 @@ struct FloatingHUDView: View {
         }
     }
 
-    /// Finalized text dark, interim tail dimmed, concatenated so they wrap as a
+    /// Finalized text solid, interim tail dimmed, concatenated so they wrap as a
     /// single flowing paragraph.
     private var transcriptText: Text {
-        Text(model.transcript.finalText).foregroundColor(.primary.opacity(0.92))
-            + Text(model.transcript.interimText).foregroundColor(.primary.opacity(0.40))
+        Text(model.transcript.finalText).foregroundColor(.primary)
+            + Text(model.transcript.interimText).foregroundColor(.primary.opacity(0.55))
     }
 
     /// The styled transcript — same font/lineSpacing used by both the visible
     /// text and the off-screen measurer so measured height == rendered height.
     private var transcriptStyledText: some View {
         transcriptText
-            .font(.system(size: 15, weight: .regular))
-            .lineSpacing(Self.transcriptLineHeight - 15)
+            .font(.system(size: Self.transcriptFontSize, weight: .medium))
+            .lineSpacing(Self.transcriptLineHeight - Self.transcriptFontSize)
             .multilineTextAlignment(.leading)
     }
 
