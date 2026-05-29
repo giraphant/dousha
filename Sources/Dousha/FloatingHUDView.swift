@@ -81,19 +81,21 @@ struct FloatingHUDView: View {
     /// Hard cap on how many transcript lines the card grows to before the
     /// oldest scrolls off the top under the fade mask.
     static let maxTranscriptLines: Int = 5
-    /// Grown card cap: compact + the 5 transcript lines. The (fixed) panel is
-    /// sized to this so the card never needs the window to resize mid-session.
-    static let maxHeight: CGFloat = compactHeight + transcriptLineHeight * CGFloat(maxTranscriptLines)
+    static let transcriptTopPadding: CGFloat = 12
+    /// Bottom strip reserved for the audio meter (meter + its bottom padding).
+    static let meterRegionHeight: CGFloat = 30
+    /// Transcript text area cap: top padding + the 5 lines. This is the real
+    /// visible-transcript limit, not merely a card-height delta.
+    static let transcriptMaxHeight: CGFloat = transcriptTopPadding + transcriptLineHeight * CGFloat(maxTranscriptLines)
+    /// Grown card cap = transcript cap + meter strip. The (fixed) panel sizes to
+    /// this so the card never needs the window to resize mid-session.
+    static let maxHeight: CGFloat = transcriptMaxHeight + meterRegionHeight
     /// FloatingWindow reads this to size the fixed panel — repointed at the cap.
     static let cardMaxHeight: CGFloat = maxHeight
+    /// Transcript area floor so the first line doesn't shrink the card below compact.
+    static let transcriptMinHeight: CGFloat = compactHeight - meterRegionHeight
 
-    /// Bottom strip reserved for the audio meter (meter + its bottom padding).
-    private static let meterRegionHeight: CGFloat = 30
-    private static let transcriptTopPadding: CGFloat = 12
     private static let transcriptHorizontalPadding: CGFloat = 16
-    /// Transcript text area bounds (card height minus the meter strip).
-    private static let transcriptMinHeight: CGFloat = compactHeight - meterRegionHeight
-    private static let transcriptMaxHeight: CGFloat = maxHeight - meterRegionHeight
     private static let hudShape = RoundedRectangle(cornerRadius: hudCornerRadius, style: .continuous)
 
     /// Hover-driven expansion is only meaningful while recording. In other
@@ -203,6 +205,8 @@ struct FloatingHUDView: View {
                 .padding(.horizontal, Self.transcriptHorizontalPadding)
                 .padding(.top, Self.transcriptTopPadding)
         } else {
+            // Fixed compact height (not .infinity) so the empty card stays at
+            // compactHeight instead of ballooning to the cap behind a lone logo.
             HStack(spacing: 7) {
                 Image(systemName: "waveform")
                     .font(.system(size: 16, weight: .medium))
@@ -210,7 +214,8 @@ struct FloatingHUDView: View {
                     .font(.system(size: 14, weight: .semibold))
             }
             .foregroundColor(.primary.opacity(0.38))
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .frame(maxWidth: .infinity)
+            .frame(height: Self.transcriptMinHeight)
         }
     }
 

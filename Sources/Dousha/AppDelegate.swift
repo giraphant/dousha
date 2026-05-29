@@ -296,6 +296,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         doushaLog("[Dousha] retranscribe menu fired")
         status = .transcribing
+        // Clear any leftover transcript from the previous session — the HUD is
+        // visible during .transcribing, so without this it would show the last
+        // recording's final text while this manual retry runs.
+        hudModel.resetTranscript()
         speech.retranscribeLastRecording { [weak self] text in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -304,6 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.status = .idle
                     return
                 }
+                self.hudModel.setFinalTranscript(text)
                 self.refineAndInject(text)
             }
         }

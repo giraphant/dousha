@@ -15,12 +15,22 @@ final class FloatingHUDLayoutTests: XCTestCase {
     }
 
     @MainActor
-    func testMaxHeightIsFiveTranscriptLinesAboveCompact() {
+    func testTranscriptAreaCapsAtFiveVisibleLines() {
         XCTAssertEqual(FloatingHUDView.maxTranscriptLines, 5)
+        // The transcript text area caps at top padding + 5 line boxes — the real
+        // visible-line limit, not just a card growth delta.
+        XCTAssertEqual(
+            FloatingHUDView.transcriptMaxHeight,
+            FloatingHUDView.transcriptTopPadding
+                + FloatingHUDView.transcriptLineHeight * CGFloat(FloatingHUDView.maxTranscriptLines)
+        )
+    }
+
+    @MainActor
+    func testCardCapIsTranscriptCapPlusMeterStrip() {
         XCTAssertEqual(
             FloatingHUDView.maxHeight,
-            FloatingHUDView.compactHeight
-                + FloatingHUDView.transcriptLineHeight * CGFloat(FloatingHUDView.maxTranscriptLines)
+            FloatingHUDView.transcriptMaxHeight + FloatingHUDView.meterRegionHeight
         )
     }
 }
