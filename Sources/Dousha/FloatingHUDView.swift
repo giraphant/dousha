@@ -14,12 +14,19 @@ final class FloatingHUDModel: ObservableObject {
 
     /// Latest full snapshot from the backend; the reveal catches up to this.
     private var target: PartialTranscript = .empty
-    /// How many characters of `target.combined` are currently revealed.
-    private var revealedCount: Int = 0
+    /// Fractional reveal progress (characters). Sub-char-per-frame so small
+    /// batches drip out slowly instead of snapping in one frame.
+    private var revealProgress: Double = 0
     private var revealTimer: Timer?
-    /// Fraction of the remaining backlog revealed per 60fps tick (min 1 char),
-    /// so it eases: fast when far behind, gentle as it catches up.
-    private static let revealCatchupFraction = 0.22
+    /// Seconds to (mostly) drain the current backlog — the reveal trails the
+    /// input by roughly this, so it keeps streaming until the next batch lands
+    /// instead of bursting then idling.
+    private static let revealTimeConstant = 0.32
+    /// Upper bound on reveal speed so a big jump (e.g. a long pause then a burst)
+    /// still streams rather than dumping instantly.
+    private static let maxRevealRate = 42.0  // chars/sec
+    private static let revealFrameInterval = 1.0 / 60.0
+    private var revealedCount: Int { Int(revealProgress) }
 
     /// Whether any transcript text exists — drives logo-vs-text in the view.
     /// Based on the target so the card switches to transcript mode the instant
@@ -30,9 +37,9 @@ final class FloatingHUDModel: ObservableObject {
     /// any newly-arrived characters smoothly.
     func updateTranscript(_ partial: PartialTranscript) {
         target = partial
-        let total = partial.combined.count
-        if revealedCount > total { revealedCount = total }  // interim shrank — snap back
-        advanceReveal()                                     // reveal a step now (no empty flash)
+        let total = Double(partial.combined.count)
+        if revealProgress > total { revealProgress = total }  // interim shrank — snap back
+        publishRevealed()                                     // no empty flash
         startRevealTimerIfNeeded()
     }
 
@@ -41,7 +48,7 @@ final class FloatingHUDModel: ObservableObject {
     func setFinalTranscript(_ text: String) {
         stopRevealTimer()
         target = PartialTranscript(finalText: text, interimText: "")
-        revealedCount = target.combined.count
+        revealProgress = Double(target.combined.count)
         publishRevealed()
     }
 
@@ -49,15 +56,15 @@ final class FloatingHUDModel: ObservableObject {
     func resetTranscript() {
         stopRevealTimer()
         target = .empty
-        revealedCount = 0
+        revealProgress = 0
         transcript = .empty
     }
 
     // MARK: Reveal animation
 
     private func startRevealTimerIfNeeded() {
-        guard revealTimer == nil, revealedCount < target.combined.count else { return }
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        guard revealTimer == nil, revealProgress < Double(target.combined.count) else { return }
+        let t = Timer(timeInterval: Self.revealFrameInterval, repeats: true) { [weak self] _ in
             self?.advanceReveal()
         }
         RunLoop.main.add(t, forMode: .common)
@@ -70,18 +77,22 @@ final class FloatingHUDModel: ObservableObject {
     }
 
     /// Internal (not private) so tests can pump the reveal without a run loop.
+    /// Advances by `remaining / timeConstant` chars/sec (capped), so it eases in
+    /// — fast when far behind, gentle as it catches up — and trails the input
+    /// continuously rather than draining each batch in a single frame.
     func advanceReveal() {
-        let total = target.combined.count
-        guard revealedCount < total else {
+        let total = Double(target.combined.count)
+        guard revealProgress < total else {
             stopRevealTimer()
-            publishRevealed()
             return
         }
-        let backlog = total - revealedCount
-        let step = max(1, Int((Double(backlog) * Self.revealCatchupFraction).rounded(.up)))
-        revealedCount = min(total, revealedCount + step)
+        let remaining = total - revealProgress
+        let rate = min(Self.maxRevealRate, remaining / Self.revealTimeConstant)
+        var next = revealProgress + rate * Self.revealFrameInterval
+        if total - next < 0.6 { next = total }   // finish the last sub-character tail
+        revealProgress = next
         publishRevealed()
-        if revealedCount >= total { stopRevealTimer() }
+        if revealProgress >= total { stopRevealTimer() }
     }
 
     /// Slice the first `revealedCount` characters of `target`, split back into

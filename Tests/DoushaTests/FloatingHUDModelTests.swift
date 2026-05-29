@@ -3,16 +3,12 @@ import ASRSupport
 @testable import Dousha
 
 final class FloatingHUDModelTests: XCTestCase {
-    /// Pump the character-reveal to completion (no run loop in tests).
+    /// Pump the character-reveal to completion (no run loop in tests). Fractional
+    /// progress means a single step may not change the visible text, so pump a
+    /// fixed, generous number of frames; advanceReveal is a no-op once caught up.
     @MainActor
-    private func flushReveal(_ m: FloatingHUDModel, max: Int = 1000) {
-        var i = 0
-        while m.hasTranscript && i < max {
-            let before = m.transcript.combined
-            m.advanceReveal()
-            if m.transcript.combined == before { break } // caught up
-            i += 1
-        }
+    private func flushReveal(_ m: FloatingHUDModel, frames: Int = 600) {
+        for _ in 0..<frames { m.advanceReveal() }
     }
 
     @MainActor
