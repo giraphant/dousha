@@ -72,30 +72,15 @@ struct FloatingHUDView: View {
     private let barWidth: CGFloat = 5.5
     private let barSpacing: CGFloat = 3
 
-    /// Compact card height: logo placeholder (or one line) + meter, before any
-    /// transcript text has arrived.
+    /// Baseline compact HUD height before the hover actions are shown.
     static let compactHeight: CGFloat = 71
+    static let cardHeight: CGFloat = 71
     static let cardWidth: CGFloat = 280
-    /// Single transcript line box (font + lineSpacing).
-    static let transcriptLineHeight: CGFloat = 21
-    /// Hard cap on how many transcript lines the card grows to before the
-    /// oldest scrolls off the top under the fade mask.
-    static let maxTranscriptLines: Int = 5
-    static let transcriptTopPadding: CGFloat = 12
-    /// Bottom strip reserved for the audio meter (meter + its bottom padding).
-    static let meterRegionHeight: CGFloat = 30
-    /// Transcript text area cap: top padding + the 5 lines. This is the real
-    /// visible-transcript limit, not merely a card-height delta.
-    static let transcriptMaxHeight: CGFloat = transcriptTopPadding + transcriptLineHeight * CGFloat(maxTranscriptLines)
-    /// Grown card cap = transcript cap + meter strip. The (fixed) panel sizes to
-    /// this so the card never needs the window to resize mid-session.
-    static let maxHeight: CGFloat = transcriptMaxHeight + meterRegionHeight
-    /// FloatingWindow reads this to size the fixed panel — repointed at the cap.
-    static let cardMaxHeight: CGFloat = maxHeight
-    /// Transcript area floor so the first line doesn't shrink the card below compact.
-    static let transcriptMinHeight: CGFloat = compactHeight - meterRegionHeight
-
-    private static let transcriptHorizontalPadding: CGFloat = 16
+    static let cardMaxHeight: CGFloat = cardHeight
+    static let contextRowCenterYRatio: CGFloat = 0.30
+    static let levelMeterCenterYRatio: CGFloat = 0.70
+    private static let actionDividerHeight: CGFloat = 0.5
+    private static let actionRowHeight: CGFloat = (cardHeight - actionDividerHeight) / 2
     private static let hudShape = RoundedRectangle(cornerRadius: hudCornerRadius, style: .continuous)
 
     /// Hover-driven expansion is only meaningful while recording. In other
@@ -128,26 +113,20 @@ struct FloatingHUDView: View {
     }
 
     private var hudCard: some View {
-        // Size the card body to its content (compact when empty, taller as the
-        // transcript grows, capped at maxHeight) BEFORE wrapping it in the
-        // chrome, so the blur background + border beam track the live height and
-        // the hover overlay (an .overlay, not a sibling) inherits it exactly.
-        let sizedBody = cardBody
-            .frame(width: Self.cardWidth)
-            .fixedSize(horizontal: false, vertical: true)
-            .overlay(
-                recordingActionOverlay
-                    .opacity(isExpandedNow ? 1 : 0)
-                    .allowsHitTesting(isExpandedNow)
-            )
-
-        return HUDChrome(
+        HUDChrome(
             cornerRadius: cornerRadius,
             glowColor: model.status.glowColor,
             beamOpacity: isExpandedNow ? 0.92 : 0.72
         ) {
-            sizedBody
+            ZStack {
+                compactSection
+
+                recordingActionOverlay
+                    .opacity(isExpandedNow ? 1 : 0)
+                    .allowsHitTesting(isExpandedNow)
+            }
         }
+        .frame(width: Self.cardWidth, height: Self.cardHeight)
         .contentShape(Self.hudShape)
         .onHover { hovering in
             guard canExpand else {
@@ -157,66 +136,51 @@ struct FloatingHUDView: View {
             model.isExpanded = hovering
         }
         .animation(.easeInOut(duration: 0.14), value: isExpandedNow)
-        .animation(.easeInOut(duration: 0.18), value: model.transcript)
         .animation(.easeInOut(duration: 0.25), value: model.status)
     }
 
-    private var cardBody: some View {
-        VStack(spacing: 0) {
-            transcriptOrPlaceholder
-                .frame(
-                    maxWidth: .infinity,
-                    minHeight: Self.transcriptMinHeight,
-                    maxHeight: Self.transcriptMaxHeight,
-                    alignment: .bottom
-                )
-                .clipped()
-                .mask(
-                    LinearGradient(
-                        stops: [
-                            .init(color: .clear, location: 0.0),
-                            .init(color: .black, location: Self.transcriptLineHeight / Self.transcriptMaxHeight),
-                            .init(color: .black, location: 1.0),
-                        ],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
+    private var compactSection: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let height = proxy.size.height
+
+            compactContextRow
+                .frame(width: width - 28, height: 18, alignment: .center)
+                .position(x: width / 2, y: height * Self.contextRowCenterYRatio)
 
             levelMeter(opacity: 0.74, minHeight: 3.5, maxHeight: 17)
-                .frame(width: Self.cardWidth - 28)
-                .frame(height: Self.meterRegionHeight - 8)
-                .padding(.bottom, 8)
+                .frame(width: width - 28)
+                .frame(height: 18)
+                .position(x: width / 2, y: height * Self.levelMeterCenterYRatio)
         }
     }
 
-    @ViewBuilder
-    private var transcriptOrPlaceholder: some View {
-        if model.hasTranscript {
-            // Finalized text dark, interim tail dimmed — concatenated so they
-            // wrap as a single flowing paragraph. Bottom-aligned so the newest
-            // text stays visible and older lines push up under the fade mask.
-            (Text(model.transcript.finalText).foregroundColor(.primary.opacity(0.92))
-             + Text(model.transcript.interimText).foregroundColor(.primary.opacity(0.40)))
-                .font(.system(size: 15, weight: .regular))
-                .lineSpacing(Self.transcriptLineHeight - 15)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .bottomLeading)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, Self.transcriptHorizontalPadding)
-                .padding(.top, Self.transcriptTopPadding)
-        } else {
-            // Fixed compact height (not .infinity) so the empty card stays at
-            // compactHeight instead of ballooning to the cap behind a lone logo.
-            HStack(spacing: 7) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 16, weight: .medium))
-                Text("Dousha")
-                    .font(.system(size: 14, weight: .semibold))
-            }
-            .foregroundColor(.primary.opacity(0.38))
-            .frame(maxWidth: .infinity)
-            .frame(height: Self.transcriptMinHeight)
+    private var compactContextRow: some View {
+        HStack(spacing: 0) {
+            HUDAppBadge(
+                focus: model.focus,
+                fallback: nil,
+                foregroundOpacity: 0.78,
+                iconSize: 23,
+                fontSize: 14,
+                spacing: 7
+            )
+            .frame(maxWidth: 112, alignment: .leading)
+
+            Spacer(minLength: 0)
+
+            HUDAppBadge(
+                focus: nil,
+                fallback: "Dousha",
+                systemImage: "waveform",
+                foregroundOpacity: 0.38,
+                iconSize: 17,
+                fontSize: 14,
+                spacing: 7
+            )
+            .frame(maxWidth: 104, alignment: .trailing)
         }
+        .frame(height: 18)
     }
 
     private func levelMeter(opacity: Double, minHeight: CGFloat, maxHeight: CGFloat) -> some View {
@@ -234,9 +198,6 @@ struct FloatingHUDView: View {
     }
 
     private var recordingActionOverlay: some View {
-        // Fills the live card height (it is applied as an .overlay), so the two
-        // buttons stay centered and full-width no matter how tall the transcript
-        // has grown — no fixed cardHeight dependency.
         VStack(spacing: 0) {
             HUDActionRow(
                 title: "完成录音",
@@ -246,11 +207,11 @@ struct FloatingHUDView: View {
             ) {
                 model.onFinish?()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(height: Self.actionRowHeight)
 
             Rectangle()
                 .fill(Color(red: 0.32, green: 0.48, blue: 0.72).opacity(0.20))
-                .frame(height: 0.5)
+                .frame(height: Self.actionDividerHeight)
 
             HUDActionRow(
                 title: "取消录音",
@@ -260,9 +221,9 @@ struct FloatingHUDView: View {
             ) {
                 model.onCancel?()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(height: Self.actionRowHeight)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(height: Self.cardHeight)
     }
 }
 
@@ -425,6 +386,37 @@ private struct HUDLevelMeter: View {
         let shimmer = sin(t * 2.2 + Double(index) * 0.13)
         let level = 0.12 + 0.055 * wave + 0.025 * shimmer
         return min(0.24, max(0.055, CGFloat(level)))
+    }
+}
+
+private struct HUDAppBadge: View {
+    let focus: AppFocusTracker.Focus?
+    let fallback: String?
+    var systemImage: String? = nil
+    var foregroundOpacity: Double = 0.16
+    var iconSize: CGFloat = 15
+    var fontSize: CGFloat = 12
+    var spacing: CGFloat = 6
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            if let focus {
+                Image(nsImage: focus.icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: iconSize, height: iconSize)
+                Text(focus.name)
+            } else if let systemImage, let fallback {
+                Image(systemName: systemImage)
+                    .font(.system(size: iconSize, weight: .medium))
+                Text(fallback)
+            } else if let fallback {
+                Text(fallback)
+            }
+        }
+        .font(.system(size: fontSize, weight: .semibold))
+        .foregroundColor(.primary.opacity(foregroundOpacity))
+        .lineLimit(1)
     }
 }
 
