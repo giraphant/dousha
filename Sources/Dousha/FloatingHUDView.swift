@@ -66,21 +66,42 @@ final class FloatingHUDModel: ObservableObject {
 struct FloatingHUDView: View {
     @ObservedObject var model: FloatingHUDModel
 
+    /// Full (unclamped) height of the live transcript text at the card width,
+    /// measured off-screen. Drives the card's explicit height so the chrome —
+    /// and its border beam — track the visible card edge exactly at every size.
+    @State private var measuredTextHeight: CGFloat = 0
+
     private static let hudCornerRadius: CGFloat = 16
     private let cornerRadius: CGFloat = Self.hudCornerRadius
     private let barCount: Int = 30
     private let barWidth: CGFloat = 5.5
     private let barSpacing: CGFloat = 3
 
-    /// Baseline compact HUD height before the hover actions are shown.
+    /// Baseline compact HUD height — the empty/no-text card (context row +
+    /// meter). Unchanged from the original design.
     static let compactHeight: CGFloat = 71
     static let cardHeight: CGFloat = 71
     static let cardWidth: CGFloat = 280
-    static let cardMaxHeight: CGFloat = cardHeight
     static let contextRowCenterYRatio: CGFloat = 0.30
     static let levelMeterCenterYRatio: CGFloat = 0.70
     private static let actionDividerHeight: CGFloat = 0.5
-    private static let actionRowHeight: CGFloat = (cardHeight - actionDividerHeight) / 2
+
+    // MARK: Live-transcript growth (only used once text arrives)
+    /// Single transcript line box (15pt font + lineSpacing).
+    static let transcriptLineHeight: CGFloat = 21
+    /// Hard cap on visible transcript lines; older lines fade off the top.
+    static let maxTranscriptLines: Int = 5
+    static let transcriptTopPadding: CGFloat = 14
+    private static let transcriptHorizontalPadding: CGFloat = 16
+    /// Bottom strip reserved for the meter while transcript is showing.
+    static let meterRegionHeight: CGFloat = 26
+    /// Transcript text area cap: top padding + the 5 lines (the visible limit).
+    static let transcriptMaxHeight: CGFloat = transcriptTopPadding + transcriptLineHeight * CGFloat(maxTranscriptLines)
+    /// Grown card cap = transcript cap + meter strip. The fixed panel sizes to this.
+    static let maxHeight: CGFloat = transcriptMaxHeight + meterRegionHeight
+    /// FloatingWindow sizes the (fixed) panel to the cap so the grown card fits.
+    static let cardMaxHeight: CGFloat = maxHeight
+
     private static let hudShape = RoundedRectangle(cornerRadius: hudCornerRadius, style: .continuous)
 
     /// Hover-driven expansion is only meaningful while recording. In other
@@ -112,6 +133,14 @@ struct FloatingHUDView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Card height: compact when there's no transcript (original design),
+    /// otherwise grown to fit the measured text, clamped to the 5-line cap.
+    private var currentCardHeight: CGFloat {
+        guard model.hasTranscript else { return Self.compactHeight }
+        let needed = measuredTextHeight + Self.meterRegionHeight
+        return min(Self.maxHeight, max(Self.compactHeight, needed))
+    }
+
     private var hudCard: some View {
         HUDChrome(
             cornerRadius: cornerRadius,
@@ -119,14 +148,17 @@ struct FloatingHUDView: View {
             beamOpacity: isExpandedNow ? 0.92 : 0.72
         ) {
             ZStack {
-                compactSection
+                cardContent
 
                 recordingActionOverlay
                     .opacity(isExpandedNow ? 1 : 0)
                     .allowsHitTesting(isExpandedNow)
             }
         }
-        .frame(width: Self.cardWidth, height: Self.cardHeight)
+        // Explicit frame keeps the chrome (and its beam) locked to the visible
+        // card edge; height is dynamic but always exact.
+        .frame(width: Self.cardWidth, height: currentCardHeight)
+        .background(transcriptHeightMeasurer)
         .contentShape(Self.hudShape)
         .onHover { hovering in
             guard canExpand else {
@@ -136,7 +168,33 @@ struct FloatingHUDView: View {
             model.isExpanded = hovering
         }
         .animation(.easeInOut(duration: 0.14), value: isExpandedNow)
+        .animation(.easeInOut(duration: 0.18), value: currentCardHeight)
         .animation(.easeInOut(duration: 0.25), value: model.status)
+    }
+
+    @ViewBuilder
+    private var cardContent: some View {
+        if model.hasTranscript {
+            transcriptSection
+        } else {
+            compactSection
+        }
+    }
+
+    /// Off-screen, full-height render of the transcript at the text width, so we
+    /// know how tall the card should grow before clamping. Never visible.
+    private var transcriptHeightMeasurer: some View {
+        transcriptStyledText
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: Self.cardWidth - 2 * Self.transcriptHorizontalPadding, alignment: .topLeading)
+            .padding(.top, Self.transcriptTopPadding)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: TranscriptHeightKey.self, value: proxy.size.height)
+                }
+            )
+            .hidden()
+            .onPreferenceChange(TranscriptHeightKey.self) { measuredTextHeight = $0 }
     }
 
     private var compactSection: some View {
@@ -197,6 +255,55 @@ struct FloatingHUDView: View {
         )
     }
 
+    // MARK: - Live transcript (only shown once text arrives)
+
+    /// Transcript layout: two-tone text growing bottom-up, meter pinned at the
+    /// bottom. The text area fills whatever height the card grew to (minus the
+    /// meter strip); when it overflows the cap, the oldest lines are clipped and
+    /// faded off the top.
+    private var transcriptSection: some View {
+        VStack(spacing: 0) {
+            transcriptStyledText
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .bottomLeading)
+                .padding(.horizontal, Self.transcriptHorizontalPadding)
+                .padding(.top, Self.transcriptTopPadding)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .clipped()
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .black, location: Self.transcriptLineHeight / Self.transcriptMaxHeight),
+                            .init(color: .black, location: 1.0),
+                        ],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                )
+
+            levelMeter(opacity: 0.74, minHeight: 3.0, maxHeight: 14)
+                .frame(width: Self.cardWidth - 28)
+                .frame(height: Self.meterRegionHeight - 8)
+                .padding(.bottom, 8)
+        }
+    }
+
+    /// Finalized text dark, interim tail dimmed, concatenated so they wrap as a
+    /// single flowing paragraph.
+    private var transcriptText: Text {
+        Text(model.transcript.finalText).foregroundColor(.primary.opacity(0.92))
+            + Text(model.transcript.interimText).foregroundColor(.primary.opacity(0.40))
+    }
+
+    /// The styled transcript — same font/lineSpacing used by both the visible
+    /// text and the off-screen measurer so measured height == rendered height.
+    private var transcriptStyledText: some View {
+        transcriptText
+            .font(.system(size: 15, weight: .regular))
+            .lineSpacing(Self.transcriptLineHeight - 15)
+            .multilineTextAlignment(.leading)
+    }
+
     private var recordingActionOverlay: some View {
         VStack(spacing: 0) {
             HUDActionRow(
@@ -207,7 +314,7 @@ struct FloatingHUDView: View {
             ) {
                 model.onFinish?()
             }
-            .frame(height: Self.actionRowHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Rectangle()
                 .fill(Color(red: 0.32, green: 0.48, blue: 0.72).opacity(0.20))
@@ -221,9 +328,18 @@ struct FloatingHUDView: View {
             ) {
                 model.onCancel?()
             }
-            .frame(height: Self.actionRowHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: Self.cardHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Carries the full (unclamped) transcript text height up from the off-screen
+/// measurer so the card can size itself.
+private struct TranscriptHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
