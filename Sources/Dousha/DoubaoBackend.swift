@@ -14,7 +14,14 @@ final class DoubaoBackend: SpeechBackend {
     func start(onPartial: @escaping @Sendable (String) -> Void,
                onAudioLevel: @escaping @Sendable (Float) -> Void,
                onError: @escaping @Sendable (Error) -> Void) {
-        asr.start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError)
+        // Snapshot the glossary into a context hint at recording start (QUA-133).
+        // Read synchronously here so a Settings change mid-recording can't alter
+        // the active session.
+        let prefs = Preferences.shared
+        let contextHint = prefs.glossaryEnabled
+            ? GlossaryContext.encode(prefs.glossaryTerms)
+            : ""
+        asr.start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError, contextHint: contextHint)
     }
 
     func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {

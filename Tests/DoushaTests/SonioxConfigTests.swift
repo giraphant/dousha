@@ -50,4 +50,54 @@ final class SonioxConfigTests: XCTestCase {
         let obj = try JSONSerialization.jsonObject(with: Data(SonioxConfig.keepaliveMessageJSON.utf8)) as? [String: Any]
         XCTAssertEqual(obj?["type"] as? String, "keepalive")
     }
+
+    // MARK: - Glossary context (QUA-133)
+
+    func test_contextObject_nilWhenNoTerms() {
+        XCTAssertNil(SonioxConfig.contextObject(terms: []))
+    }
+
+    func test_contextObject_carriesTermsArray() throws {
+        let ctx = try XCTUnwrap(SonioxConfig.contextObject(terms: ["布迪厄", "西蒙东"]))
+        XCTAssertEqual(ctx["terms"] as? [String], ["布迪厄", "西蒙东"])
+    }
+
+    func test_config_omitsContextWhenNoTerms() throws {
+        let obj = try configObject(apiKey: "k")
+        XCTAssertNil(obj["context"])
+    }
+
+    func test_config_carriesContextTermsWhenSet() throws {
+        let json = SonioxConfig.configMessageJSON(apiKey: "k", contextTerms: ["布迪厄", "哈贝马斯"])
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let ctx = try XCTUnwrap(obj["context"] as? [String: Any])
+        XCTAssertEqual(ctx["terms"] as? [String], ["布迪厄", "哈贝马斯"])
+        // Required fields still present alongside context.
+        XCTAssertEqual(obj["api_key"] as? String, "k")
+        XCTAssertEqual(obj["model"] as? String, "stt-rt-v4")
+    }
+
+    func test_config_isValidJSONWithContext() {
+        let json = SonioxConfig.configMessageJSON(apiKey: "k", contextTerms: ["he said \"hi\"\\x"])
+        XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(json.utf8)))
+    }
+
+    // MARK: - Async POST body (QUA-133)
+
+    func test_asyncBody_carriesModelAndFileId() {
+        let body = SonioxAsyncClient.transcriptionRequestBody(model: "stt-async-v4", fileId: "f1", contextTerms: [])
+        XCTAssertEqual(body["model"] as? String, "stt-async-v4")
+        XCTAssertEqual(body["file_id"] as? String, "f1")
+    }
+
+    func test_asyncBody_omitsContextWhenNoTerms() {
+        let body = SonioxAsyncClient.transcriptionRequestBody(model: "m", fileId: "f", contextTerms: [])
+        XCTAssertNil(body["context"])
+    }
+
+    func test_asyncBody_carriesContextTermsWhenSet() throws {
+        let body = SonioxAsyncClient.transcriptionRequestBody(model: "m", fileId: "f", contextTerms: ["布迪厄", "许煜"])
+        let ctx = try XCTUnwrap(body["context"] as? [String: Any])
+        XCTAssertEqual(ctx["terms"] as? [String], ["布迪厄", "许煜"])
+    }
 }
