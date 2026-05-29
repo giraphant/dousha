@@ -43,9 +43,34 @@ enum DoubaoConstants {
     // Audio
     static let sampleRate = 16000
     static let channels = 1
-    static let frameDurationMs = 20
-    static var samplesPerFrame: Int { sampleRate * frameDurationMs / 1000 }   // 320
-    static var bytesPerFrame: Int { samplesPerFrame * 2 }                     // 640 (Int16)
+    // 10ms frames to match the official Doubao IME client
+    // (SAMICoreAsrContextCreateParameter.frame_time_ms = 10, SdkImpl.java:763).
+    // We previously used 20ms; the server's VAD/partial-result cadence is tuned
+    // around the official 10ms input, so finer frames track short utterances and
+    // the leading edge more faithfully.
+    static let frameDurationMs = 10
+    static var samplesPerFrame: Int { sampleRate * frameDurationMs / 1000 }   // 160
+    static var bytesPerFrame: Int { samplesPerFrame * 2 }                     // 320 (Int16)
+
+    // Trailing silence appended on stop() before FinishSession. Was 2s, tuned
+    // back when there was no explicit end-of-audio signal and the server's VAD
+    // only finalized the last utterance after hearing enough trailing silence.
+    // The last frame now carries `finish_audio: true` plus FinishSession, so the
+    // server should finalize the tail on that signal alone — this is 0 pending
+    // real-device confirmation that the final word isn't truncated. If tail loss
+    // returns, raise this.
+    static let trailingSilencePadMs = 0
+    static var trailingSilencePadSamples: Int { sampleRate * trailingSilencePadMs / 1000 }
+
+    // On stop() the mic tap has typically just dispatched the last buffer or two
+    // (the tail of the user's final word) to the actor as separate Tasks (see
+    // DoubaoASR.appendAndDrainPCM). Those Tasks aren't ordered relative to
+    // _stop(), so if _stop() flips isRunning=false immediately they get dropped
+    // by appendAndDrainPCM's guard and the final word is truncated — regardless
+    // of trailing-silence padding. _stop() tears down the tap and then holds the
+    // session alive for this window so the queued tail buffers can land in
+    // pcmBuffer and get sent. Imperceptible vs. the old 2s padding.
+    static let stopDrainWindowMs = 50
 
     // WebSocket keepalive. Matches the official Doubao IME client's
     // SAMICore.UpdateFrontierClientPingInterval(3000) — without periodic pings
