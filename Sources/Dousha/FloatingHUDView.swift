@@ -6,27 +6,95 @@ final class FloatingHUDModel: ObservableObject {
     @Published var focus: AppFocusTracker.Focus?
     var audioLevel: Float = 0
 
-    /// Live transcript snapshot (final + interim). One published value so a
-    /// final+interim change is a single atomic redraw rather than two.
+    /// The visible (revealed) transcript slice the view renders — a prefix of
+    /// `target` that a timer drips out one-ish character at a time so the batchy
+    /// server delivery (3–5 chars at once) reads as a continuous typewriter
+    /// stream. One published value = one atomic redraw.
     @Published private(set) var transcript: PartialTranscript = .empty
 
-    /// Whether any transcript text exists — drives logo-vs-text in the view.
-    var hasTranscript: Bool { !transcript.combined.isEmpty }
+    /// Latest full snapshot from the backend; the reveal catches up to this.
+    private var target: PartialTranscript = .empty
+    /// How many characters of `target.combined` are currently revealed.
+    private var revealedCount: Int = 0
+    private var revealTimer: Timer?
+    /// Fraction of the remaining backlog revealed per 60fps tick (min 1 char),
+    /// so it eases: fast when far behind, gentle as it catches up.
+    private static let revealCatchupFraction = 0.22
 
-    /// Live update during recording (interim grows, final grows as the server
-    /// finalizes chunks).
+    /// Whether any transcript text exists — drives logo-vs-text in the view.
+    /// Based on the target so the card switches to transcript mode the instant
+    /// the first token lands, not a tick later.
+    var hasTranscript: Bool { !target.combined.isEmpty }
+
+    /// Live update during recording. Sets the catch-up target; the timer reveals
+    /// any newly-arrived characters smoothly.
     func updateTranscript(_ partial: PartialTranscript) {
-        transcript = partial
+        target = partial
+        let total = partial.combined.count
+        if revealedCount > total { revealedCount = total }  // interim shrank — snap back
+        advanceReveal()                                     // reveal a step now (no empty flash)
+        startRevealTimerIfNeeded()
     }
 
-    /// Release path: the final ASR text replaces everything; interim cleared.
+    /// Release path: the final ASR text replaces everything and is shown in full
+    /// immediately (no reveal lag once the user has let go).
     func setFinalTranscript(_ text: String) {
-        transcript = PartialTranscript(finalText: text, interimText: "")
+        stopRevealTimer()
+        target = PartialTranscript(finalText: text, interimText: "")
+        revealedCount = target.combined.count
+        publishRevealed()
     }
 
     /// Start of a session (and on error): clear so the logo placeholder shows.
     func resetTranscript() {
+        stopRevealTimer()
+        target = .empty
+        revealedCount = 0
         transcript = .empty
+    }
+
+    // MARK: Reveal animation
+
+    private func startRevealTimerIfNeeded() {
+        guard revealTimer == nil, revealedCount < target.combined.count else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.advanceReveal()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        revealTimer = t
+    }
+
+    private func stopRevealTimer() {
+        revealTimer?.invalidate()
+        revealTimer = nil
+    }
+
+    /// Internal (not private) so tests can pump the reveal without a run loop.
+    func advanceReveal() {
+        let total = target.combined.count
+        guard revealedCount < total else {
+            stopRevealTimer()
+            publishRevealed()
+            return
+        }
+        let backlog = total - revealedCount
+        let step = max(1, Int((Double(backlog) * Self.revealCatchupFraction).rounded(.up)))
+        revealedCount = min(total, revealedCount + step)
+        publishRevealed()
+        if revealedCount >= total { stopRevealTimer() }
+    }
+
+    /// Slice the first `revealedCount` characters of `target`, split back into
+    /// final (dark) and interim (dimmed) for two-tone rendering.
+    private func publishRevealed() {
+        let finalChars = Array(target.finalText)
+        let interimChars = Array(target.interimText)
+        let fCount = min(revealedCount, finalChars.count)
+        let iCount = min(revealedCount - fCount, interimChars.count)
+        transcript = PartialTranscript(
+            finalText: String(finalChars.prefix(fCount)),
+            interimText: String(interimChars.prefix(iCount))
+        )
     }
 
     /// Whether the HUD is currently expanded to show the finish/cancel buttons.
@@ -87,9 +155,9 @@ struct FloatingHUDView: View {
     private static let actionDividerHeight: CGFloat = 0.5
 
     // MARK: Live-transcript growth (only used once text arrives)
-    static let transcriptFontSize: CGFloat = 14
+    static let transcriptFontSize: CGFloat = 13
     /// Single transcript line box (font + lineSpacing).
-    static let transcriptLineHeight: CGFloat = 20
+    static let transcriptLineHeight: CGFloat = 19
     /// Hard cap on visible transcript lines; older lines fade off the top.
     static let maxTranscriptLines: Int = 5
     static let transcriptTopPadding: CGFloat = 14
@@ -172,7 +240,7 @@ struct FloatingHUDView: View {
             model.isExpanded = hovering
         }
         .animation(.easeInOut(duration: 0.14), value: isExpandedNow)
-        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: currentCardHeight)
+        .animation(.spring(response: 0.26, dampingFraction: 1.0), value: currentCardHeight)
         .animation(.easeInOut(duration: 0.25), value: model.status)
     }
 
