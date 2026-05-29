@@ -8,6 +8,11 @@ DIST_APP    := $(DIST_DIR)/$(APP_NAME).app
 DIST_DMG    := $(DIST_DIR)/$(APP_NAME).dmg
 DMG_STAGING := $(BUILD_DIR)/dmg-staging
 
+# Homebrew tap that ships the cask. `make release` bumps the cask here so
+# users can `brew upgrade --cask dousha`.
+TAP_REPO  ?= giraphant/homebrew-tap
+CASK_PATH := Casks/dousha.rb
+
 # Per-developer signing config lives in Makefile.local (gitignored). It
 # defines DEVELOPER_ID_IDENTITY and NOTARY_PROFILE for your Apple account.
 # If absent, the public defaults below act as placeholders and the codesign
@@ -24,7 +29,7 @@ CODESIGN_IDENTITY     ?= $(DEVELOPER_ID_IDENTITY)
 CODESIGN_OPTIONS      ?= --options runtime
 CODESIGN_ENTITLEMENTS ?= --entitlements Resources/Dousha.entitlements
 
-.PHONY: all build run install dist notarize release clean reset-perms
+.PHONY: all build run install dist notarize release update-cask clean reset-perms
 
 all: build
 
@@ -83,6 +88,29 @@ release:
 	@$(MAKE) notarize
 	gh release create "v$(VERSION)" "$(DIST_DMG)" --title "v$(VERSION)" --generate-notes
 	@echo "Release v$(VERSION) published. Tag pushed by gh."
+	@$(MAKE) update-cask VERSION=$(VERSION)
+
+# Bump the Homebrew cask in $(TAP_REPO) to $(VERSION) with the DMG's sha256.
+# Clones the tap fresh (via gh auth), patches only the version/sha256 lines,
+# and pushes. Idempotent: no-op if the cask already matches.
+update-cask:
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make update-cask VERSION=0.1.0"; exit 1; fi
+	@if [ ! -f "$(DIST_DMG)" ]; then echo "ERROR: $(DIST_DMG) not found. Run 'make dist' first."; exit 1; fi
+	@sha=$$(shasum -a 256 "$(DIST_DMG)" | awk '{print $$1}'); \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	echo "Cloning $(TAP_REPO)..."; \
+	gh repo clone "$(TAP_REPO)" "$$tmp" -- -q || exit 1; \
+	sed -i '' -E "s/^  version \".*\"/  version \"$(VERSION)\"/" "$$tmp/$(CASK_PATH)"; \
+	sed -i '' -E "s/^  sha256 \".*\"/  sha256 \"$$sha\"/" "$$tmp/$(CASK_PATH)"; \
+	git -C "$$tmp" add "$(CASK_PATH)"; \
+	if git -C "$$tmp" diff --cached --quiet; then \
+		echo "Cask already at $(VERSION) / $$sha — nothing to push."; \
+	else \
+		git -C "$$tmp" commit -q -m "dousha $(VERSION)"; \
+		git -C "$$tmp" push -q origin HEAD; \
+		echo "Cask bumped to $(VERSION) ($$sha) and pushed to $(TAP_REPO)."; \
+	fi
 
 clean:
 	rm -rf $(BUILD_DIR)
