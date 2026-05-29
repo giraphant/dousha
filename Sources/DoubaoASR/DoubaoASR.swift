@@ -163,16 +163,15 @@ public actor DoubaoASR {
         doushaLog("[DoubaoASR] traceId=\(requestId) start")
 
         do {
-            let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
-            self.token = creds.token
-            self.deviceId = creds.deviceId
-            doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
-
-            self.opusEncoder = try OpusEncoder()
-            doushaLog("[DoubaoASR] opus encoder ready")
-
-            // Open the rolling WAV before the mic tap so that startMicTap can
-            // snapshot the writer reference into the tap closure.
+            // Open the rolling WAV and start the mic tap BEFORE anything that can
+            // block (credential refresh, opus init, the WS handshake). The tap
+            // only needs the WAV writer + the audio converter — not creds, not
+            // opus (encoding happens later in the flush path), not the socket
+            // (canSendAudio stays false until StartSession succeeds, so frames
+            // just accumulate in pcmBuffer). Starting capture first means a JWT
+            // refresh round-trip or the ~600ms WS setup can no longer swallow the
+            // opening words: that latency now overlaps with buffering instead of
+            // delaying the moment the mic goes live.
             do {
                 // Remove any prior file so AVAudioFile's "no overwrite" semantics don't bite us.
                 try? FileManager.default.removeItem(at: Self.savedAudioURL)
@@ -188,11 +187,16 @@ public actor DoubaoASR {
                 self.wavWriter = nil
             }
 
-            // Start mic FIRST so audio buffers while we set up the WebSocket.
-            // Doubao kills sessions that go ~900ms without audio after StartSession.
-            // (Must come after wavWriter is assigned so startMicTap can snapshot it.)
             try startMicTap()
-            doushaLog("[DoubaoASR] mic tap started (pre-WS)")
+            doushaLog("[DoubaoASR] mic tap started (pre-creds, pre-WS)")
+
+            let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
+            self.token = creds.token
+            self.deviceId = creds.deviceId
+            doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
+
+            self.opusEncoder = try OpusEncoder()
+            doushaLog("[DoubaoASR] opus encoder ready")
 
             if self.ws == nil {
                 try openWebSocket()
@@ -298,26 +302,33 @@ public actor DoubaoASR {
                 traceId: requestId
             )
         }
+        // Stop the mic tap first so no new audio is captured, but keep
+        // isRunning=true through the drain below. The tap dispatches each
+        // captured buffer to the actor as its own Task (appendAndDrainPCM), and
+        // the last buffers the user spoke may still be queued when stop() runs.
+        // Flipping isRunning=false here would make appendAndDrainPCM's guard
+        // silently drop them, truncating the final word no matter how much
+        // trailing silence we pad. Draining first is what actually preserves the
+        // tail; the padding never did.
+        teardownAudio()
+        await drainInFlightAudio()
         isRunning = false
 
-        teardownAudio()
-
-        // Pad ~2s of silence into both the WAV and the outbound PCM buffer.
-        // Doubao's streaming ASR needs trailing silence for its VAD to finalize
-        // the last utterance — without this, releasing the hotkey right at the
-        // end of a word loses the final 1-2 chars. 1s was insufficient in
-        // real-world testing (user had to deliberately wait 1-2s of silence
-        // before releasing or last char was eaten). 2s is the empirically-derived
-        // value that matches Doubao's VAD threshold. The WAV also gets the
-        // padding so a future retranscribe can recover the same way.
-        let padSamples = DoubaoConstants.sampleRate * 2       // 2 seconds
-        let padBytes = padSamples * MemoryLayout<Int16>.size
-        self.pcmBuffer.append(Data(count: padBytes))
-        self.totalPcmBytesOut += padBytes
-        if let writer = self.wavWriter {
-            let zeros = [Int16](repeating: 0, count: padSamples)
-            zeros.withUnsafeBufferPointer { buf in
-                writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+        // Trailing silence into both the WAV and the outbound PCM buffer so the
+        // server's VAD finalizes the last utterance. The explicit
+        // `finish_audio: true` on the last frame should make this unnecessary;
+        // gated on a tunable (see DoubaoConstants.trailingSilencePadMs) so the
+        // amount can be dialed in against real-device tail-truncation tests.
+        let padSamples = DoubaoConstants.trailingSilencePadSamples
+        if padSamples > 0 {
+            let padBytes = padSamples * MemoryLayout<Int16>.size
+            self.pcmBuffer.append(Data(count: padBytes))
+            self.totalPcmBytesOut += padBytes
+            if let writer = self.wavWriter {
+                let zeros = [Int16](repeating: 0, count: padSamples)
+                zeros.withUnsafeBufferPointer { buf in
+                    writer.append(int16Samples: buf.baseAddress!, count: buf.count)
+                }
             }
         }
 
@@ -329,10 +340,10 @@ public actor DoubaoASR {
             self.wavWriter = nil
         }
 
-        // Drain ALL pending frames (including the 2s silence padding we just
-        // added = 100 full frames at 320 samples/frame). flushPendingFrames is
-        // load-bearing here — flushAndSendLastFrame alone would only handle the
-        // very last partial frame.
+        // Drain ALL pending frames (whatever audio is still buffered, plus any
+        // trailing-silence padding). flushPendingFrames is load-bearing here —
+        // flushAndSendLastFrame alone would only handle the very last partial
+        // frame.
         do {
             try await flushPendingFrames()
             try await flushAndSendLastFrame()
@@ -440,6 +451,20 @@ public actor DoubaoASR {
             audioEngine.inputNode.removeTap(onBus: 0)
             audioEngine.stop()
         }
+    }
+
+    /// Lets the mic tap's already-dispatched appendAndDrainPCM tasks — the tail
+    /// the user spoke microseconds before releasing — run and append to
+    /// pcmBuffer before _stop() flushes and sends FinishSession. Must be called
+    /// while isRunning is still true (so the guard in appendAndDrainPCM lets the
+    /// appends through) and after teardownAudio() (so no new buffers arrive).
+    private func drainInFlightAudio() async {
+        // A few yields drain whatever is already queued on the actor; the short
+        // sleep covers a tap callback that was mid-flight on the audio thread
+        // when teardownAudio() removed the tap and dispatched one last buffer.
+        for _ in 0..<4 { await Task.yield() }
+        let ns = UInt64(DoubaoConstants.stopDrainWindowMs) * 1_000_000
+        if ns > 0 { try? await Task.sleep(nanoseconds: ns) }
     }
 
     private func closeWebSocket() async {
@@ -603,12 +628,25 @@ public actor DoubaoASR {
             "enable_speech_rejection": false,
             "extra": [
                 "app_name": "com.android.chrome",
+                "app_version": "1.1.2",
                 "cell_compress_rate": 8,
+                "device_brand": "google",
+                "device_model": "Pixel 7 Pro",
                 "did": deviceId,
                 "enable_asr_threepass": true,
                 "enable_asr_twopass": true,
+                // Text-formatting knobs mirrored from the official IME's StartSession
+                // (SdkImpl.java): keep Han numerals as digits, no spaces inserted
+                // between Han and digits/letters, and enable strong DDC (the
+                // server-side text-correction / smoothing pass).
+                "enable_print_chinese": false,
                 "end_smooth_window_ms": 800,
                 "input_mode": "tool",
+                "os": "Android",
+                "os_version": "16",
+                "remove_space_between_han_eng": false,
+                "remove_space_between_han_num": false,
+                "strong_ddc": true,
                 "use_twopass_retry": true
             ]
         ]

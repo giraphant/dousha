@@ -2,8 +2,9 @@ import Foundation
 import AVFoundation
 import AudioToolbox
 
-/// Encodes 16kHz Int16 mono PCM frames (320 samples / 640 bytes per 20ms frame) into Opus packets
+/// Encodes 16kHz Int16 mono PCM frames (160 samples / 320 bytes per 10ms frame) into Opus packets
 /// using AVAudioConverter + AudioToolbox's native Opus codec. No third-party dependencies.
+/// Frame size is derived from DoubaoConstants.frameDurationMs, so these figures track that constant.
 final class OpusEncoder {
     enum OpusError: Error, LocalizedError {
         case formatBuildFailed
@@ -65,7 +66,7 @@ final class OpusEncoder {
         self.converter = conv
     }
 
-    /// Encodes one 20ms PCM Int16 frame (`bytesPerFrame` bytes) into an Opus packet.
+    /// Encodes one 10ms PCM Int16 frame (`bytesPerFrame` bytes) into an Opus packet.
     func encode(_ pcmFrame: Data) throws -> Data {
         precondition(pcmFrame.count == DoubaoConstants.bytesPerFrame,
                      "OpusEncoder expected \(DoubaoConstants.bytesPerFrame) bytes, got \(pcmFrame.count)")
