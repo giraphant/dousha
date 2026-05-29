@@ -45,6 +45,9 @@ final class Preferences {
         // default value, which would re-enable Esc whenever a user explicitly
         // turned cancel off and the app restarted.
         static let cancelHotkeyKeyCode       = "cancelHotkey.keyCode"
+        static let launchAtLogin             = "launchAtLogin"
+        static let showDockIcon              = "showDockIcon"
+        static let showMenuBarIcon           = "showMenuBarIcon"
     }
 
     /// Stored value used to represent a disabled cancel hotkey. Picked because
@@ -67,8 +70,29 @@ final class Preferences {
             Keys.glossaryTerms:            [String](),
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
             Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
-            Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode)
+            Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode),
+            // Menu-bar accessory app by default: no Dock icon, status item shown.
+            // `launchAtLogin` here is only a UI mirror; SMAppService is the
+            // source of truth and is consulted directly when the window opens.
+            Keys.launchAtLogin:            false,
+            Keys.showDockIcon:             false,
+            Keys.showMenuBarIcon:          true
         ])
+    }
+
+    var launchAtLogin: Bool {
+        get { defaults.bool(forKey: Keys.launchAtLogin) }
+        set { defaults.set(newValue, forKey: Keys.launchAtLogin) }
+    }
+
+    var showDockIcon: Bool {
+        get { defaults.bool(forKey: Keys.showDockIcon) }
+        set { defaults.set(newValue, forKey: Keys.showDockIcon) }
+    }
+
+    var showMenuBarIcon: Bool {
+        get { defaults.bool(forKey: Keys.showMenuBarIcon) }
+        set { defaults.set(newValue, forKey: Keys.showMenuBarIcon) }
     }
 
     var language: String {

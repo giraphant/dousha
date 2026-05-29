@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let injector = TextInjector()
     private let llm = LLMRefiner()
     private let prefs = Preferences.shared
+    private let launchAtLogin: LaunchAtLoginManaging = LaunchAtLoginController()
 
     private let hudModel = FloatingHUDModel()
     private var floatingWindow: FloatingWindow?
@@ -80,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        applyDockIconVisibility()
         setupMenuBar()
         floatingWindow = FloatingWindow(model: hudModel)
         // Wire HUD button actions. Captured weakly to avoid retain cycles via
@@ -115,8 +116,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: .doushaSonioxConfigChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleLLMEnabledChanged),
+            name: .doushaLLMEnabledChanged,
+            object: nil
+        )
 
         if prefs.engine == .doubao { DoubaoCredentialStore.shared.warmup() }
+    }
+
+    /// If the app is relaunched while already running (Finder/Spotlight), bring
+    /// the settings window back. This is the recovery path when the user has
+    /// hidden both the Dock and menu-bar icons.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return true
+    }
+
+    // MARK: - System toggles (Dock icon / menu-bar icon)
+
+    /// Apply the persisted Dock-icon preference to the activation policy.
+    private func applyDockIconVisibility() {
+        NSApp.setActivationPolicy(prefs.showDockIcon ? .regular : .accessory)
     }
 
     // MARK: - Menu bar
@@ -135,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 btn.image?.isTemplate = true
             }
         }
+        statusItem.isVisible = prefs.showMenuBarIcon
         rebuildMenu()
     }
 
@@ -314,9 +337,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func handleLLMEnabledChanged() {
+        // The settings pane already wrote `prefs.llmEnabled`; just refresh the
+        // menu so its "润色：开启/关闭" label stays in sync.
+        rebuildMenu()
+    }
+
+    /// Show/hide the Dock icon at runtime and persist the choice.
+    private func setDockIconVisible(_ visible: Bool) {
+        prefs.showDockIcon = visible
+        applyDockIconVisibility()
+    }
+
+    /// Show/hide the menu-bar status item at runtime and persist the choice.
+    private func setMenuBarIconVisible(_ visible: Bool) {
+        prefs.showMenuBarIcon = visible
+        statusItem.isVisible = visible
+    }
+
     @objc private func openSettings() {
         if settingsWindow == nil {
-            settingsWindow = SettingsWindowFactory.create(llmRefiner: llm)
+            let actions = SettingsActions(
+                isLaunchAtLoginEnabled: { [launchAtLogin] in launchAtLogin.isEnabled },
+                setLaunchAtLogin: { [launchAtLogin] enabled in try launchAtLogin.setEnabled(enabled) },
+                isDockIconVisible: { [weak self] in self?.prefs.showDockIcon ?? false },
+                setDockIconVisible: { [weak self] visible in self?.setDockIconVisible(visible) },
+                isMenuBarIconVisible: { [weak self] in self?.prefs.showMenuBarIcon ?? true },
+                setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
+                resetDoubaoCredentials: { [weak self] in self?.resetDoubaoCredentials() }
+            )
+            settingsWindow = SettingsWindowFactory.create(llmRefiner: llm, actions: actions)
         }
         settingsWindow?.center()
         settingsWindow?.makeKeyAndOrderFront(nil)
