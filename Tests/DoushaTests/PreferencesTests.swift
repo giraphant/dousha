@@ -132,4 +132,44 @@ final class PreferencesTests: XCTestCase {
         prefs.glossaryEnabled = true
         XCTAssertTrue(defaults.bool(forKey: "doubaoGlossaryEnabled"))
     }
+
+    // MARK: - Window/system toggles (QUA-142)
+
+    func testLaunchAtLogin_defaultsToDisabled() {
+        XCTAssertFalse(prefs.launchAtLogin)
+    }
+
+    func testLaunchAtLogin_persistsAcrossInstances() {
+        prefs.launchAtLogin = true
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertTrue(fresh.launchAtLogin)
+    }
+
+    func testShowDockIcon_defaultsToHidden() {
+        XCTAssertFalse(prefs.showDockIcon)
+    }
+
+    func testShowDockIcon_persistsAcrossInstances() {
+        prefs.showDockIcon = true
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertTrue(fresh.showDockIcon)
+    }
+
+    func testShowMenuBarIcon_defaultsToVisible() {
+        XCTAssertTrue(prefs.showMenuBarIcon)
+    }
+
+    func testShowMenuBarIcon_persistsHiddenAcrossInstances() {
+        // Guard against the register-default re-enabling a deliberately hidden
+        // status item on restart.
+        prefs.showMenuBarIcon = false
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertFalse(fresh.showMenuBarIcon)
+    }
 }
