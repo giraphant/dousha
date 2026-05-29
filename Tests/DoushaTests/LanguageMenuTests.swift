@@ -6,7 +6,7 @@ final class LanguageMenuTests: XCTestCase {
         let options = LanguageMenu.options(for: .doubao, selectedLanguage: Language.en_US.rawValue)
 
         XCTAssertEqual(options, [
-            LanguageMenu.Option(title: "Auto", rawValue: LanguageMenu.autoIdentifier, isSelected: true)
+            LanguageMenu.Option(title: "自动", rawValue: LanguageMenu.autoIdentifier, isSelected: true)
         ])
     }
 
@@ -21,6 +21,21 @@ final class LanguageMenuTests: XCTestCase {
     func test_doubaoDetectorLanguageDoesNotUseSavedAppleLanguage() {
         XCTAssertEqual(
             LanguageMenu.detectorLanguage(for: .doubao, selectedLanguage: Language.en_US.rawValue),
+            LanguageMenu.autoIdentifier
+        )
+    }
+
+    func test_sonioxMenuShowsOnlyAutoRegardlessOfSavedLanguage() {
+        let options = LanguageMenu.options(for: .soniox, selectedLanguage: Language.en_US.rawValue)
+
+        XCTAssertEqual(options.count, 1)
+        XCTAssertEqual(options.first?.rawValue, LanguageMenu.autoIdentifier)
+        XCTAssertEqual(options.first?.isSelected, true)
+    }
+
+    func test_sonioxDetectorLanguageIsAuto() {
+        XCTAssertEqual(
+            LanguageMenu.detectorLanguage(for: .soniox, selectedLanguage: Language.en_US.rawValue),
             LanguageMenu.autoIdentifier
         )
     }

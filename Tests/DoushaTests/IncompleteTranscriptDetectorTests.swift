@@ -1,5 +1,5 @@
 import XCTest
-import DoubaoASR
+import ASRSupport
 @testable import Dousha
 
 final class IncompleteTranscriptDetectorTests: XCTestCase {

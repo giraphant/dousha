@@ -1,14 +1,18 @@
 import Foundation
 import DoubaoASR
+import SonioxASR
+import ASRSupport
 
 enum Engine: String, CaseIterable {
     case apple
     case doubao
+    case soniox
 
     var displayName: String {
         switch self {
         case .apple:  return "Apple Speech"
         case .doubao: return "豆包"
+        case .soniox: return "Soniox"
         }
     }
 }
@@ -35,6 +39,11 @@ protocol SpeechBackend: AnyObject {
     ///   for the replay session log the parent alongside it so `grep` on the
     ///   original ID also finds the replay entry.
     func retranscribeLastRecording(parentTraceId: String?, completion: @escaping @Sendable (String?) -> Void)
+
+    /// Whether this backend can replay its last recording (a saved WAV exists
+    /// and the backend supports `retranscribeLastRecording`). Used to gate the
+    /// "重新转写上次录音" menu item. Defaults to false.
+    var canRetranscribe: Bool { get }
 }
 
 extension SpeechBackend {
@@ -43,6 +52,8 @@ extension SpeechBackend {
     func retranscribeLastRecording(completion: @escaping @Sendable (String?) -> Void) {
         retranscribeLastRecording(parentTraceId: nil, completion: completion)
     }
+
+    var canRetranscribe: Bool { false }
 }
 
 enum SpeechBackendFactory {
@@ -52,6 +63,9 @@ enum SpeechBackendFactory {
             return AppleSpeechBackend(language: language)
         case .doubao:
             return DoubaoBackend(language: language)
+        case .soniox:
+            return SonioxBackend(apiKey: Preferences.shared.sonioxAPIKey,
+                                 mode: Preferences.shared.sonioxMode)
         }
     }
 }

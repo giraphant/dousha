@@ -2,6 +2,7 @@ import Cocoa
 import CoreGraphics
 import SwiftUI
 import TalkerCommonSync
+import SonioxASR
 
 enum SettingsWindowFactory {
     static func create(llmRefiner: LLMRefiner) -> NSWindow {
@@ -37,6 +38,12 @@ struct SettingsView: View {
     @State private var status: String = ""
     @State private var statusIsError: Bool = false
     @State private var isTesting: Bool = false
+
+    @State private var sonioxAPIKey: String = Preferences.shared.sonioxAPIKey
+    @State private var sonioxMode: SonioxMode = Preferences.shared.sonioxMode
+    @State private var sonioxStatus: String = ""
+    @State private var sonioxStatusIsError: Bool = false
+    @State private var isTestingSoniox: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -169,6 +176,52 @@ struct SettingsView: View {
                 Button("保存") { save() }
                     .keyboardShortcut(.defaultAction)
             }
+
+            Divider().padding(.vertical, 4)
+
+            Text("Soniox")
+                .font(.title3).bold()
+            Text("Soniox 实时语音转写引擎。自动检测语言，无需选择。在菜单「引擎」中切换到 Soniox 后生效。")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 10) {
+                field(label: "模式") {
+                    Picker("", selection: $sonioxMode) {
+                        Text("实时").tag(SonioxMode.realtime)
+                        Text("高精度（异步）").tag(SonioxMode.async)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .help("实时：边说边转写，低延迟。高精度（异步）：停止后整段上传，精度更高但无实时反馈。")
+                }
+                field(label: "API 密钥") {
+                    HStack(spacing: 6) {
+                        SecureField("soniox API key", text: $sonioxAPIKey)
+                            .textFieldStyle(.roundedBorder)
+                            .disableAutocorrection(true)
+                        Button("清除") { sonioxAPIKey = "" }
+                            .help("删除已保存的 Soniox API 密钥")
+                    }
+                }
+            }
+
+            if !sonioxStatus.isEmpty {
+                Text(sonioxStatus)
+                    .font(.callout)
+                    .foregroundColor(sonioxStatusIsError ? .red : .green)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Button(isTestingSoniox ? "测试中…" : "测试") { testSoniox() }
+                    .disabled(isTestingSoniox || sonioxAPIKey.isEmpty)
+                Spacer()
+                Button("保存") { save() }
+                    .keyboardShortcut(.defaultAction)
+            }
         }
         .padding(20)
         .frame(width: 520, alignment: .topLeading)
@@ -207,8 +260,36 @@ struct SettingsView: View {
         Preferences.shared.llmBaseURL = baseURL
         Preferences.shared.llmAPIKey  = apiKey
         Preferences.shared.llmModel   = model
+        Preferences.shared.sonioxAPIKey = sonioxAPIKey
+        Preferences.shared.sonioxMode = sonioxMode
         status = "已保存。"
         statusIsError = false
+        sonioxStatus = "已保存。"
+        sonioxStatusIsError = false
+        // The active SonioxBackend captured its key at construction; tell the
+        // app to rebuild it so a changed key takes effect without a restart.
+        NotificationCenter.default.post(name: .doushaSonioxConfigChanged, object: nil)
+    }
+
+    private func testSoniox() {
+        isTestingSoniox = true
+        sonioxStatus = "正在测试连接…"
+        sonioxStatusIsError = false
+        let key = sonioxAPIKey
+        Task {
+            let result = await SonioxConnectivityTest.run(apiKey: key)
+            await MainActor.run {
+                isTestingSoniox = false
+                switch result {
+                case .success:
+                    sonioxStatus = "连接正常。"
+                    sonioxStatusIsError = false
+                case .failure(let message):
+                    sonioxStatus = "失败：\(message)"
+                    sonioxStatusIsError = true
+                }
+            }
+        }
     }
 
     private func toggleRecording() {
@@ -315,4 +396,5 @@ final class HotkeyRecorder {
 
 extension Notification.Name {
     static let doushaHotkeyConfigChanged = Notification.Name("DoushaHotkeyConfigChanged")
+    static let doushaSonioxConfigChanged = Notification.Name("DoushaSonioxConfigChanged")
 }

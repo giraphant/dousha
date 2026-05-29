@@ -1,10 +1,10 @@
 import Foundation
 import AVFoundation
 
-enum AudioLevel {
+public enum AudioLevel {
     /// Returns a 0...1 RMS level suitable for driving a waveform UI.
     /// Boosts raw RMS (~0.02-0.15 for normal speech) so the bars react well.
-    static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+    public static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
         guard let channelData = buffer.floatChannelData?[0] else { return 0 }
         let frameLength = Int(buffer.frameLength)
         guard frameLength > 0 else { return 0 }

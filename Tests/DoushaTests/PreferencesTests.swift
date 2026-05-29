@@ -1,4 +1,5 @@
 import XCTest
+import SonioxASR
 @testable import Dousha
 
 final class PreferencesTests: XCTestCase {
@@ -31,8 +32,8 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(fresh.hotkey.mode, .toggle)
     }
 
-    func testSmartRetranscribe_defaultsToEnabled() {
-        XCTAssertTrue(prefs.smartRetranscribeEnabled)
+    func testSmartRetranscribe_defaultsToDisabled() {
+        XCTAssertFalse(prefs.smartRetranscribeEnabled)
     }
 
     func testSmartRetranscribe_persistsDisabledAcrossInstances() {
@@ -50,5 +51,38 @@ final class PreferencesTests: XCTestCase {
         let fresh = Preferences(defaults: defaults)
 
         XCTAssertTrue(fresh.smartRetranscribeEnabled)
+    }
+
+    func testSonioxAPIKey_defaultsToEmpty() {
+        XCTAssertEqual(prefs.sonioxAPIKey, "")
+    }
+
+    func testSonioxAPIKey_persistsAcrossInstances() {
+        prefs.sonioxAPIKey = "soniox-secret"
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.sonioxAPIKey, "soniox-secret")
+    }
+
+    func testSonioxMode_defaultsToRealtime() {
+        XCTAssertEqual(prefs.sonioxMode, .realtime)
+    }
+
+    func testSonioxMode_persistsAsyncAcrossInstances() {
+        prefs.sonioxMode = .async
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.sonioxMode, .async)
+    }
+
+    func testSonioxMode_canSwitchBackToRealtime() {
+        prefs.sonioxMode = .async
+        prefs.sonioxMode = .realtime
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.sonioxMode, .realtime)
     }
 }

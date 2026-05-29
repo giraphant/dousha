@@ -19,7 +19,7 @@ struct LanguageMenu {
                     isSelected: lang.rawValue == selectedLanguage
                 )
             }
-        case .doubao:
+        case .doubao, .soniox:
             return [Option(title: "自动", rawValue: autoIdentifier, isSelected: true)]
         }
     }
@@ -28,7 +28,7 @@ struct LanguageMenu {
         switch engine {
         case .apple:
             return selectedLanguage
-        case .doubao:
+        case .doubao, .soniox:
             return autoIdentifier
         }
     }

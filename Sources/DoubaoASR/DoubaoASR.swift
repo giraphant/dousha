@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import TalkerCommonSync
+import ASRSupport
 
 /// Streaming Doubao IME ASR client. One recording per instance:
 /// call `start()` to begin capturing the mic and streaming to Doubao,
@@ -53,6 +54,13 @@ public actor DoubaoASR {
     /// so closeWebSocket() can wait for the server's Close ack before invalidating
     /// the URLSession.
     private var wsClosedChannel: OneShotChannel<Void>?
+
+    /// Bumped on every openWebSocket() and every closeWebSocket(). The receive
+    /// loop captures the value at schedule time and drops any callback whose
+    /// generation no longer matches — so when the close handshake runs detached
+    /// (off the stop critical path), a stray callback from the socket being
+    /// closed can't tear down a freshly-opened session from a new recording.
+    private var wsGeneration = 0
 
     /// Periodic WebSocket-level PING. Lifecycle is tied to the WS itself: started
     /// in openWebSocket() and cancelled in closeWebSocket() and on receive-loop
@@ -353,9 +361,6 @@ public actor DoubaoASR {
         }
         doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
 
-        // Close the WebSocket after every session — see class doc.
-        await closeWebSocket()
-
         let final = assembledText()
         doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms stop final text.len=\(final.count) segments=\(committedSegments.count)")
 
@@ -381,7 +386,7 @@ public actor DoubaoASR {
             return maxGap
         }()
 
-        return TranscriptionResult(
+        let result = TranscriptionResult(
             text: final,
             audioDuration: audioDuration,
             lastResponseAge: lastResponseAge,
@@ -390,6 +395,44 @@ public actor DoubaoASR {
             savedAudioURL: savedURL,
             traceId: requestId
         )
+        // Close the WebSocket after every session (see class doc), but off the
+        // critical path — the transcript is already assembled, so the caller
+        // gets it NOW instead of waiting on the up-to-1s close handshake. We
+        // unhook the socket/session from actor state SYNCHRONOUSLY here so a
+        // fast restart can't be clobbered by the trailing close.
+        detachAndCloseWebSocketInBackground()
+        return result
+    }
+
+    /// Synchronously unhooks the current socket/session from actor state and
+    /// bumps the generation, then runs the up-to-1s WS close handshake in a
+    /// detached task. Clearing `self.ws`/`self.session`/`taskStarted` before
+    /// returning means a reentrant `_start()` that opens a fresh socket can't be
+    /// torn down by the trailing close — the handshake uses only the captured
+    /// handles.
+    private func detachAndCloseWebSocketInBackground() {
+        stopPingLoop()
+        guard let closing = ws else {
+            session?.invalidateAndCancel()
+            session = nil
+            taskStarted = false
+            return
+        }
+        let closingSession = session
+        self.ws = nil
+        self.session = nil
+        self.taskStarted = false
+        wsGeneration += 1
+
+        let channel = OneShotChannel<Void>()
+        wsClosedChannel = channel
+        closing.cancel(with: .normalClosure, reason: nil)
+        Task {
+            if case .timeout = await self.waitWithTimeout(channel: channel, timeout: 1.0) {
+                doushaLog("[DoubaoASR] WS close handshake timed out — tearing down anyway")
+            }
+            closingSession?.invalidateAndCancel()
+        }
     }
 
     private func teardownAudio() {
@@ -410,6 +453,14 @@ public actor DoubaoASR {
         // Drop our reference first so the receive loop's success branch stops
         // rescheduling itself if a stray message arrives during the close handshake.
         self.ws = nil
+        // Invalidate this socket's receive callbacks NOW (before awaiting the
+        // close handshake). This close may run detached off the stop path, so a
+        // fresh _start() could open a new socket during the await — bumping the
+        // generation keeps the old socket's trailing failure from tearing it down.
+        wsGeneration += 1
+        // Capture the session this close owns; a reentrant _start() during the
+        // await may replace self.session, and we must only tear down our own.
+        let owningSession = session
 
         let channel = OneShotChannel<Void>()
         wsClosedChannel = channel
@@ -424,9 +475,13 @@ public actor DoubaoASR {
         }
         wsClosedChannel = nil
 
-        session?.invalidateAndCancel()
-        session = nil
-        taskStarted = false
+        owningSession?.invalidateAndCancel()
+        // Only clear shared state if a reentrant reopen hasn't already replaced
+        // the session — otherwise we'd kill the new recording's connection.
+        if session === owningSession {
+            session = nil
+            taskStarted = false
+        }
     }
 
     // MARK: - WebSocket
@@ -449,7 +504,8 @@ public actor DoubaoASR {
         self.ws = sess.webSocketTask(with: req)
         self.ws?.resume()
         // The receive loop is shared across all sessions on this connection.
-        startReceiveLoop()
+        wsGeneration += 1
+        startReceiveLoop(generation: wsGeneration)
         startPingLoop()
     }
 
@@ -569,17 +625,20 @@ public actor DoubaoASR {
         try await ws.send(.data(data))
     }
 
-    private func startReceiveLoop() {
+    private func startReceiveLoop(generation: Int) {
         guard let ws = ws else { return }
         ws.receive { [weak self] result in
             // Bridge URLSession's delegate-queue callback into the actor.
-            Task { await self?.handleReceiveResult(result) }
+            Task { await self?.handleReceiveResult(result, generation: generation) }
         }
     }
 
-    private func handleReceiveResult(_ result: Result<URLSessionWebSocketTask.Message, Error>) async {
+    private func handleReceiveResult(_ result: Result<URLSessionWebSocketTask.Message, Error>, generation: Int) async {
         switch result {
         case .success(let msg):
+            // Drop content from a socket that has since been replaced/closed so
+            // a trailing frame can't mutate a fresh session's state.
+            guard generation == wsGeneration else { return }
             let data: Data
             switch msg {
             case .data(let d):   data = d
@@ -591,12 +650,18 @@ public actor DoubaoASR {
             }
             // Keep listening as long as the WebSocket is alive.
             if self.ws != nil {
-                startReceiveLoop()
+                startReceiveLoop(generation: generation)
             }
         case .failure(let err):
-            doushaLog("[DoubaoASR] receive failed: \(err.localizedDescription)")
-            // Wake any closeWebSocket() awaiting the close handshake.
+            // Signal the close handshake BEFORE the generation guard: when
+            // closeWebSocket() bumps wsGeneration and cancels the socket, this
+            // failure callback is what wakes the close-await. Gating it behind
+            // the guard would make every close block the full 1s timeout.
             wsClosedChannel?.finish(())
+            // A stale-generation failure (the socket closeWebSocket() is tearing
+            // down) must not touch the live session — return after signaling.
+            guard generation == wsGeneration else { return }
+            doushaLog("[DoubaoASR] receive failed: \(err.localizedDescription)")
             if isRunning {
                 deliverError(err)
             }

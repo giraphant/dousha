@@ -4,6 +4,8 @@ import Speech
 import AVFoundation
 import ApplicationServices
 import DoubaoASR
+import SonioxASR
+import ASRSupport
 import TalkerCommonSync
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -42,6 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let cancelTeardownGuard: TimeInterval = 0.25
     private let focusTracker = AppFocusTracker(selfBundleId: "com.dousha.app")
     private let incompleteDetector = IncompleteTranscriptDetector()
+    /// Set when a Soniox API-key change arrives while a session is live, so the
+    /// stale-key rebuild can't run immediately. Consumed at the next start so
+    /// the next recording always uses a backend built from the current key.
+    private var sonioxBackendDirty = false
 
     private var status: RecordingStatus = .idle {
         didSet {
@@ -101,6 +107,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self,
             selector: #selector(handleCancelHotkeyConfigChanged),
             name: .doushaCancelHotkeyConfigChanged,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleSonioxConfigChanged),
+            name: .doushaSonioxConfigChanged,
             object: nil
         )
 
@@ -203,10 +215,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         retranscribeItem.image = menuIcon("arrow.clockwise")
         retranscribeItem.target = self
-        // Disable when there's no saved WAV yet, when a session is live, or when the
-        // current engine isn't Doubao (Apple backend doesn't save WAVs).
-        let canRetry = FileManager.default.fileExists(atPath: DoubaoASR.savedAudioURL.path)
-            && prefs.engine == .doubao
+        // Disable when the backend has no replayable recording (no saved WAV,
+        // or the engine doesn't support retranscribe — e.g. Apple), or when a
+        // session is live.
+        let canRetry = speech.canRetranscribe
             && (status == .idle || isErrorStatus(status))
         retranscribeItem.isEnabled = canRetry
         menu.addItem(retranscribeItem)
@@ -253,6 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               e != prefs.engine else { return }
         prefs.engine = e
         speech = SpeechBackendFactory.make(engine: e, language: prefs.language)
+        sonioxBackendDirty = false
         if e == .doubao { DoubaoCredentialStore.shared.warmup() }
         rebuildMenu()
     }
@@ -360,6 +373,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startCancelKeyMonitor()
     }
 
+    @objc private func handleSonioxConfigChanged() {
+        // Rebuild the backend so a changed API key takes effect; only matters
+        // while Soniox is the active engine (the factory reads the key at
+        // construction).
+        guard prefs.engine == .soniox else { return }
+        // A session is live — can't stomp it. Defer the rebuild to the next
+        // start so the next recording doesn't reuse the stale-key backend.
+        guard status == .idle || isErrorStatus(status) else {
+            sonioxBackendDirty = true
+            return
+        }
+        speech = SpeechBackendFactory.make(engine: .soniox, language: prefs.language)
+        sonioxBackendDirty = false
+        rebuildMenu()
+    }
+
     private func startCancelKeyMonitor() {
         let cfg = prefs.cancelHotkey
         guard let kc = cfg.keyCode else {
@@ -431,6 +460,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         nextStartAllowedAt = nil
+        // A Soniox key change arrived mid-session and the rebuild was deferred;
+        // apply it now so this recording uses the current key.
+        if sonioxBackendDirty, prefs.engine == .soniox {
+            speech = SpeechBackendFactory.make(engine: .soniox, language: prefs.language)
+            sonioxBackendDirty = false
+        }
         status = .recording
         doushaLog("[Dousha] AppDelegate.handleStart: engine=\(prefs.engine.rawValue) language=\(prefs.language)")
         speech.setLanguage(prefs.language)
