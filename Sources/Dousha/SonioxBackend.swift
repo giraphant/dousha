@@ -1,13 +1,16 @@
 import Foundation
-import DoubaoASR
+import SonioxASR
 import ASRSupport
 
-/// Adapter that bridges the standalone DoubaoASR package to Dousha's
-/// `SpeechBackend` protocol. Doubao auto-detects language so `setLanguage` is a no-op.
-final class DoubaoBackend: SpeechBackend {
-    private let asr = DoubaoASR()
+/// Adapter bridging the standalone SonioxASR package to Dousha's
+/// `SpeechBackend` protocol. Soniox auto-detects language so `setLanguage`
+/// is a no-op.
+final class SonioxBackend: SpeechBackend {
+    private let asr: SonioxASR
 
-    init(language: String) { _ = language }
+    init(apiKey: String) {
+        self.asr = SonioxASR(apiKey: apiKey)
+    }
 
     func setLanguage(_ identifier: String) {}
 
@@ -26,11 +29,11 @@ final class DoubaoBackend: SpeechBackend {
     }
 
     var canRetranscribe: Bool {
-        FileManager.default.fileExists(atPath: DoubaoASR.savedAudioURL.path)
+        FileManager.default.fileExists(atPath: SonioxASR.savedAudioURL.path)
     }
 
     func retranscribeLastRecording(parentTraceId: String?, completion: @escaping @Sendable (String?) -> Void) {
-        let url = DoubaoASR.savedAudioURL
+        let url = SonioxASR.savedAudioURL
         guard FileManager.default.fileExists(atPath: url.path) else {
             completion(nil)
             return

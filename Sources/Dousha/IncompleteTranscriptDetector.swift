@@ -1,5 +1,5 @@
 import Foundation
-import DoubaoASR
+import ASRSupport
 
 /// Heuristic check for "did the streaming ASR probably miss part of the audio?"
 ///

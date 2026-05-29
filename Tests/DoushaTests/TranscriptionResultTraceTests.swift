@@ -1,5 +1,5 @@
 import XCTest
-import DoubaoASR
+import ASRSupport
 
 final class TranscriptionResultTraceTests: XCTestCase {
     func test_traceIdDefaultsToNil() {

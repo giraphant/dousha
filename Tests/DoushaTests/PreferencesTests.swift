@@ -31,8 +31,8 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(fresh.hotkey.mode, .toggle)
     }
 
-    func testSmartRetranscribe_defaultsToEnabled() {
-        XCTAssertTrue(prefs.smartRetranscribeEnabled)
+    func testSmartRetranscribe_defaultsToDisabled() {
+        XCTAssertFalse(prefs.smartRetranscribeEnabled)
     }
 
     func testSmartRetranscribe_persistsDisabledAcrossInstances() {
@@ -50,5 +50,17 @@ final class PreferencesTests: XCTestCase {
         let fresh = Preferences(defaults: defaults)
 
         XCTAssertTrue(fresh.smartRetranscribeEnabled)
+    }
+
+    func testSonioxAPIKey_defaultsToEmpty() {
+        XCTAssertEqual(prefs.sonioxAPIKey, "")
+    }
+
+    func testSonioxAPIKey_persistsAcrossInstances() {
+        prefs.sonioxAPIKey = "soniox-secret"
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.sonioxAPIKey, "soniox-secret")
     }
 }

@@ -1,6 +1,6 @@
 import XCTest
 import AVFoundation
-@testable import DoubaoASR
+import ASRSupport
 
 final class WavFileWriterTests: XCTestCase {
     private var tmpURL: URL!

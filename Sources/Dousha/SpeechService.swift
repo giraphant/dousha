@@ -2,6 +2,7 @@ import Foundation
 import Speech
 import AVFoundation
 import DoubaoASR
+import ASRSupport
 import TalkerCommonSync
 
 final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {

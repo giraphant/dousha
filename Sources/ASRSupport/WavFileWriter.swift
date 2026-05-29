@@ -21,8 +21,8 @@ import TalkerCommonSync
 /// writer without calling `close()` leaves the WAV header un-finalised until
 /// the writer's deinit eventually fires (timing depends on whether pending
 /// writes are still in flight on the background queue).
-final class WavFileWriter {
-    enum Error: Swift.Error {
+public final class WavFileWriter {
+    public enum Error: Swift.Error {
         case formatBuildFailed
     }
 
@@ -32,7 +32,7 @@ final class WavFileWriter {
     private var stopped = false   // touched only on `queue`
     private let url: URL
 
-    init(url: URL, sampleRate: Int, channels: Int) throws {
+    public init(url: URL, sampleRate: Int, channels: Int) throws {
         precondition(channels == 1, "WavFileWriter currently only supports mono — the int16 copy path assumes a single channel.")
         guard let fmt = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
@@ -62,7 +62,7 @@ final class WavFileWriter {
     /// Does not throw: write errors (PCM buffer alloc failure, AVAudioFile
     /// write failure) are logged via `NSLog` and transition the writer into a
     /// stopped state — subsequent appends are silently swallowed.
-    func append(int16Samples ptr: UnsafePointer<Int16>, count: Int) {
+    public func append(int16Samples ptr: UnsafePointer<Int16>, count: Int) {
         // Snapshot synchronously so the caller's buffer can be reused/freed.
         let snapshot = Array(UnsafeBufferPointer(start: ptr, count: count))
         let fmt = self.format
@@ -97,7 +97,7 @@ final class WavFileWriter {
     /// the data chunk size can be left at 0 even though the PCM bytes are
     /// physically on disk, causing AVAudioFile(forReading:) to return an empty
     /// buffer and silently breaking the retranscribe path.
-    func close() throws {
+    public func close() throws {
         queue.sync {
             self.stopped = true
             self.file = nil

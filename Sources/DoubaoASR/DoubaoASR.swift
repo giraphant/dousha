@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import TalkerCommonSync
+import ASRSupport
 
 /// Streaming Doubao IME ASR client. One recording per instance:
 /// call `start()` to begin capturing the mic and streaming to Doubao,
