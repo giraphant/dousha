@@ -1,9 +1,112 @@
 import SwiftUI
+import ASRSupport
 
 final class FloatingHUDModel: ObservableObject {
     @Published var status: RecordingStatus = .idle
     @Published var focus: AppFocusTracker.Focus?
     var audioLevel: Float = 0
+
+    /// The visible (revealed) transcript slice the view renders — a prefix of
+    /// `target` that a timer drips out one-ish character at a time so the batchy
+    /// server delivery (3–5 chars at once) reads as a continuous typewriter
+    /// stream. One published value = one atomic redraw.
+    @Published private(set) var transcript: PartialTranscript = .empty
+
+    /// Latest full snapshot from the backend; the reveal catches up to this.
+    private var target: PartialTranscript = .empty
+    /// Fractional reveal progress (characters). Sub-char-per-frame so small
+    /// batches drip out slowly instead of snapping in one frame.
+    private var revealProgress: Double = 0
+    private var revealTimer: Timer?
+    /// Seconds to (mostly) drain the current backlog — the reveal trails the
+    /// input by roughly this, so it keeps streaming until the next batch lands
+    /// instead of bursting then idling.
+    private static let revealTimeConstant = 0.32
+    /// Upper bound on reveal speed so a big jump (e.g. a long pause then a burst)
+    /// still streams rather than dumping instantly.
+    private static let maxRevealRate = 42.0  // chars/sec
+    private static let revealFrameInterval = 1.0 / 60.0
+    private var revealedCount: Int { Int(revealProgress) }
+
+    /// Whether any transcript text exists — drives logo-vs-text in the view.
+    /// Based on the target so the card switches to transcript mode the instant
+    /// the first token lands, not a tick later.
+    var hasTranscript: Bool { !target.combined.isEmpty }
+
+    /// Live update during recording. Sets the catch-up target; the timer reveals
+    /// any newly-arrived characters smoothly.
+    func updateTranscript(_ partial: PartialTranscript) {
+        target = partial
+        let total = Double(partial.combined.count)
+        if revealProgress > total { revealProgress = total }  // interim shrank — snap back
+        publishRevealed()                                     // no empty flash
+        startRevealTimerIfNeeded()
+    }
+
+    /// Release path: the final ASR text replaces everything and is shown in full
+    /// immediately (no reveal lag once the user has let go).
+    func setFinalTranscript(_ text: String) {
+        stopRevealTimer()
+        target = PartialTranscript(finalText: text, interimText: "")
+        revealProgress = Double(target.combined.count)
+        publishRevealed()
+    }
+
+    /// Start of a session (and on error): clear so the logo placeholder shows.
+    func resetTranscript() {
+        stopRevealTimer()
+        target = .empty
+        revealProgress = 0
+        transcript = .empty
+    }
+
+    // MARK: Reveal animation
+
+    private func startRevealTimerIfNeeded() {
+        guard revealTimer == nil, revealProgress < Double(target.combined.count) else { return }
+        let t = Timer(timeInterval: Self.revealFrameInterval, repeats: true) { [weak self] _ in
+            self?.advanceReveal()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        revealTimer = t
+    }
+
+    private func stopRevealTimer() {
+        revealTimer?.invalidate()
+        revealTimer = nil
+    }
+
+    /// Internal (not private) so tests can pump the reveal without a run loop.
+    /// Advances by `remaining / timeConstant` chars/sec (capped), so it eases in
+    /// — fast when far behind, gentle as it catches up — and trails the input
+    /// continuously rather than draining each batch in a single frame.
+    func advanceReveal() {
+        let total = Double(target.combined.count)
+        guard revealProgress < total else {
+            stopRevealTimer()
+            return
+        }
+        let remaining = total - revealProgress
+        let rate = min(Self.maxRevealRate, remaining / Self.revealTimeConstant)
+        var next = revealProgress + rate * Self.revealFrameInterval
+        if total - next < 0.6 { next = total }   // finish the last sub-character tail
+        revealProgress = next
+        publishRevealed()
+        if revealProgress >= total { stopRevealTimer() }
+    }
+
+    /// Slice the first `revealedCount` characters of `target`, split back into
+    /// final (dark) and interim (dimmed) for two-tone rendering.
+    private func publishRevealed() {
+        let finalChars = Array(target.finalText)
+        let interimChars = Array(target.interimText)
+        let fCount = min(revealedCount, finalChars.count)
+        let iCount = min(revealedCount - fCount, interimChars.count)
+        transcript = PartialTranscript(
+            finalText: String(finalChars.prefix(fCount)),
+            interimText: String(interimChars.prefix(iCount))
+        )
+    }
 
     /// Whether the HUD is currently expanded to show the finish/cancel buttons.
     /// Driven by SwiftUI .onHover on the visible HUD body; only meaningful while
@@ -42,21 +145,43 @@ final class FloatingHUDModel: ObservableObject {
 struct FloatingHUDView: View {
     @ObservedObject var model: FloatingHUDModel
 
+    /// Full (unclamped) height of the live transcript text at the card width,
+    /// measured off-screen. Drives the card's explicit height so the chrome —
+    /// and its border beam — track the visible card edge exactly at every size.
+    @State private var measuredTextHeight: CGFloat = 0
+
     private static let hudCornerRadius: CGFloat = 16
     private let cornerRadius: CGFloat = Self.hudCornerRadius
     private let barCount: Int = 30
     private let barWidth: CGFloat = 5.5
     private let barSpacing: CGFloat = 3
 
-    /// Baseline compact HUD height before the hover actions are shown.
+    /// Baseline compact HUD height — the empty/no-text card (context row +
+    /// meter). Unchanged from the original design.
     static let compactHeight: CGFloat = 71
     static let cardHeight: CGFloat = 71
     static let cardWidth: CGFloat = 280
-    static let cardMaxHeight: CGFloat = cardHeight
     static let contextRowCenterYRatio: CGFloat = 0.30
     static let levelMeterCenterYRatio: CGFloat = 0.70
     private static let actionDividerHeight: CGFloat = 0.5
-    private static let actionRowHeight: CGFloat = (cardHeight - actionDividerHeight) / 2
+
+    // MARK: Live-transcript growth (only used once text arrives)
+    static let transcriptFontSize: CGFloat = 13
+    /// Single transcript line box (font + lineSpacing).
+    static let transcriptLineHeight: CGFloat = 19
+    /// Hard cap on visible transcript lines; older lines fade off the top.
+    static let maxTranscriptLines: Int = 5
+    static let transcriptTopPadding: CGFloat = 14
+    private static let transcriptHorizontalPadding: CGFloat = 16
+    /// Bottom strip reserved for the meter while transcript is showing.
+    static let meterRegionHeight: CGFloat = 26
+    /// Transcript text area cap: top padding + the 5 lines (the visible limit).
+    static let transcriptMaxHeight: CGFloat = transcriptTopPadding + transcriptLineHeight * CGFloat(maxTranscriptLines)
+    /// Grown card cap = transcript cap + meter strip. The fixed panel sizes to this.
+    static let maxHeight: CGFloat = transcriptMaxHeight + meterRegionHeight
+    /// FloatingWindow sizes the (fixed) panel to the cap so the grown card fits.
+    static let cardMaxHeight: CGFloat = maxHeight
+
     private static let hudShape = RoundedRectangle(cornerRadius: hudCornerRadius, style: .continuous)
 
     /// Hover-driven expansion is only meaningful while recording. In other
@@ -81,11 +206,22 @@ struct FloatingHUDView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Single flexible spacer above + fixed gap below = the card is pinned
+            // to the bottom and grows strictly UPWARD. (Two flexible spacers would
+            // center it and make it grow both ways.)
             Spacer(minLength: 0)
             hudCard
-            Spacer(minLength: 40)
+                .padding(.bottom, 40)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Card height: compact when there's no transcript (original design),
+    /// otherwise grown to fit the measured text, clamped to the 5-line cap.
+    private var currentCardHeight: CGFloat {
+        guard model.hasTranscript else { return Self.compactHeight }
+        let needed = measuredTextHeight + Self.meterRegionHeight
+        return min(Self.maxHeight, max(Self.compactHeight, needed))
     }
 
     private var hudCard: some View {
@@ -95,14 +231,17 @@ struct FloatingHUDView: View {
             beamOpacity: isExpandedNow ? 0.92 : 0.72
         ) {
             ZStack {
-                compactSection
+                cardContent
 
                 recordingActionOverlay
                     .opacity(isExpandedNow ? 1 : 0)
                     .allowsHitTesting(isExpandedNow)
             }
         }
-        .frame(width: Self.cardWidth, height: Self.cardHeight)
+        // Explicit frame keeps the chrome (and its beam) locked to the visible
+        // card edge; height is dynamic but always exact.
+        .frame(width: Self.cardWidth, height: currentCardHeight)
+        .background(transcriptHeightMeasurer)
         .contentShape(Self.hudShape)
         .onHover { hovering in
             guard canExpand else {
@@ -112,7 +251,33 @@ struct FloatingHUDView: View {
             model.isExpanded = hovering
         }
         .animation(.easeInOut(duration: 0.14), value: isExpandedNow)
+        .animation(.spring(response: 0.26, dampingFraction: 1.0), value: currentCardHeight)
         .animation(.easeInOut(duration: 0.25), value: model.status)
+    }
+
+    @ViewBuilder
+    private var cardContent: some View {
+        if model.hasTranscript {
+            transcriptSection
+        } else {
+            compactSection
+        }
+    }
+
+    /// Off-screen, full-height render of the transcript at the text width, so we
+    /// know how tall the card should grow before clamping. Never visible.
+    private var transcriptHeightMeasurer: some View {
+        transcriptStyledText
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: Self.cardWidth - 2 * Self.transcriptHorizontalPadding, alignment: .topLeading)
+            .padding(.top, Self.transcriptTopPadding)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: TranscriptHeightKey.self, value: proxy.size.height)
+                }
+            )
+            .hidden()
+            .onPreferenceChange(TranscriptHeightKey.self) { measuredTextHeight = $0 }
     }
 
     private var compactSection: some View {
@@ -173,6 +338,55 @@ struct FloatingHUDView: View {
         )
     }
 
+    // MARK: - Live transcript (only shown once text arrives)
+
+    /// Transcript layout: two-tone text growing bottom-up, meter pinned at the
+    /// bottom. The text area fills whatever height the card grew to (minus the
+    /// meter strip); when it overflows the cap, the oldest lines are clipped and
+    /// faded off the top.
+    private var transcriptSection: some View {
+        VStack(spacing: 0) {
+            transcriptStyledText
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .bottomLeading)
+                .padding(.horizontal, Self.transcriptHorizontalPadding)
+                .padding(.top, Self.transcriptTopPadding)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .clipped()
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .black, location: Self.transcriptLineHeight / Self.transcriptMaxHeight),
+                            .init(color: .black, location: 1.0),
+                        ],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                )
+
+            levelMeter(opacity: 0.74, minHeight: 3.0, maxHeight: 14)
+                .frame(width: Self.cardWidth - 28)
+                .frame(height: Self.meterRegionHeight - 8)
+                .padding(.bottom, 8)
+        }
+    }
+
+    /// Finalized text solid, interim tail dimmed, concatenated so they wrap as a
+    /// single flowing paragraph.
+    private var transcriptText: Text {
+        Text(model.transcript.finalText).foregroundColor(.primary)
+            + Text(model.transcript.interimText).foregroundColor(.primary.opacity(0.55))
+    }
+
+    /// The styled transcript — same font/lineSpacing used by both the visible
+    /// text and the off-screen measurer so measured height == rendered height.
+    private var transcriptStyledText: some View {
+        transcriptText
+            .font(.system(size: Self.transcriptFontSize, weight: .medium))
+            .lineSpacing(Self.transcriptLineHeight - Self.transcriptFontSize)
+            .multilineTextAlignment(.leading)
+    }
+
     private var recordingActionOverlay: some View {
         VStack(spacing: 0) {
             HUDActionRow(
@@ -183,7 +397,7 @@ struct FloatingHUDView: View {
             ) {
                 model.onFinish?()
             }
-            .frame(height: Self.actionRowHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Rectangle()
                 .fill(Color(red: 0.32, green: 0.48, blue: 0.72).opacity(0.20))
@@ -197,9 +411,18 @@ struct FloatingHUDView: View {
             ) {
                 model.onCancel?()
             }
-            .frame(height: Self.actionRowHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: Self.cardHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Carries the full (unclamped) transcript text height up from the off-screen
+/// measurer so the card can size itself.
+private struct TranscriptHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

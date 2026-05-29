@@ -296,6 +296,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         doushaLog("[Dousha] retranscribe menu fired")
         status = .transcribing
+        // Clear any leftover transcript from the previous session — the HUD is
+        // visible during .transcribing, so without this it would show the last
+        // recording's final text while this manual retry runs.
+        hudModel.resetTranscript()
         speech.retranscribeLastRecording { [weak self] text in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -304,6 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.status = .idle
                     return
                 }
+                self.hudModel.setFinalTranscript(text)
                 self.refineAndInject(text)
             }
         }
@@ -470,11 +475,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         doushaLog("[Dousha] AppDelegate.handleStart: engine=\(prefs.engine.rawValue) language=\(prefs.language)")
         speech.setLanguage(prefs.language)
         hudModel.resetLevels()
+        hudModel.resetTranscript()
 
         let myToken = sessionToken
         speech.start(
-            onPartial: { _ in
-                // v1 HUD does not display partial transcript text.
+            onPartial: { [weak self] partial in
+                DispatchQueue.main.async {
+                    guard let self = self, self.sessionToken == myToken else { return }
+                    // Drop late partials once we've left .recording. sessionToken
+                    // is bumped only on cancel, not normal stop, so a batch the
+                    // backend dispatched just before stop() can land here AFTER
+                    // setFinalTranscript — this gate stops it clobbering the final.
+                    guard self.status == .recording else { return }
+                    self.hudModel.updateTranscript(partial)
+                }
             },
             onAudioLevel: { [weak self] level in
                 DispatchQueue.main.async {
@@ -557,6 +571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 self.status = .idle
                                 return
                             }
+                            self.hudModel.setFinalTranscript(finalText)
                             self.refineAndInject(finalText)
                         }
                     }
@@ -571,6 +586,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.status = .idle
                     return
                 }
+                self.hudModel.setFinalTranscript(text)
                 self.refineAndInject(text)
             }
         }
@@ -613,6 +629,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case .error = status { return }
 
         status = .error(message)
+        // Clear any lingering interim so the error state falls back to the logo
+        // placeholder + yellow glow rather than showing stale, unusable text.
+        hudModel.resetTranscript()
 
         // Critical: release the mic / WebSocket. Without this, the speech
         // backend keeps holding the audio device, and the next handleStart

@@ -14,7 +14,7 @@ final class SonioxBackend: SpeechBackend {
 
     func setLanguage(_ identifier: String) {}
 
-    func start(onPartial: @escaping @Sendable (String) -> Void,
+    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                onAudioLevel: @escaping @Sendable (Float) -> Void,
                onError: @escaping @Sendable (Error) -> Void) {
         // Snapshot the shared glossary into Soniox's context.terms at recording

@@ -80,7 +80,7 @@ public actor DoubaoASR {
     private var pingTask: Task<Void, Never>?
 
     // Callbacks (assigned in start)
-    private var onPartial: (@Sendable (String) -> Void)?
+    private var onPartial: (@Sendable (PartialTranscript) -> Void)?
     private var onAudioLevel: (@Sendable (Float) -> Void)?
     private var onError: (@Sendable (Error) -> Void)?
 
@@ -142,14 +142,14 @@ public actor DoubaoASR {
     /// - Parameter contextHint: Recognition context (e.g. a glossary of domain
     ///   terms joined into a string) sent in StartSession `extra.context`. Pass
     ///   `""` for none. Snapshotted for the duration of this recording.
-    public nonisolated func start(onPartial: @escaping @Sendable (String) -> Void,
+    public nonisolated func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                                   onAudioLevel: @escaping @Sendable (Float) -> Void,
                                   onError: @escaping @Sendable (Error) -> Void,
                                   contextHint: String = "") {
         Task { await self._start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError, contextHint: contextHint) }
     }
 
-    private func _start(onPartial: @escaping @Sendable (String) -> Void,
+    private func _start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                         onAudioLevel: @escaping @Sendable (Float) -> Void,
                         onError: @escaping @Sendable (Error) -> Void,
                         contextHint: String) async {
@@ -811,9 +811,9 @@ public actor DoubaoASR {
             } else {
                 currentInterim = text
             }
-            let display = committedSegments.joined() + currentInterim
+            let partial = PartialTranscript(finalText: committedSegments.joined(), interimText: currentInterim)
             let cb = onPartial
-            DispatchQueue.main.async { cb?(display) }
+            DispatchQueue.main.async { cb?(partial) }
         }
     }
 

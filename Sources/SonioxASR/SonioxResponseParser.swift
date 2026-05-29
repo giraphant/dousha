@@ -39,6 +39,8 @@ public struct SonioxResponseParser: Sendable {
     /// signal finished, deliver error) without re-reading parser state.
     public struct Update: Sendable, Equatable {
         public let displayText: String
+        public let finalText: String
+        public let interimText: String
         public let didProduceContent: Bool
         public let finished: Bool
         public let errorMessage: String?
@@ -60,7 +62,8 @@ public struct SonioxResponseParser: Sendable {
         if let code = obj["error_code"], !(code is NSNull) {
             let msg = (obj["error_message"] as? String) ?? "Soniox error (\(code))"
             errorMessage = msg
-            return Update(displayText: displayText, didProduceContent: false, finished: false, errorMessage: msg)
+            return Update(displayText: displayText, finalText: finalText, interimText: interimText,
+                          didProduceContent: false, finished: false, errorMessage: msg)
         }
 
         // `finished` MUST be read before any "tokens empty" early return — the
@@ -108,6 +111,8 @@ public struct SonioxResponseParser: Sendable {
         let produced = appendedFinal || !interimText.isEmpty
         return Update(
             displayText: displayText,
+            finalText: finalText,
+            interimText: interimText,
             didProduceContent: produced,
             finished: finishedNow,
             errorMessage: nil
