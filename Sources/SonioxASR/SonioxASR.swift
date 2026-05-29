@@ -42,8 +42,10 @@ public actor SonioxASR {
 
     /// Signaled by the receive loop once the WS has fully torn down, so
     /// closeWebSocket() can wait for the server's Close ack before invalidating
-    /// the URLSession.
-    private var wsClosedChannel: OneShotChannel<Void>?
+    /// the URLSession. Keyed by the closing socket's generation so a stale
+    /// socket's trailing failure only wakes its own waiter, never a newer
+    /// overlapping close's (QUA-130).
+    private var wsCloseChannels = GenerationCloseChannels()
 
     /// Periodic keepalive control frame. Started only AFTER the config message
     /// is sent (the first frame must be config), and cancelled in
@@ -273,17 +275,21 @@ public actor SonioxASR {
             return
         }
         let closingSession = session
+        // The socket's receive loop runs under the current generation; register
+        // the close channel under it BEFORE the bump so the socket's own failure
+        // callback (which fires with that generation) wakes this waiter.
+        let closingGeneration = wsGeneration
         self.ws = nil
         self.session = nil
         wsGeneration += 1
 
-        let channel = OneShotChannel<Void>()
-        wsClosedChannel = channel
+        let channel = wsCloseChannels.register(closingGeneration)
         closing.cancel(with: .normalClosure, reason: nil)
         Task {
             if case .timeout = await self.waitWithTimeout(channel: channel, timeout: 1.0) {
                 doushaLog("[SonioxASR] WS close handshake timed out — tearing down anyway")
             }
+            self.wsCloseChannels.remove(closingGeneration)
             closingSession?.invalidateAndCancel()
         }
     }
@@ -349,21 +355,23 @@ public actor SonioxASR {
         // after the await would then kill the new socket. Tear down only ours.
         let owningSession = session
         self.ws = nil
+        // Register the close channel under the socket's current generation
+        // BEFORE the bump so its own failure callback wakes this waiter.
+        let closingGeneration = wsGeneration
         // Invalidate the old socket's receive callbacks NOW (before awaiting the
         // close handshake) so a trailing message during the close/reopen gap
         // can't mutate freshly-reset session state (e.g. in retranscribe). The
-        // failure callback still signals wsClosedChannel below — see
+        // failure callback still signals this generation's channel below — see
         // handleReceiveResult — so the handshake completes promptly.
         wsGeneration += 1
 
-        let channel = OneShotChannel<Void>()
-        wsClosedChannel = channel
+        let channel = wsCloseChannels.register(closingGeneration)
         ws.cancel(with: .normalClosure, reason: nil)
 
         if case .timeout = await waitWithTimeout(channel: channel, timeout: 1.0) {
             doushaLog("[SonioxASR] WS close handshake timed out — tearing down anyway")
         }
-        wsClosedChannel = nil
+        wsCloseChannels.remove(closingGeneration)
 
         owningSession?.invalidateAndCancel()
         // Only clear self.session if it still points at the session we closed —
@@ -456,8 +464,9 @@ public actor SonioxASR {
             // closeWebSocket() bumps wsGeneration and cancels the socket, the
             // resulting failure callback is the only thing that wakes the
             // close-await. Gating it behind the guard would make every close
-            // block the full 1s timeout.
-            wsClosedChannel?.finish(())
+            // block the full 1s timeout. Keying by this callback's own
+            // generation ensures a stale socket can't wake a newer close.
+            wsCloseChannels.signal(generation)
             guard generation == wsGeneration else { return }
             doushaLog("[SonioxASR] receive failed: \(err.localizedDescription)")
             if isRunning {

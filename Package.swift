@@ -57,7 +57,7 @@ let package = Package(
         ,
         .testTarget(
             name: "DoushaTests",
-            dependencies: ["Dousha", "DoubaoASR", "SonioxASR", "ASRSupport"],
+            dependencies: ["Dousha", "DoubaoASR", "SonioxASR", "ASRSupport", "TalkerCommonSync"],
             path: "Tests/DoushaTests"
         )
     ]
