@@ -36,11 +36,25 @@ public enum SonioxConfig {
     /// little more margin on long pauses.
     public static let keepaliveIntervalSeconds: TimeInterval = 10.0
 
+    /// Builds Soniox's `context` request object from a glossary term list, or
+    /// `nil` when there are no terms (so callers omit the key entirely rather
+    /// than sending an empty object). Soniox's `context.terms` is a string array
+    /// of domain words used to bias recognition toward proper nouns / jargon
+    /// (QUA-133). Terms are expected pre-normalized (trimmed/deduped/capped) by
+    /// the caller.
+    public static func contextObject(terms: [String]) -> [String: Any]? {
+        guard !terms.isEmpty else { return nil }
+        return ["terms": terms]
+    }
+
     /// Builds the first-message JSON (a text frame). Auto-detect only: we
     /// deliberately omit `language_hints`, translation, diarization, and
     /// language-id — this is plain dictation (see design doc, "Out of scope").
-    public static func configMessageJSON(apiKey: String) -> String {
-        let payload: [String: Any] = [
+    ///
+    /// - Parameter contextTerms: Glossary terms for `context.terms`. Empty =>
+    ///   no `context` key is sent.
+    public static func configMessageJSON(apiKey: String, contextTerms: [String] = []) -> String {
+        var payload: [String: Any] = [
             "api_key": apiKey,
             "model": model,
             "audio_format": "pcm_s16le",
@@ -48,6 +62,9 @@ public enum SonioxConfig {
             "num_channels": channels,
             "enable_endpoint_detection": true
         ]
+        if let context = contextObject(terms: contextTerms) {
+            payload["context"] = context
+        }
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }

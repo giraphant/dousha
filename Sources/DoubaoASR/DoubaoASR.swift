@@ -24,6 +24,13 @@ public actor DoubaoASR {
     private var requestId: String = UUID().uuidString.lowercased()
     private var token: String = ""
     private var deviceId: String = ""
+
+    /// Recognition context hint sent in StartSession `extra.context` to bias the
+    /// recognizer toward domain terms / proper nouns (QUA-133). Snapshotted at
+    /// `start(contextHint:)` so a Settings change mid-recording can't alter the
+    /// active session, and reused by `retranscribe` so a replay stays consistent
+    /// with the recording that produced the audio. Empty string = no hint.
+    private var contextHint: String = ""
     private var pcmBuffer = Data()
     private var didSendFirstFrame = false
     private var canSendAudio = false
@@ -132,17 +139,23 @@ public actor DoubaoASR {
     ///     still call `stop()` to clean up.
     ///
     /// Calling `start()` while already running is a no-op.
+    /// - Parameter contextHint: Recognition context (e.g. a glossary of domain
+    ///   terms joined into a string) sent in StartSession `extra.context`. Pass
+    ///   `""` for none. Snapshotted for the duration of this recording.
     public nonisolated func start(onPartial: @escaping @Sendable (String) -> Void,
                                   onAudioLevel: @escaping @Sendable (Float) -> Void,
-                                  onError: @escaping @Sendable (Error) -> Void) {
-        Task { await self._start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError) }
+                                  onError: @escaping @Sendable (Error) -> Void,
+                                  contextHint: String = "") {
+        Task { await self._start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError, contextHint: contextHint) }
     }
 
     private func _start(onPartial: @escaping @Sendable (String) -> Void,
                         onAudioLevel: @escaping @Sendable (Float) -> Void,
-                        onError: @escaping @Sendable (Error) -> Void) async {
+                        onError: @escaping @Sendable (Error) -> Void,
+                        contextHint: String) async {
         guard !isRunning else { return }
         isRunning = true
+        self.contextHint = contextHint
         self.onPartial = onPartial
         self.onAudioLevel = onAudioLevel
         self.onError = onError
@@ -591,6 +604,12 @@ public actor DoubaoASR {
         }
 
         let configJSON = sessionConfigJSON(deviceId: deviceId)
+        if contextHint.isEmpty {
+            doushaLog("[DoubaoASR] StartSession context: (none)")
+        } else {
+            let preview = contextHint.count > 60 ? String(contextHint.prefix(60)) + "…" : contextHint
+            doushaLog("[DoubaoASR] StartSession context.len=\(contextHint.count) preview=\(preview)")
+        }
         try await sendData(AsrMessageBuilder.startSession(requestId: requestId, token: token, configJSON: configJSON))
         let resp2 = try await waitForResponse(timeout: 5.0) {
             $0.messageType == "SessionStarted" || $0.messageType == "TaskFailed" || $0.messageType == "SessionFailed"
@@ -622,44 +641,7 @@ public actor DoubaoASR {
     }
 
     private func sessionConfigJSON(deviceId: String) -> String {
-        // `end_smooth_window_ms` and `use_twopass_retry` mirror the official
-        // Doubao IME client's StartSession config. Without `end_smooth_window_ms`
-        // the server falls back to a default VAD finalization window that has
-        // been observed to truncate the tail of long utterances.
-        let payload: [String: Any] = [
-            "audio_info": [
-                "channel": DoubaoConstants.channels,
-                "format": "speech_opus",
-                "sample_rate": DoubaoConstants.sampleRate
-            ],
-            "enable_punctuation": true,
-            "enable_speech_rejection": false,
-            "extra": [
-                "app_name": "com.android.chrome",
-                "app_version": "1.1.2",
-                "cell_compress_rate": 8,
-                "device_brand": "google",
-                "device_model": "Pixel 7 Pro",
-                "did": deviceId,
-                "enable_asr_threepass": true,
-                "enable_asr_twopass": true,
-                // Text-formatting knobs mirrored from the official IME's StartSession
-                // (SdkImpl.java): keep Han numerals as digits, no spaces inserted
-                // between Han and digits/letters, and enable strong DDC (the
-                // server-side text-correction / smoothing pass).
-                "enable_print_chinese": false,
-                "end_smooth_window_ms": 800,
-                "input_mode": "tool",
-                "os": "Android",
-                "os_version": "16",
-                "remove_space_between_han_eng": false,
-                "remove_space_between_han_num": false,
-                "strong_ddc": true,
-                "use_twopass_retry": true
-            ]
-        ]
-        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
-        return String(data: data, encoding: .utf8) ?? "{}"
+        buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint)
     }
 
     private func sendFinishSession() async throws {

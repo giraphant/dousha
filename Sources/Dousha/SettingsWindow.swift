@@ -45,6 +45,10 @@ struct SettingsView: View {
     @State private var sonioxStatusIsError: Bool = false
     @State private var isTestingSoniox: Bool = false
 
+    @State private var glossaryEnabled: Bool = Preferences.shared.glossaryEnabled
+    @State private var glossaryTerms: [String] = Preferences.shared.glossaryTerms
+    @State private var newTerm: String = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             // 热键
@@ -222,9 +226,88 @@ struct SettingsView: View {
                 Button("保存") { save() }
                     .keyboardShortcut(.defaultAction)
             }
+
+            Divider().padding(.vertical, 4)
+
+            Text("词库")
+                .font(.title3).bold()
+            Text("把常用术语、专有名词加进词库，识别时会优先往这些词上靠，提高准确率。对豆包和 Soniox 引擎都生效，下一次录音起作用。Soniox 用词表（terms）偏置，效果通常更明显。")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("启用词库", isOn: $glossaryEnabled)
+                    .onChange(of: glossaryEnabled) { _, newValue in
+                        Preferences.shared.glossaryEnabled = newValue
+                    }
+
+                // Only the term editor is gated by the toggle — the toggle itself
+                // must stay enabled so the user can turn the feature on.
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 6) {
+                        TextField("添加术语…", text: $newTerm)
+                            .textFieldStyle(.roundedBorder)
+                            .disableAutocorrection(true)
+                            .onSubmit { addTerm() }
+                        Button("添加") { addTerm() }
+                            .disabled(newTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+
+                    if glossaryTerms.isEmpty {
+                        Text("词库为空。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        // Explicit per-row delete button. macOS List `.onDelete`
+                        // gives no usable affordance (no swipe-to-delete), so a
+                        // trailing remove button is the reliable way to delete.
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(Array(glossaryTerms.enumerated()), id: \.offset) { index, term in
+                                    HStack {
+                                        Text(term)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        Button {
+                                            removeTerm(at: index)
+                                        } label: {
+                                            Image(systemName: "trash")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help("删除「\(term)」")
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    if index < glossaryTerms.count - 1 {
+                                        Divider()
+                                    }
+                                }
+                            }
+                        }
+                        .frame(height: 140)
+                        .frame(maxWidth: .infinity)
+                        .border(Color.gray.opacity(0.2))
+                    }
+                }
+                .disabled(!glossaryEnabled)
+            }
         }
         .padding(20)
         .frame(width: 520, alignment: .topLeading)
+    }
+
+    private func addTerm() {
+        let term = newTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty, !glossaryTerms.contains(term) else { return }
+        glossaryTerms.append(term)
+        newTerm = ""
+        Preferences.shared.glossaryTerms = glossaryTerms
+    }
+
+    private func removeTerm(at index: Int) {
+        guard glossaryTerms.indices.contains(index) else { return }
+        glossaryTerms.remove(at: index)
+        Preferences.shared.glossaryTerms = glossaryTerms
     }
 
     @ViewBuilder

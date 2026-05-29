@@ -33,6 +33,11 @@ final class Preferences {
         static let sonioxAPIKey              = "sonioxAPIKey"
         static let sonioxMode                = "sonioxMode"
         static let smartRetranscribeEnabled  = "smartRetranscribeEnabled"
+        // Engine-agnostic glossary (QUA-133). Key strings keep the historical
+        // "doubao" prefix so terms entered before the Soniox extension survive;
+        // the feature applies to both Doubao and Soniox.
+        static let glossaryEnabled           = "doubaoGlossaryEnabled"
+        static let glossaryTerms             = "doubaoGlossaryTerms"
         static let hotkeyKeyCode             = "hotkey.keyCode"
         static let hotkeyMode                = "hotkey.mode"
         // Sentinel: -1 stored under `cancelHotkey.keyCode` means "disabled".
@@ -58,6 +63,8 @@ final class Preferences {
             Keys.sonioxAPIKey:             "",
             Keys.sonioxMode:               SonioxMode.realtime.rawValue,
             Keys.smartRetranscribeEnabled: false,
+            Keys.glossaryEnabled:          false,
+            Keys.glossaryTerms:            [String](),
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
             Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
             Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode)
@@ -107,6 +114,16 @@ final class Preferences {
     var sonioxMode: SonioxMode {
         get { SonioxMode(rawValue: defaults.string(forKey: Keys.sonioxMode) ?? "") ?? .realtime }
         set { defaults.set(newValue.rawValue, forKey: Keys.sonioxMode) }
+    }
+
+    var glossaryEnabled: Bool {
+        get { defaults.bool(forKey: Keys.glossaryEnabled) }
+        set { defaults.set(newValue, forKey: Keys.glossaryEnabled) }
+    }
+
+    var glossaryTerms: [String] {
+        get { defaults.stringArray(forKey: Keys.glossaryTerms) ?? [] }
+        set { defaults.set(newValue, forKey: Keys.glossaryTerms) }
     }
 
     var hotkey: HotkeyConfig {

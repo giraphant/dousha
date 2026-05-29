@@ -85,4 +85,51 @@ final class PreferencesTests: XCTestCase {
 
         XCTAssertEqual(fresh.sonioxMode, .realtime)
     }
+
+    // MARK: - Glossary (QUA-133) — shared across Doubao + Soniox
+
+    func testGlossaryEnabled_defaultsToDisabled() {
+        XCTAssertFalse(prefs.glossaryEnabled)
+    }
+
+    func testGlossaryEnabled_persistsAcrossInstances() {
+        prefs.glossaryEnabled = true
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertTrue(fresh.glossaryEnabled)
+    }
+
+    func testGlossaryTerms_defaultsToEmpty() {
+        XCTAssertEqual(prefs.glossaryTerms, [])
+    }
+
+    func testGlossaryTerms_persistsAcrossInstances() {
+        prefs.glossaryTerms = ["Anthropic", "Claude", "豆沙"]
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.glossaryTerms, ["Anthropic", "Claude", "豆沙"])
+    }
+
+    func testGlossaryTerms_canBeClearedBackToEmpty() {
+        prefs.glossaryTerms = ["term"]
+        prefs.glossaryTerms = []
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.glossaryTerms, [])
+    }
+
+    func testGlossaryTerms_persistUnderHistoricalDoubaoKey() {
+        // The UserDefaults key string is still "doubaoGlossaryTerms" so terms
+        // entered before the Soniox extension survive the rename.
+        prefs.glossaryTerms = ["布迪厄"]
+        XCTAssertEqual(defaults.stringArray(forKey: "doubaoGlossaryTerms"), ["布迪厄"])
+    }
+
+    func testGlossaryEnabled_persistUnderHistoricalDoubaoKey() {
+        prefs.glossaryEnabled = true
+        XCTAssertTrue(defaults.bool(forKey: "doubaoGlossaryEnabled"))
+    }
 }
