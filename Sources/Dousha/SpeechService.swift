@@ -36,7 +36,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
     }
 
     func start(
-        onPartial: @escaping @Sendable (String) -> Void,
+        onPartial: @escaping @Sendable (PartialTranscript) -> Void,
         onAudioLevel: @escaping @Sendable (Float) -> Void,
         onError: @escaping @Sendable (Error) -> Void
     ) {
@@ -105,7 +105,10 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
             if let result = result {
                 let text = result.bestTranscription.formattedString
                 self.lastText = text
-                DispatchQueue.main.async { onPartial(text) }
+                // Apple gives one cumulative best transcript with no finalization
+                // boundary, so it is all interim until stop() returns the final.
+                let partial = PartialTranscript(finalText: "", interimText: text)
+                DispatchQueue.main.async { onPartial(partial) }
             }
             if let error = error {
                 let nsErr = error as NSError

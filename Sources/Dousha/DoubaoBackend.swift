@@ -11,7 +11,7 @@ final class DoubaoBackend: SpeechBackend {
 
     func setLanguage(_ identifier: String) {}
 
-    func start(onPartial: @escaping @Sendable (String) -> Void,
+    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                onAudioLevel: @escaping @Sendable (Float) -> Void,
                onError: @escaping @Sendable (Error) -> Void) {
         // Snapshot the glossary into a context hint at recording start (QUA-133).

@@ -62,7 +62,7 @@ public actor SonioxASR {
     private var keepaliveTask: Task<Void, Never>?
 
     // Callbacks (assigned in start)
-    private var onPartial: (@Sendable (String) -> Void)?
+    private var onPartial: (@Sendable (PartialTranscript) -> Void)?
     private var onAudioLevel: (@Sendable (Float) -> Void)?
     private var onError: (@Sendable (Error) -> Void)?
 
@@ -97,14 +97,14 @@ public actor SonioxASR {
 
     /// - Parameter contextTerms: Glossary terms for Soniox's `context.terms`.
     ///   Pass `[]` for none. Snapshotted for the duration of this recording.
-    public nonisolated func start(onPartial: @escaping @Sendable (String) -> Void,
+    public nonisolated func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                                   onAudioLevel: @escaping @Sendable (Float) -> Void,
                                   onError: @escaping @Sendable (Error) -> Void,
                                   contextTerms: [String] = []) {
         Task { await self._start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError, contextTerms: contextTerms) }
     }
 
-    private func _start(onPartial: @escaping @Sendable (String) -> Void,
+    private func _start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                         onAudioLevel: @escaping @Sendable (Float) -> Void,
                         onError: @escaping @Sendable (Error) -> Void,
                         contextTerms: [String]) async {
@@ -514,9 +514,9 @@ public actor SonioxASR {
 
         if update.didProduceContent {
             self.lastTranscriptAt = Date()
-            let display = update.displayText
+            let partial = PartialTranscript(finalText: update.finalText, interimText: update.interimText)
             let cb = onPartial
-            DispatchQueue.main.async { cb?(display) }
+            DispatchQueue.main.async { cb?(partial) }
         }
 
         if update.finished {
