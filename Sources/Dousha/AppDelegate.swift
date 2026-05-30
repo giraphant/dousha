@@ -17,7 +17,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         language: Preferences.shared.language
     )
     private let injector = TextInjector()
-    private let llm = LLMRefiner()
     private let prefs = Preferences.shared
 
     private let hudModel = FloatingHUDModel()
@@ -116,7 +115,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        if prefs.engine == .doubao { DoubaoCredentialStore.shared.warmup() }
+        // fusion 模式录音也走豆包,提前预热凭据。
+        if prefs.engine == .doubao || prefs.engine == .fusion {
+            DoubaoCredentialStore.shared.warmup()
+        }
     }
 
     // MARK: - Menu bar
@@ -266,7 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         prefs.engine = e
         speech = SpeechBackendFactory.make(engine: e, language: prefs.language)
         sonioxBackendDirty = false
-        if e == .doubao { DoubaoCredentialStore.shared.warmup() }
+        if e == .doubao || e == .fusion { DoubaoCredentialStore.shared.warmup() }
         rebuildMenu()
     }
 
@@ -311,7 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         if settingsWindow == nil {
-            settingsWindow = SettingsWindowFactory.create(llmRefiner: llm)
+            settingsWindow = SettingsWindowFactory.create()
         }
         settingsWindow?.center()
         settingsWindow?.makeKeyAndOrderFront(nil)
@@ -524,6 +526,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // 双枪融合模式:FusionBackend 已经在 stop() 里跑完多家转录 +
+                // LLM 校对合并,result.text 就是最终文本。直接粘贴 —— 跳过单条
+                // refine(否则对融合结果再 LLM 一次)和智能重录(融合本身就是
+                // 从 WAV 重转)。
+                if self.prefs.engine == .fusion {
+                    guard !text.isEmpty else { self.status = .idle; return }
+                    self.injectAndFinish(text)
+                    return
+                }
+
                 let detectorLanguage = LanguageMenu.detectorLanguage(for: self.prefs.engine, selectedLanguage: self.prefs.language)
                 let decision = self.incompleteDetector.decision(for: result, language: detectorLanguage)
                 let traceId = result.traceId ?? "none"
@@ -577,21 +590,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refineAndInject(_ text: String) {
-        if self.prefs.llmEnabled && self.llm.isConfigured {
-            self.llm.refine(text) { result in
+        let refiner = TextRefiner(baseURL: prefs.llmBaseURL,
+                                  apiKey: prefs.llmAPIKey,
+                                  model: prefs.llmModel)
+
+        // Off: LLM disabled or unconfigured — paste raw, done.
+        guard prefs.llmEnabled, refiner.isConfigured else {
+            injectAndFinish(text)
+            return
+        }
+
+        switch prefs.refineMode {
+        case .immediate:
+            // Wait for the polished text, then paste it (fall back to raw on failure).
+            Task {
+                let refined = await refiner.refine(text)
                 DispatchQueue.main.async {
-                    let final: String
-                    switch result {
-                    case .success(let refined): final = refined
-                    case .failure(let err):
-                        doushaLog("[Dousha] LLM refine failed: \(err.localizedDescription)")
-                        final = text
-                    }
-                    self.injectAndFinish(final)
+                    self.injectAndFinish(refined ?? text)
                 }
             }
-        } else {
-            self.injectAndFinish(text)
+
+        case .deferred:
+            // Paste raw immediately; quietly replace the clipboard with the
+            // polished text when it arrives. injectAndFinish already left raw on
+            // the clipboard, so the user can re-paste to pick up the refined copy.
+            injectAndFinish(text)
+            refiner.refineLater(text) { refined in
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(refined, forType: .string)
+                doushaLog("[Dousha] deferred refine wrote refined text to clipboard (len=\(refined.count))")
+            }
         }
     }
 
