@@ -19,6 +19,18 @@ enum Language: String, CaseIterable {
     }
 }
 
+enum RefineMode: String, CaseIterable {
+    case immediate
+    case deferred
+
+    var displayName: String {
+        switch self {
+        case .immediate: return "立即（等校正后再粘贴）"
+        case .deferred:  return "延迟（先粘原文，校正后写入剪贴板）"
+        }
+    }
+}
+
 final class Preferences {
     static let shared = Preferences(defaults: .standard)
     private let defaults: UserDefaults
@@ -40,6 +52,7 @@ final class Preferences {
         // default value, which would re-enable Esc whenever a user explicitly
         // turned cancel off and the app restarted.
         static let cancelHotkeyKeyCode       = "cancelHotkey.keyCode"
+        static let refineMode                = "refineMode"
     }
 
     /// Stored value used to represent a disabled cancel hotkey. Picked because
@@ -60,7 +73,8 @@ final class Preferences {
             Keys.smartRetranscribeEnabled: false,
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
             Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
-            Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode)
+            Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode),
+            Keys.refineMode:               RefineMode.immediate.rawValue,
         ])
     }
 
@@ -77,6 +91,11 @@ final class Preferences {
     var llmEnabled: Bool {
         get { defaults.bool(forKey: Keys.llmEnabled) }
         set { defaults.set(newValue, forKey: Keys.llmEnabled) }
+    }
+
+    var refineMode: RefineMode {
+        get { RefineMode(rawValue: defaults.string(forKey: Keys.refineMode) ?? "") ?? .immediate }
+        set { defaults.set(newValue.rawValue, forKey: Keys.refineMode) }
     }
 
     var smartRetranscribeEnabled: Bool {

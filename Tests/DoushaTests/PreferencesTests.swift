@@ -85,4 +85,21 @@ final class PreferencesTests: XCTestCase {
 
         XCTAssertEqual(fresh.sonioxMode, .realtime)
     }
+
+    func testRefineModeRoundTrips() {
+        let suiteName = "PreferencesTests.refineMode.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let prefs = Preferences(defaults: defaults)
+
+        // Default is Immediate (preserves today's behaviour when LLM is on).
+        XCTAssertEqual(prefs.refineMode, .immediate)
+
+        prefs.refineMode = .deferred
+        XCTAssertEqual(prefs.refineMode, .deferred)
+
+        // Survives a fresh Preferences over the same defaults.
+        let prefs2 = Preferences(defaults: defaults)
+        XCTAssertEqual(prefs2.refineMode, .deferred)
+    }
 }
