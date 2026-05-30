@@ -64,9 +64,11 @@ final class RecordingController {
     /// is now guaranteed by construction. Handed to CancelKeyMonitor by AppDelegate.
     let recordingFlag = Lock<Bool>(false)
 
-    /// Monotonic staleness counter (was AppDelegate.sessionToken). Bumped ONLY on
-    /// cancel; stop/error capture it but never bump it.
-    private var generation: UInt64 = 0
+    /// The task draining the backend's event stream for the live session.
+    /// Cancelling it (plus `backend.cancel()` finishing the stream) is the
+    /// structural replacement for the old manual `generation` staleness guard:
+    /// once cancelled, no further event can re-enter.
+    private var sessionTask: Task<Void, Never>?
 
     /// Earliest time the next start() may call into the backend after a cancel.
     private var nextStartAllowedAt: Date?
@@ -120,43 +122,33 @@ final class RecordingController {
         backend.setLanguage(env.language())
         env.resetHUDLevels()
         env.resetHUDTranscript()
-        installBackendCallbacks(backend, generation: generation)
-    }
 
-    private func installBackendCallbacks(_ backend: SpeechBackend, generation myGen: UInt64) {
-        backend.start(
-            onPartial: { [weak self] partial in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self = self, self.generation == myGen else { return }
-                        // Drop late partials once we've left .recording so a batch
-                        // dispatched just before stop() can't clobber the final.
-                        guard self.status == .recording else { return }
-                        self.env.updateHUDTranscript(partial)
-                    }
-                }
-            },
-            onAudioLevel: { [weak self] level in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self = self, self.generation == myGen else { return }
-                        self.env.pushHUDLevel(level)
-                    }
-                }
-            },
-            onError: { [weak self] error in
-                doushaLog("[RecordingController] recognition error: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self = self, self.generation == myGen else {
-                            doushaLog("[RecordingController] dropping stale error")
-                            return
-                        }
-                        self.transitionToError(error.localizedDescription)
-                    }
+        let stream = backend.start()
+        sessionTask?.cancel()        // defensive: no overlapping consumer
+        sessionTask = Task { @MainActor [weak self] in
+            for await event in stream {
+                guard let self else { return }
+                switch event {
+                case .partial(let partial):
+                    // Drop late partials once we've left .recording so a batch
+                    // emitted just before stop() can't clobber the final.
+                    guard self.status == .recording else { continue }
+                    self.env.updateHUDTranscript(partial)
+                case .audioLevel(let level):
+                    self.env.pushHUDLevel(level)
+                case .error(let message):
+                    doushaLog("[RecordingController] recognition error: \(message)")
+                    // Intentionally NOT cancelling the consumer loop here: the stop()
+                    // issued inside transitionToError produces a trailing .final
+                    // (dropped by handleFinal's guard) and then finishes the stream,
+                    // so the task exits on its own — parallel to the explicit
+                    // sessionTask?.cancel() on the cancel() path.
+                    self.transitionToError(message)
+                case .final(let result):
+                    self.handleFinal(result)
                 }
             }
-        )
+        }
     }
 
     private func transitionToError(_ message: String) {
@@ -166,7 +158,7 @@ final class RecordingController {
         transition(to: .error(message))
         env.resetHUDTranscript()
         // Release mic / socket so the next start() isn't stacked on a live session.
-        backend?.stop { _ in }
+        backend?.stop()
         env.scheduleAfter(Self.errorAutoReset) { [weak self] in
             guard let self = self, self.isErrorStatus(self.status) else { return }
             self.transition(to: .idle)
@@ -178,8 +170,9 @@ final class RecordingController {
             doushaLog("[RecordingController] cancel REJECTED (status=\(status))")
             return
         }
-        generation &+= 1                 // bump BEFORE cancel so racing completions short-circuit
-        backend?.cancel()
+        backend?.cancel()            // finishes the stream → consumer loop ends
+        sessionTask?.cancel()
+        sessionTask = nil
         nextStartAllowedAt = env.now().addingTimeInterval(Self.cancelTeardownGuard)
         transition(to: .idle)
     }
@@ -190,21 +183,22 @@ final class RecordingController {
             return
         }
         transition(to: .transcribing)
-        let myGen = generation
-        backend?.stop { [weak self] result in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self = self, self.generation == myGen else {
-                        doushaLog("[RecordingController] stop completion superseded — dropping")
-                        return
-                    }
-                    let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !text.isEmpty else { self.transition(to: .idle); return }
-                    self.env.setFinalTranscript(text)
-                    self.refineAndInject(text)
-                }
-            }
+        backend?.stop()
+    }
+
+    /// Handles the terminal `.final` event. Replaces the old `stop(completion:)`
+    /// closure body. The `status == .transcribing` guard replaces the old
+    /// `generation == myGen` check: a `.final` arriving after an error/idle
+    /// (e.g. from the `stop()` we issue inside `transitionToError`) is dropped.
+    private func handleFinal(_ result: TranscriptionResult) {
+        guard status == .transcribing else {
+            doushaLog("[RecordingController] final dropped (status=\(status))")
+            return
         }
+        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { transition(to: .idle); return }
+        env.setFinalTranscript(text)
+        refineAndInject(text)
     }
 
     private func refineAndInject(_ text: String) {
@@ -231,7 +225,6 @@ final class RecordingController {
     // Test-only seam to exercise `transition` directly.
     #if DEBUG
     func testHook_transition(to next: RecordingStatus) { transition(to: next) }
-    func testHook_bumpGenerationLikeCancel() { generation &+= 1 }
     #endif
 
     private func isErrorStatus(_ s: RecordingStatus) -> Bool {

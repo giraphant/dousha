@@ -29,7 +29,7 @@ final class AppleSpeechBackend: BufferCaptureEngine, @unchecked Sendable {
     /// under contention on 32-bit platforms and risks stale reads on 64-bit when
     /// paired with the unsynchronized write in cancel(). Lock<> is the cheapest
     /// correct primitive available in this target.
-    private let sessionGen = Lock<UInt64>(0)
+    private let sessionGen = Lock<SessionGeneration>(SessionGeneration())
 
     init(language: String) {
         setLanguage(language)
@@ -74,10 +74,7 @@ final class AppleSpeechBackend: BufferCaptureEngine, @unchecked Sendable {
         // events after task.cancel(); we treat those as belonging to the
         // outgoing generation and ignore them. Bump + read happen under the
         // lock so the value we capture is the same one the closures will see.
-        let myGen: UInt64 = sessionGen.withLock { gen in
-            gen &+= 1
-            return gen
-        }
+        let myGen = sessionGen.withLock { $0.bump() }
 
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self = self else { return }
@@ -85,7 +82,7 @@ final class AppleSpeechBackend: BufferCaptureEngine, @unchecked Sendable {
             // error or final result arriving after cancel() would re-enter
             // AppDelegate's error path and flash the HUD red even though the
             // user explicitly discarded this recording.
-            guard self.sessionGen.value() == myGen else { return }
+            guard self.sessionGen.withLock({ $0.isCurrent(myGen) }) else { return }
             if let result = result {
                 let text = result.bestTranscription.formattedString
                 self.lastText = text
@@ -137,14 +134,14 @@ final class AppleSpeechBackend: BufferCaptureEngine, @unchecked Sendable {
         // grace window below, sessionGen will have advanced and we must NOT
         // fire the completion — otherwise the inject path would paste
         // whatever lastText held at the moment the user hit cancel.
-        let myGen = sessionGen.value()
+        let myGen = sessionGen.withLock { $0.live }
 
         request?.endAudio()
 
         // Give the recognizer a brief window to emit the final result.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self = self else { return }
-            guard self.sessionGen.value() == myGen else {
+            guard self.sessionGen.withLock({ $0.isCurrent(myGen) }) else {
                 // Cancel ran while we were waiting — drop the completion.
                 return
             }
@@ -167,7 +164,7 @@ final class AppleSpeechBackend: BufferCaptureEngine, @unchecked Sendable {
 
         // Bump generation BEFORE the teardown so any callback that fires
         // synchronously off task.cancel() / endAudio is already orphaned.
-        sessionGen.withLock { $0 &+= 1 }
+        sessionGen.withLock { _ = $0.bump() }
 
         request?.endAudio()
         task?.cancel()

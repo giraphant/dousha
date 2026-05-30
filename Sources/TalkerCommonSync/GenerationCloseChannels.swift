@@ -10,13 +10,13 @@ import Foundation
 /// happen. All access is expected from a single isolation domain (the engine
 /// actor); the type carries no internal locking of its own.
 public struct GenerationCloseChannels {
-    private var channels: [Int: OneShotChannel<Void>] = [:]
+    private var channels: [Generation: OneShotChannel<Void>] = [:]
 
     public init() {}
 
     /// Create and store a fresh close channel for `generation`, returning it so
     /// the caller can await it directly.
-    public mutating func register(_ generation: Int) -> OneShotChannel<Void> {
+    public mutating func register(_ generation: Generation) -> OneShotChannel<Void> {
         let channel = OneShotChannel<Void>()
         channels[generation] = channel
         return channel
@@ -24,12 +24,12 @@ public struct GenerationCloseChannels {
 
     /// Wake only the waiter registered for `generation`. No-op if that
     /// generation has no (or no longer has a) channel.
-    public func signal(_ generation: Int) {
+    public func signal(_ generation: Generation) {
         channels[generation]?.finish(())
     }
 
     /// Drop `generation`'s channel once its waiter has resolved.
-    public mutating func remove(_ generation: Int) {
+    public mutating func remove(_ generation: Generation) {
         channels[generation] = nil
     }
 }

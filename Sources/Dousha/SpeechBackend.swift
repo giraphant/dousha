@@ -18,17 +18,31 @@ enum Engine: String, CaseIterable {
     }
 }
 
-protocol SpeechBackend: AnyObject {
+/// One streamed event from a recording session. `Sendable` so it can cross from
+/// the backend's work task to the controller's `@MainActor` consumer. `.error`
+/// carries the `localizedDescription` (all the controller and logging ever use)
+/// rather than `any Error`, which keeps the enum `Sendable`.
+enum RecordingEvent: Sendable {
+    case partial(PartialTranscript)
+    case audioLevel(Float)
+    case error(String)
+    case final(TranscriptionResult)
+}
+
+protocol SpeechBackend: AnyObject, Sendable {
     func setLanguage(_ identifier: String)
-    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-               onAudioLevel: @escaping @Sendable (Float) -> Void,
-               onError: @escaping @Sendable (Error) -> Void)
-    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void)
+    /// Start one session. The returned stream lives for this session only:
+    /// during recording it yields `.partial` / `.audioLevel` / `.error`; after
+    /// `stop()` it yields exactly one terminal `.final(result)` then finishes;
+    /// `cancel()` finishes the stream with no `.final`.
+    func start() -> AsyncStream<RecordingEvent>
+    /// Request finalization. Fire-and-forget — the final arrives as a `.final`
+    /// stream event. Safe to call only once per session.
+    func stop()
 
     /// Aborts an in-flight session and discards everything captured so far.
-    /// MUST NOT call any of the start() callbacks, MUST NOT call any pending
-    /// stop() completion, and MUST leave no stale saved-audio file behind that
-    /// could fool a later read of the shared WAV. Safe to call when not running (no-op).
+    /// Finishes the stream with no `.final`, MUST leave no stale saved-audio
+    /// file behind. Safe to call when not running (no-op).
     func cancel()
 }
 
