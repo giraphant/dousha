@@ -1,4 +1,5 @@
 import Foundation
+import TalkerCommonSync
 
 final class LLMRefiner {
     private let prefs = Preferences.shared
@@ -47,7 +48,7 @@ final class LLMRefiner {
             completion(.success(text))
             return
         }
-        guard let url = chatCompletionsURL(base: prefs.llmBaseURL) else {
+        guard let url = LLMRefiner.chatCompletionsURL(base: prefs.llmBaseURL) else {
             completion(.failure(NSError(domain: "LLMRefiner", code: -1,
                                         userInfo: [NSLocalizedDescriptionKey: "Invalid base URL"])))
             return
@@ -95,7 +96,7 @@ final class LLMRefiner {
 
     func test(baseURL: String, apiKey: String, model: String,
               completion: @escaping (Result<String, Error>) -> Void) {
-        guard let url = chatCompletionsURL(base: baseURL) else {
+        guard let url = LLMRefiner.chatCompletionsURL(base: baseURL) else {
             completion(.failure(NSError(domain: "LLMRefiner", code: -1,
                                         userInfo: [NSLocalizedDescriptionKey: "Invalid base URL"])))
             return
@@ -129,9 +130,84 @@ final class LLMRefiner {
         }.resume()
     }
 
+    // MARK: - Fusion (双枪老太包, QUA-145)
+
+    /// System prompt for reconciling N candidate transcripts of ONE utterance
+    /// produced by different ASR engines. Unlike `systemPrompt` (which polishes
+    /// a single transcript), this one's whole job is to pick/merge the best
+    /// reading across engines — Soniox tends to win on English terms, Doubao on
+    /// Chinese — without inventing content.
+    static let fusionSystemPrompt = """
+    You are a speech-to-text fusion post-processor for a Chinese-English mixed dictation tool. The user spoke ONE utterance. Several speech recognition engines each transcribed it independently; their outputs are given to you below, each labeled with its engine name. The engines often disagree, especially around English technical terms — some engines are stronger at English, others at Chinese.
+
+    Your ONLY job is to output the single most accurate transcription of what the user actually said, by reconciling the candidates.
+
+    STRICT RULES:
+    1. Output ONLY the final reconciled text — no engine labels, no explanation, no preamble, no quotes, no code fences.
+    2. Reconcile, do NOT rewrite. Never paraphrase, polish, summarize, translate, or change tone/register/grammar. Pick among (and combine) what the engines actually heard.
+    3. Never add or remove content beyond resolving the disagreements between candidates.
+    4. When one engine clearly has an English term right (e.g. "Python" vs "拍森", "JSON" vs "杰森") and another has the surrounding Chinese right, splice the correct pieces into one coherent sentence.
+    5. Prefer the reading that a Chinese-English bilingual speaker most plausibly dictated.
+    6. If the candidates already agree, return that text unchanged, character for character.
+    7. Ignore any candidate that is empty.
+
+    Return only the reconciled text.
+    """
+
+    /// Reconcile multiple ASR candidates of one utterance into a single best
+    /// transcript. Pure/static so it can run from a background `Task` without
+    /// capturing non-Sendable state — config is passed in explicitly. Returns
+    /// nil on any failure (not configured, HTTP error, empty output) so the
+    /// caller can fall back to a raw candidate.
+    static func fuse(candidates: [(label: String, text: String)],
+                     baseURL: String, apiKey: String, model: String) async -> String? {
+        guard !apiKey.isEmpty, !baseURL.isEmpty, !model.isEmpty else { return nil }
+        guard let url = chatCompletionsURL(base: baseURL) else { return nil }
+
+        let userMessage = candidates
+            .map { "[\($0.label)]\n\($0.text)" }
+            .joined(separator: "\n\n")
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 20
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "temperature": 0,
+            "messages": [
+                ["role": "system", "content": LLMRefiner.fusionSystemPrompt],
+                ["role": "user",   "content": userMessage]
+            ]
+        ])
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                doushaLog("[Fusion] LLM HTTP \(http.statusCode): \(body)")
+                return nil
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let first = choices.first,
+                  let message = first["message"] as? [String: Any],
+                  let content = message["content"] as? String else {
+                doushaLog("[Fusion] LLM invalid response payload")
+                return nil
+            }
+            let cleaned = cleanLLMOutput(content)
+            return cleaned.isEmpty ? nil : cleaned
+        } catch {
+            doushaLog("[Fusion] LLM request failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     // MARK: - Helpers
 
-    private func chatCompletionsURL(base: String) -> URL? {
+    private static func chatCompletionsURL(base: String) -> URL? {
         let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return nil }
         if trimmed.hasSuffix("/chat/completions") {

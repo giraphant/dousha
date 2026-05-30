@@ -7,12 +7,16 @@ enum Engine: String, CaseIterable {
     case apple
     case doubao
     case soniox
+    /// 双枪老太包 (QUA-145): 豆包实时录音 + WAV，停录后 Soniox 和豆包各对同一段
+    /// WAV 重转，两条候选交给 LLM 校对合并。实验性。
+    case fusion
 
     var displayName: String {
         switch self {
         case .apple:  return "Apple Speech"
         case .doubao: return "豆包"
         case .soniox: return "Soniox"
+        case .fusion: return "双枪 (Soniox+豆包·实验)"
         }
     }
 }
@@ -66,6 +70,8 @@ enum SpeechBackendFactory {
         case .soniox:
             return SonioxBackend(apiKey: Preferences.shared.sonioxAPIKey,
                                  mode: Preferences.shared.sonioxMode)
+        case .fusion:
+            return FusionBackend(language: language)
         }
     }
 }
