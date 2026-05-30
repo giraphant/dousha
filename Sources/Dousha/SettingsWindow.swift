@@ -73,9 +73,6 @@ struct SettingsView: View {
     @State private var showDockIcon: Bool
     @State private var showMenuBarIcon: Bool
 
-    // 智能增强 — 自动重录
-    @State private var smartRetranscribeEnabled: Bool = Preferences.shared.smartRetranscribeEnabled
-
     // 智能增强 — 润色
     @State private var llmEnabled: Bool = Preferences.shared.llmEnabled
     @State private var baseURL: String = Preferences.shared.llmBaseURL
@@ -409,16 +406,6 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("自动重录") {
-                Toggle("检测到可能漏转写时，自动用上一段录音重新转写", isOn: $smartRetranscribeEnabled)
-                    .onChange(of: smartRetranscribeEnabled) { _, newValue in
-                        Preferences.shared.smartRetranscribeEnabled = newValue
-                    }
-                Text("Beta 测试中，默认关闭。关闭后豆沙直接使用首次转写结果；菜单里的「重新转写」仍可手动使用。")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .formStyle(.grouped)
     }

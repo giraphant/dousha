@@ -44,7 +44,6 @@ final class Preferences {
         static let llmModel                  = "llmModel"
         static let sonioxAPIKey              = "sonioxAPIKey"
         static let sonioxMode                = "sonioxMode"
-        static let smartRetranscribeEnabled  = "smartRetranscribeEnabled"
         // Engine-agnostic glossary (QUA-133). Key strings keep the historical
         // "doubao" prefix so terms entered before the Soniox extension survive;
         // the feature applies to both Doubao and Soniox.
@@ -78,7 +77,6 @@ final class Preferences {
             Keys.llmAPIKey:                "",
             Keys.sonioxAPIKey:             "",
             Keys.sonioxMode:               SonioxMode.realtime.rawValue,
-            Keys.smartRetranscribeEnabled: false,
             Keys.glossaryEnabled:          false,
             Keys.glossaryTerms:            [String](),
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
@@ -127,11 +125,6 @@ final class Preferences {
     var refineMode: RefineMode {
         get { RefineMode(rawValue: defaults.string(forKey: Keys.refineMode) ?? "") ?? .immediate }
         set { defaults.set(newValue.rawValue, forKey: Keys.refineMode) }
-    }
-
-    var smartRetranscribeEnabled: Bool {
-        get { defaults.bool(forKey: Keys.smartRetranscribeEnabled) }
-        set { defaults.set(newValue, forKey: Keys.smartRetranscribeEnabled) }
     }
 
     var llmBaseURL: String {

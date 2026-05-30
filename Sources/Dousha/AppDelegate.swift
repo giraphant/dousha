@@ -46,7 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var nextStartAllowedAt: Date?
     private static let cancelTeardownGuard: TimeInterval = 0.25
     private let focusTracker = AppFocusTracker(selfBundleId: "com.dousha.app")
-    private let incompleteDetector = IncompleteTranscriptDetector()
     /// Set when a Soniox API-key change arrives while a session is live, so the
     /// stale-key rebuild can't run immediately. Consumed at the next start so
     /// the next recording always uses a backend built from the current key.
@@ -125,8 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        // fusion 模式录音也走豆包,提前预热凭据。
-        if prefs.engine == .doubao || prefs.engine == .fusion {
+        if prefs.engine == .doubao {
             DoubaoCredentialStore.shared.warmup()
         }
     }
@@ -235,22 +233,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         llmItem.target = self
         menu.addItem(llmItem)
 
-        // 重新转写 — 漏检时的手动补救入口
-        let retranscribeItem = NSMenuItem(
-            title: "重新转写",
-            action: #selector(retranscribeLastRecording),
-            keyEquivalent: ""
-        )
-        retranscribeItem.image = menuIcon("arrow.clockwise")
-        retranscribeItem.target = self
-        // Disable when the backend has no replayable recording (no saved WAV,
-        // or the engine doesn't support retranscribe — e.g. Apple), or when a
-        // session is live.
-        let canRetry = speech.canRetranscribe
-            && (status == .idle || isErrorStatus(status))
-        retranscribeItem.isEnabled = canRetry
-        menu.addItem(retranscribeItem)
-
         menu.addItem(.separator())
 
         // 设置 — 热键 + LLM 配置。⌘, 是 macOS 惯例。
@@ -294,7 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         prefs.engine = e
         speech = SpeechBackendFactory.make(engine: e, language: prefs.language)
         sonioxBackendDirty = false
-        if e == .doubao || e == .fusion { DoubaoCredentialStore.shared.warmup() }
+        if e == .doubao { DoubaoCredentialStore.shared.warmup() }
         rebuildMenu()
     }
 
@@ -315,31 +297,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleLLM() {
         prefs.llmEnabled.toggle()
         rebuildMenu()
-    }
-
-    @objc private func retranscribeLastRecording() {
-        guard status == .idle || isErrorStatus(status) else {
-            doushaLog("[Dousha] retranscribe menu rejected — busy (status=\(status))")
-            return
-        }
-        doushaLog("[Dousha] retranscribe menu fired")
-        status = .transcribing
-        // Clear any leftover transcript from the previous session — the HUD is
-        // visible during .transcribing, so without this it would show the last
-        // recording's final text while this manual retry runs.
-        hudModel.resetTranscript()
-        speech.retranscribeLastRecording { [weak self] text in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-                    doushaLog("[Dousha] retranscribe returned empty — back to idle")
-                    self.status = .idle
-                    return
-                }
-                self.hudModel.setFinalTranscript(text)
-                self.refineAndInject(text)
-            }
-        }
     }
 
     @objc private func handleLLMEnabledChanged() {
@@ -593,61 +550,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                // 双枪融合模式:FusionBackend 已经在 stop() 里跑完多家转录 +
-                // LLM 校对合并,result.text 就是最终文本。直接粘贴 —— 跳过单条
-                // refine(否则对融合结果再 LLM 一次)和智能重录(融合本身就是
-                // 从 WAV 重转)。
-                if self.prefs.engine == .fusion {
-                    guard !text.isEmpty else { self.status = .idle; return }
-                    self.injectAndFinish(text)
-                    return
-                }
-
-                let detectorLanguage = LanguageMenu.detectorLanguage(for: self.prefs.engine, selectedLanguage: self.prefs.language)
-                let decision = self.incompleteDetector.decision(for: result, language: detectorLanguage)
-                let traceId = result.traceId ?? "none"
-                doushaLog("[Dousha] traceId=\(traceId) detector incomplete=\(decision.isIncomplete) stale=\(decision.staleLastTranscript) segmentGap=\(decision.largeSegmentGap) charFloor=\(decision.belowCharFloor) cps=\(String(format: "%.2f", decision.charsPerSecond)) text.len=\(text.count) dur=\(String(format: "%.1f", result.audioDuration))s lastTranscriptAge=\(result.lastTranscriptAge.map { String(format: "%.1f", $0) } ?? "nil") lastRespAge=\(result.lastResponseAge.map { String(format: "%.1f", $0) } ?? "nil") maxSegmentGap=\(result.maxSegmentGap.map { String(format: "%.1f", $0) } ?? "nil")")
-
-                // Heuristic: did the stream probably get truncated? If so, hold off
-                // injection and re-transcribe from the saved WAV.
-                if decision.isIncomplete && self.prefs.smartRetranscribeEnabled {
-                    doushaLog("[Dousha] traceId=\(traceId) heuristic flagged incomplete originalText.len=\(text.count) — triggering retranscribe")
-                    // Keep HUD in transcribing state — don't drop to idle while retrying.
-                    self.speech.retranscribeLastRecording(parentTraceId: traceId) { retried in
-                        DispatchQueue.main.async {
-                            let retriedText = (retried?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-                            let finalText: String
-                            // Only adopt the retry if it actually recovered more
-                            // text. The retranscribe path itself can be truncated
-                            // (server drops, our own finish-wait expiring early)
-                            // and in those cases we'd be replacing a good original
-                            // transcript with a shorter, worse one.
-                            if let r = retriedText, r.count > text.count {
-                                doushaLog("[Dousha] traceId=\(traceId) retranscribe adopted original.len=\(text.count) retried.len=\(r.count)")
-                                finalText = r
-                            } else if let r = retriedText {
-                                doushaLog("[Dousha] traceId=\(traceId) retranscribe shorter original.len=\(text.count) retried.len=\(r.count) — keeping original")
-                                finalText = text
-                            } else {
-                                doushaLog("[Dousha] traceId=\(traceId) retranscribe empty — falling back to original len=\(text.count)")
-                                finalText = text
-                            }
-                            guard !finalText.isEmpty else {
-                                self.status = .idle
-                                return
-                            }
-                            self.hudModel.setFinalTranscript(finalText)
-                            self.refineAndInject(finalText)
-                        }
-                    }
-                    return
-                }
-
-                if decision.isIncomplete {
-                    doushaLog("[Dousha] traceId=\(traceId) heuristic flagged incomplete but 智能重录 disabled — using original len=\(text.count)")
-                }
-
                 guard !text.isEmpty else {
                     self.status = .idle
                     return
