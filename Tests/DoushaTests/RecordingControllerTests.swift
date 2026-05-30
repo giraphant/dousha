@@ -308,3 +308,48 @@ final class RecordingControllerStopTests: XCTestCase {
         wait(for: [exp], timeout: 1)
     }
 }
+
+@MainActor
+final class RecordingControllerCancelTests: XCTestCase {
+
+    func testCancel_fromRecording_cancelsBackend_andReturnsToIdle() {
+        let backend = MockSpeechBackend()
+        let (c, _, _) = makeSUT(backend: backend)
+        c.start()
+        c.cancel()
+        XCTAssertTrue(backend.cancelCalled)
+        XCTAssertEqual(c.status, .idle)
+    }
+
+    func testCancel_notRecording_isNoOp() {
+        let backend = MockSpeechBackend()
+        let (c, _, _) = makeSUT(backend: backend)
+        c.cancel()                      // from idle
+        XCTAssertFalse(backend.cancelCalled)
+        XCTAssertEqual(c.status, .idle)
+    }
+
+    func testCancel_duringTranscribing_isRejected() {
+        let backend = MockSpeechBackend()
+        let (c, _, _) = makeSUT(backend: backend)
+        c.start(); c.stop()             // now .transcribing
+        c.cancel()                      // cancel only valid in .recording
+        XCTAssertFalse(backend.cancelCalled)
+        XCTAssertEqual(c.status, .transcribing)
+    }
+
+    func testCancel_bumpsGeneration_soLateBackendErrorIsDropped() {
+        // cancel() bumps generation; an error from the now-superseded session
+        // (captured the old generation) must be dropped, not flashed to the HUD.
+        let backend = MockSpeechBackend()
+        let (c, _, _) = makeSUT(backend: backend)
+        c.start()
+        c.cancel()                      // status .idle, generation advanced
+        backend.onError?(NSError(domain: "t", code: 1,
+                                 userInfo: [NSLocalizedDescriptionKey: "late boom"]))
+        let exp = expectation(description: "main hop")
+        DispatchQueue.main.async { exp.fulfill() }
+        wait(for: [exp], timeout: 1)
+        XCTAssertEqual(c.status, .idle, "stale error after cancel must be dropped, not enter .error")
+    }
+}
