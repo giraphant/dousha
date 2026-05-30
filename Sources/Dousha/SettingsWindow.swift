@@ -29,23 +29,26 @@ enum SettingsWindowFactory {
 private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case general
     case model
+    case glossary
     case enhance
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .general: return "常规设置"
-        case .model:   return "听写模型"
-        case .enhance: return "智能增强"
+        case .general:  return "常规设置"
+        case .model:    return "听写模型"
+        case .glossary: return "个性词库"
+        case .enhance:  return "智能增强"
         }
     }
 
     var symbol: String {
         switch self {
-        case .general: return "gearshape"
-        case .model:   return "waveform"
-        case .enhance: return "sparkles"
+        case .general:  return "gearshape"
+        case .model:    return "waveform"
+        case .glossary: return "character.book.closed"
+        case .enhance:  return "sparkles"
         }
     }
 }
@@ -95,14 +98,16 @@ struct SettingsView: View {
     @State private var englishEngine: Engine = Preferences.shared.englishEngine
     @State private var mixedEngine: Engine = Preferences.shared.mixedEngine
     // Primary language steers which slot is the primary engine (HUD source).
-    // Settable here because auto-detect engines (豆包/Soniox) only offer 自动 in
-    // the menu bar's language list.
-    @State private var primaryLanguage: Language = Language(rawValue: Preferences.shared.language) ?? .zh_CN
+    // 混合 ≡ 自动, so the only meaningful primaries are 中文 / 英文 — normalise any
+    // stored locale (an Apple single-engine run may have left zh-TW/ja/ko) to one
+    // of the two: en-* → 英文, anything else → 中文.
+    @State private var primaryLanguage: Language =
+        Preferences.shared.language.hasPrefix("en") ? .en_US : .zh_CN
 
-    // 听写模型 — 词库
+    // 个性词库 — free-text editor; terms are parsed out of `glossaryText` on
+    // change. Seeded from the stored terms joined by 顿号.
     @State private var glossaryEnabled: Bool = Preferences.shared.glossaryEnabled
-    @State private var glossaryTerms: [String] = Preferences.shared.glossaryTerms
-    @State private var newTerm: String = ""
+    @State private var glossaryText: String = GlossaryText.format(Preferences.shared.glossaryTerms)
 
     init(actions: SettingsActions) {
         self.actions = actions
@@ -128,9 +133,10 @@ struct SettingsView: View {
     @ViewBuilder
     private var detail: some View {
         switch selectedPane ?? .general {
-        case .general: generalPane
-        case .model:   modelPane
-        case .enhance: enhancePane
+        case .general:  generalPane
+        case .model:    modelPane
+        case .glossary: glossaryPane
+        case .enhance:  enhancePane
         }
     }
 
@@ -241,10 +247,10 @@ struct SettingsView: View {
         Form {
             Section("引擎路由") {
                 Picker("主要语言", selection: $primaryLanguage) {
-                    ForEach(Language.allCases, id: \.self) { lang in
-                        Text(lang.displayName).tag(lang)
-                    }
+                    Text("中文").tag(Language.zh_CN)
+                    Text("英文").tag(Language.en_US)
                 }
+                .pickerStyle(.segmented)
                 .onChange(of: primaryLanguage) { _, newValue in
                     Preferences.shared.language = newValue.rawValue
                     NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
@@ -267,28 +273,24 @@ struct SettingsView: View {
                     Text("高精度（异步）").tag(SonioxMode.async)
                 }
                 .pickerStyle(.segmented)
+                .onChange(of: sonioxMode) { _, newValue in
+                    Preferences.shared.sonioxMode = newValue
+                }
                 LabeledContent("API 密钥") {
                     HStack(spacing: 6) {
-                        SecureField("soniox API key", text: $sonioxAPIKey)
-                            .textFieldStyle(.roundedBorder)
+                        SecureField("", text: $sonioxAPIKey)
                             .disableAutocorrection(true)
                         Button("清除") { sonioxAPIKey = "" }
                             .help("删除已保存的 Soniox API 密钥")
                     }
                 }
-                if !sonioxStatus.isEmpty {
-                    Text(sonioxStatus)
-                        .font(.callout)
-                        .foregroundStyle(sonioxStatusIsError ? .red : .green)
-                        .lineLimit(4)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
                 HStack {
-                    Button(isTestingSoniox ? "测试中…" : "测试") { testSoniox() }
-                        .disabled(isTestingSoniox || sonioxAPIKey.isEmpty)
                     Spacer()
-                    Button("保存") { save() }
-                        .keyboardShortcut(.defaultAction)
+                    testStatusLabel(isTesting: isTestingSoniox,
+                                    status: sonioxStatus,
+                                    isError: sonioxStatusIsError)
+                    Button("保存并测试") { saveAndTestSoniox() }
+                        .disabled(isTestingSoniox || sonioxAPIKey.isEmpty)
                 }
                 Text("Soniox 实时语音转写引擎。自动检测语言，无需选择。在菜单「引擎」中切换到 Soniox 后生效。")
                     .font(.callout)
@@ -310,87 +312,59 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
-            Divider().padding(.vertical, 4)
-
-            Text("词库")
-                .font(.title3).bold()
-            Text("把常用术语、专有名词加进词库，识别时会优先往这些词上靠，提高准确率。对豆包和 Soniox 引擎都生效，下一次录音起作用。Soniox 用词表（terms）偏置，效果通常更明显。")
-                .font(.callout)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("启用词库", isOn: $glossaryEnabled)
-                    .onChange(of: glossaryEnabled) { _, newValue in
-                        Preferences.shared.glossaryEnabled = newValue
-                    }
-
-                // Only the term editor is gated by the toggle — the toggle itself
-                // must stay enabled so the user can turn the feature on.
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 6) {
-                        TextField("添加术语…", text: $newTerm)
-                            .textFieldStyle(.roundedBorder)
-                            .disableAutocorrection(true)
-                            .onSubmit { addTerm() }
-                        Button("添加") { addTerm() }
-                            .disabled(newTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-
-                    if glossaryTerms.isEmpty {
-                        Text("词库为空。")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        // Explicit per-row delete button. macOS List `.onDelete`
-                        // gives no usable affordance (no swipe-to-delete), so a
-                        // trailing remove button is the reliable way to delete.
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(Array(glossaryTerms.enumerated()), id: \.offset) { index, term in
-                                    HStack {
-                                        Text(term)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                        Button {
-                                            removeTerm(at: index)
-                                        } label: {
-                                            Image(systemName: "trash")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .help("删除「\(term)」")
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    if index < glossaryTerms.count - 1 {
-                                        Divider()
-                                    }
-                                }
-                            }
-                        }
-                        .frame(height: 140)
-                        .frame(maxWidth: .infinity)
-                        .border(Color.gray.opacity(0.2))
-                    }
-                }
-                .disabled(!glossaryEnabled)
-            }
         }
         .formStyle(.grouped)
     }
 
-    private func addTerm() {
-        let term = newTerm.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty, !glossaryTerms.contains(term) else { return }
-        glossaryTerms.append(term)
-        newTerm = ""
-        Preferences.shared.glossaryTerms = glossaryTerms
-    }
+    // MARK: - 个性词库
 
-    private func removeTerm(at index: Int) {
-        guard glossaryTerms.indices.contains(index) else { return }
-        glossaryTerms.remove(at: index)
-        Preferences.shared.glossaryTerms = glossaryTerms
+    private var glossaryPane: some View {
+        Form {
+            Section("个性词库") {
+                Toggle("启用个性词库", isOn: $glossaryEnabled)
+                    .onChange(of: glossaryEnabled) { _, newValue in
+                        Preferences.shared.glossaryEnabled = newValue
+                    }
+
+                // Free-text editor: paste / edit a batch, separated by 顿号 / 逗号 /
+                // 换行. Parsed into terms on change; we deliberately don't rewrite
+                // the text while editing, so the cursor never jumps. The editor is
+                // gated by the toggle; the toggle itself stays enabled.
+                VStack(alignment: .leading, spacing: 6) {
+                    ZStack(alignment: .topLeading) {
+                        TextEditor(text: $glossaryText)
+                            .font(.body)
+                            .frame(height: 200)
+                            .scrollContentBackground(.hidden)
+                            .padding(4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color(nsColor: .separatorColor))
+                            )
+                            .onChange(of: glossaryText) { _, newValue in
+                                Preferences.shared.glossaryTerms = GlossaryText.parse(newValue)
+                            }
+                        if glossaryText.isEmpty {
+                            Text("输入关键词、专业术语…\n示例：布迪厄、哈贝马斯、福柯")
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 12)
+                                .padding(.leading, 9)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    Text("共 \(GlossaryText.parse(glossaryText).count) 个术语")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .disabled(!glossaryEnabled)
+
+                Text("把常用术语、专有名词加进词库，用顿号、逗号或换行分隔；识别时会优先往这些词上靠，提高准确率。对豆包和 Soniox 引擎都生效，下一次录音起作用。Soniox 用词表（terms）偏置，效果通常更明显。")
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
     }
 
     // MARK: - 智能增强
@@ -403,50 +377,35 @@ struct SettingsView: View {
                         Preferences.shared.llmEnabled = newValue
                         NotificationCenter.default.post(name: .doushaLLMEnabledChanged, object: nil)
                     }
-                LabeledContent("API 地址") {
-                    TextField("https://api.openai.com/v1", text: $baseURL)
-                        .textFieldStyle(.roundedBorder)
-                        .disableAutocorrection(true)
-                }
+                TextField("API 地址", text: $baseURL,
+                          prompt: Text("https://api.openai.com/v1"))
+                    .disableAutocorrection(true)
                 LabeledContent("API 密钥") {
                     HStack(spacing: 6) {
-                        SecureField("sk-…", text: $apiKey)
-                            .textFieldStyle(.roundedBorder)
+                        SecureField("", text: $apiKey, prompt: Text("sk-…"))
                             .disableAutocorrection(true)
                         Button("清除") { apiKey = "" }
                             .help("删除已保存的 API 密钥")
                     }
                 }
-                LabeledContent("模型") {
-                    TextField("gpt-4o-mini", text: $model)
-                        .textFieldStyle(.roundedBorder)
-                        .disableAutocorrection(true)
-                }
-                LabeledContent("校正模式") {
-                    Picker("", selection: $refineMode) {
-                        ForEach(RefineMode.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .onChange(of: refineMode) { _, newValue in
-                        Preferences.shared.refineMode = newValue
+                TextField("模型", text: $model, prompt: Text("gpt-4o-mini"))
+                    .disableAutocorrection(true)
+                Picker("校正模式", selection: $refineMode) {
+                    ForEach(RefineMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
                     }
                 }
-                if !status.isEmpty {
-                    Text(status)
-                        .font(.callout)
-                        .foregroundStyle(statusIsError ? .red : .green)
-                        .lineLimit(4)
-                        .fixedSize(horizontal: false, vertical: true)
+                .pickerStyle(.menu)
+                .onChange(of: refineMode) { _, newValue in
+                    Preferences.shared.refineMode = newValue
                 }
                 HStack {
-                    Button(isTesting ? "测试中…" : "测试") { test() }
-                        .disabled(isTesting || apiKey.isEmpty || baseURL.isEmpty || model.isEmpty)
                     Spacer()
-                    Button("保存") { save() }
-                        .keyboardShortcut(.defaultAction)
+                    testStatusLabel(isTesting: isTesting,
+                                    status: status,
+                                    isError: statusIsError)
+                    Button("保存并测试") { saveAndTestLLM() }
+                        .disabled(isTesting || apiKey.isEmpty || baseURL.isEmpty || model.isEmpty)
                 }
                 Text("使用任意兼容 OpenAI 的对话补全接口来清理听写结果。模型只会修正明显的识别错误，不会改写内容。")
                     .font(.callout)
@@ -480,9 +439,39 @@ struct SettingsView: View {
 
     // MARK: - 润色 / Soniox 操作
 
+    /// Persistent, single-line test result shown beside the 「保存并测试」 button:
+    /// a spinner while testing, then a coloured icon + short text.
+    @ViewBuilder
+    private func testStatusLabel(isTesting: Bool, status: String, isError: Bool) -> some View {
+        if isTesting {
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.small)
+                Text("测试中…").foregroundStyle(.secondary)
+            }
+            .font(.callout)
+        } else if !status.isEmpty {
+            HStack(spacing: 4) {
+                Image(systemName: isError ? "xmark.circle.fill" : "checkmark.circle.fill")
+                Text(status).lineLimit(1)
+            }
+            .font(.callout)
+            .foregroundStyle(isError ? .red : .green)
+            .help(status)
+        }
+    }
+
+    /// Save the LLM credentials, then test connectivity. Settings persist
+    /// regardless of the test outcome; the test result is informational.
+    private func saveAndTestLLM() {
+        Preferences.shared.llmBaseURL = baseURL
+        Preferences.shared.llmAPIKey  = apiKey
+        Preferences.shared.llmModel   = model
+        test()
+    }
+
     private func test() {
         isTesting = true
-        status = "正在测试连接…"
+        status = ""
         statusIsError = false
         let refiner = TextRefiner(baseURL: baseURL, apiKey: apiKey, model: model)
         Task {
@@ -491,34 +480,26 @@ struct SettingsView: View {
                 isTesting = false
                 switch result {
                 case .success:
-                    status = "连接正常。"
+                    status = "连接正常"
                     statusIsError = false
                 case .failure(let err):
-                    status = "失败：\(err.localizedDescription)"
+                    status = "连接失败：\(err.localizedDescription)"
                     statusIsError = true
                 }
             }
         }
     }
 
-    private func save() {
-        Preferences.shared.llmBaseURL = baseURL
-        Preferences.shared.llmAPIKey  = apiKey
-        Preferences.shared.llmModel   = model
+    /// Save the Soniox key/mode, then test connectivity.
+    private func saveAndTestSoniox() {
         Preferences.shared.sonioxAPIKey = sonioxAPIKey
-        Preferences.shared.sonioxMode = sonioxMode
-        status = "已保存。"
-        statusIsError = false
-        sonioxStatus = "已保存。"
-        sonioxStatusIsError = false
-        // The active SonioxBackend captured its key at construction; tell the
-        // app to rebuild it so a changed key takes effect without a restart.
-        NotificationCenter.default.post(name: .doushaSonioxConfigChanged, object: nil)
+        Preferences.shared.sonioxMode   = sonioxMode
+        testSoniox()
     }
 
     private func testSoniox() {
         isTestingSoniox = true
-        sonioxStatus = "正在测试连接…"
+        sonioxStatus = ""
         sonioxStatusIsError = false
         let key = sonioxAPIKey
         Task {
@@ -527,10 +508,10 @@ struct SettingsView: View {
                 isTestingSoniox = false
                 switch result {
                 case .success:
-                    sonioxStatus = "连接正常。"
+                    sonioxStatus = "连接正常"
                     sonioxStatusIsError = false
                 case .failure(let message):
-                    sonioxStatus = "失败：\(message)"
+                    sonioxStatus = "连接失败：\(message)"
                     sonioxStatusIsError = true
                 }
             }
@@ -641,7 +622,6 @@ final class HotkeyRecorder {
 
 extension Notification.Name {
     static let doushaHotkeyConfigChanged = Notification.Name("DoushaHotkeyConfigChanged")
-    static let doushaSonioxConfigChanged = Notification.Name("DoushaSonioxConfigChanged")
     static let doushaLLMEnabledChanged = Notification.Name("DoushaLLMEnabledChanged")
     /// Posted when the engine routing slots / primary language change in Settings,
     /// so the menu bar can rebuild to reflect the new active set / primary.
