@@ -7,7 +7,7 @@ import ASRSupport
 /// the shared `AudioTapHub` via `ingest` (a no-op in async mode, which uploads
 /// the hub's shared WAV instead). Soniox auto-detects language so `setLanguage`
 /// is a no-op.
-final class SonioxBackend: SpeechBackend, PCMCaptureEngine, @unchecked Sendable {
+final class SonioxBackend: PCMCaptureEngine, @unchecked Sendable {
     private let asr: SonioxASR
 
     init(apiKey: String, mode: SonioxMode) {
@@ -15,23 +15,6 @@ final class SonioxBackend: SpeechBackend, PCMCaptureEngine, @unchecked Sendable 
     }
 
     func setLanguage(_ identifier: String) {}
-
-    // MARK: - SpeechBackend (hub-less degenerate/test path)
-
-    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-               onAudioLevel: @escaping @Sendable (Float) -> Void,
-               onError: @escaping @Sendable (Error) -> Void) {
-        Task {
-            await beginSession(onPartial: onPartial, onError: onError)
-            openStream()
-        }
-    }
-
-    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
-        finish(completion: completion)
-    }
-
-    func cancel() { cancelSession() }
 
     // MARK: - PushCaptureEngine
 

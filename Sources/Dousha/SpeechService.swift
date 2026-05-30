@@ -10,7 +10,7 @@ import TalkerCommonSync
 /// buffers arrive via `ingest(_:)` and are fed straight to the
 /// `SFSpeechAudioBufferRecognitionRequest` — exactly the buffers it used to get
 /// from its own tap, so behavior is unchanged.
-final class AppleSpeechBackend: SpeechBackend, BufferCaptureEngine, @unchecked Sendable {
+final class AppleSpeechBackend: BufferCaptureEngine, @unchecked Sendable {
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -38,26 +38,6 @@ final class AppleSpeechBackend: SpeechBackend, BufferCaptureEngine, @unchecked S
     func setLanguage(_ identifier: String) {
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier))
     }
-
-    // MARK: - SpeechBackend (used only on the hub-less test/degenerate path)
-
-    func start(
-        onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-        onAudioLevel: @escaping @Sendable (Float) -> Void,
-        onError: @escaping @Sendable (Error) -> Void
-    ) {
-        // Audio level is owned by the AudioTapHub now; onAudioLevel is ignored.
-        Task { @MainActor in
-            await self.beginSession(onPartial: onPartial, onError: onError)
-            self.openStream()
-        }
-    }
-
-    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
-        finish(completion: completion)
-    }
-
-    func cancel() { cancelSession() }
 
     // MARK: - PushCaptureEngine
 
@@ -147,8 +127,7 @@ final class AppleSpeechBackend: SpeechBackend, BufferCaptureEngine, @unchecked S
                 text: lastText,
                 audioDuration: 0,
                 lastResponseAge: nil,
-                lastTranscriptAge: nil,
-                savedAudioURL: nil
+                lastTranscriptAge: nil
             ))
             return
         }
@@ -177,8 +156,7 @@ final class AppleSpeechBackend: SpeechBackend, BufferCaptureEngine, @unchecked S
                 text: final,
                 audioDuration: 0,
                 lastResponseAge: nil,
-                lastTranscriptAge: nil,
-                savedAudioURL: nil
+                lastTranscriptAge: nil
             ))
         }
     }

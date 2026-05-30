@@ -7,8 +7,7 @@ final class TranscriptionResultTraceTests: XCTestCase {
             text: "hello",
             audioDuration: 1.0,
             lastResponseAge: nil,
-            lastTranscriptAge: nil,
-            savedAudioURL: nil
+            lastTranscriptAge: nil
         )
 
         XCTAssertNil(result.traceId)
@@ -20,7 +19,6 @@ final class TranscriptionResultTraceTests: XCTestCase {
             audioDuration: 1.0,
             lastResponseAge: nil,
             lastTranscriptAge: nil,
-            savedAudioURL: nil,
             traceId: "abc-123"
         )
 

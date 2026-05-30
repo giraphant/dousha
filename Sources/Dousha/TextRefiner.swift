@@ -101,7 +101,7 @@ struct TextRefiner: Sendable {
     }
 
     /// Settings "test connection" probe. Sends a trivial prompt; success means
-    /// the endpoint/key/model are usable. Migrated from LLMRefiner.test.
+    /// the endpoint/key/model are usable.
     func test() async -> Result<String, Error> {
         guard let url = Self.chatCompletionsURL(base: baseURL) else {
             return .failure(NSError(domain: "TextRefiner", code: -1,

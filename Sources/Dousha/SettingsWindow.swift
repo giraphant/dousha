@@ -5,8 +5,8 @@ import TalkerCommonSync
 import SonioxASR
 
 enum SettingsWindowFactory {
-    static func create(llmRefiner: LLMRefiner, actions: SettingsActions) -> NSWindow {
-        let view = SettingsView(llmRefiner: llmRefiner, actions: actions)
+    static func create(actions: SettingsActions) -> NSWindow {
+        let view = SettingsView(actions: actions)
         let host = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: host)
         window.title = "常规设置"
@@ -51,7 +51,6 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
 }
 
 struct SettingsView: View {
-    let llmRefiner: LLMRefiner
     let actions: SettingsActions
 
     @State private var selectedPane: SettingsPane? = .general
@@ -105,8 +104,7 @@ struct SettingsView: View {
     @State private var glossaryTerms: [String] = Preferences.shared.glossaryTerms
     @State private var newTerm: String = ""
 
-    init(llmRefiner: LLMRefiner, actions: SettingsActions) {
-        self.llmRefiner = llmRefiner
+    init(actions: SettingsActions) {
         self.actions = actions
         _launchAtLogin = State(initialValue: actions.isLaunchAtLoginEnabled())
         _showDockIcon = State(initialValue: actions.isDockIconVisible())
@@ -486,7 +484,9 @@ struct SettingsView: View {
         isTesting = true
         status = "正在测试连接…"
         statusIsError = false
-        llmRefiner.test(baseURL: baseURL, apiKey: apiKey, model: model) { result in
+        let refiner = TextRefiner(baseURL: baseURL, apiKey: apiKey, model: model)
+        Task {
+            let result = await refiner.test()
             DispatchQueue.main.async {
                 isTesting = false
                 switch result {

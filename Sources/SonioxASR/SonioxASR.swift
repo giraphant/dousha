@@ -3,9 +3,10 @@ import AVFoundation
 import TalkerCommonSync
 import ASRSupport
 
-/// Streaming Soniox real-time STT client. One recording per instance:
-/// `start()` opens the mic + WebSocket and streams raw PCM s16le; `stop()`
-/// sends the end-of-audio marker and waits for the server's `finished` flush.
+/// Streaming Soniox real-time STT client. One recording per instance. Audio is
+/// pushed in from the shared `AudioTapHub` via `ingest(_:)`: `openStream` opens
+/// the WebSocket and streams raw PCM s16le; `stop()` sends the end-of-audio
+/// marker and waits for the server's `finished` flush.
 ///
 /// Much simpler than Doubao: no device registration, JWT, Opus, or protobuf.
 /// The first WS message is a JSON config (text frame) carrying the API key and
@@ -19,8 +20,7 @@ public actor SonioxASR {
     /// Glossary terms sent in Soniox's `context.terms` to bias recognition
     /// toward domain words / proper nouns (QUA-133). Snapshotted at
     /// `start(contextTerms:)` so a Settings change mid-recording can't alter the
-    /// active session, and reused by `retranscribe` so a replay stays consistent
-    /// with the recording that produced the audio. Empty => no `context` sent.
+    /// active session for the rest of the recording. Empty => no `context` sent.
     private var contextTerms: [String] = []
 
     private var session: URLSession?
@@ -29,7 +29,7 @@ public actor SonioxASR {
     /// Bumped on every openWebSocket(). The receive loop captures the value at
     /// schedule time and drops any callback whose generation no longer matches
     /// the current socket — so a stray in-flight message from a socket closed
-    /// during retranscribe/reconnect can't mutate fresh-session state. Mirrors
+    /// during a reconnect can't mutate fresh-session state. Mirrors
     /// the JS reference's `_isOld` old-socket guard.
     private var wsGeneration = 0
 
@@ -276,8 +276,7 @@ public actor SonioxASR {
 
     /// Async-mode stop: the WAV is already closed; upload it to the batch REST
     /// API and return the server transcript. On any error, surfaces it via
-    /// onError and returns an empty-text result (the WAV is preserved so the
-    /// retranscribe path can retry).
+    /// onError and returns an empty-text result.
     private func stopAsync() async -> TranscriptionResult {
         let savedURL = AudioCapturePaths.sharedWAV
         guard FileManager.default.fileExists(atPath: savedURL.path) else {
@@ -300,7 +299,6 @@ public actor SonioxASR {
         let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
         let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
-        let savedURL: URL? = FileManager.default.fileExists(atPath: AudioCapturePaths.sharedWAV.path) ? AudioCapturePaths.sharedWAV : nil
         return TranscriptionResult(
             // displayText = finalText + interim. When finished, interim is
             // flushed so this equals finalText; on a finished-wait timeout it
@@ -310,7 +308,6 @@ public actor SonioxASR {
             lastResponseAge: lastResponseAge,
             lastTranscriptAge: lastTranscriptAge,
             maxSegmentGap: nil,
-            savedAudioURL: savedURL,
             traceId: requestId
         )
     }
@@ -333,7 +330,7 @@ public actor SonioxASR {
         let closingGeneration = wsGeneration
         // Invalidate the old socket's receive callbacks NOW (before awaiting the
         // close handshake) so a trailing message during the close/reopen gap
-        // can't mutate freshly-reset session state (e.g. in retranscribe). The
+        // can't mutate freshly-reset session state. The
         // failure callback still signals this generation's channel below — see
         // handleReceiveResult — so the handshake completes promptly.
         wsGeneration += 1

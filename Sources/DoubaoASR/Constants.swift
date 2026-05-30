@@ -62,16 +62,6 @@ enum DoubaoConstants {
     static let trailingSilencePadMs = 0
     static var trailingSilencePadSamples: Int { sampleRate * trailingSilencePadMs / 1000 }
 
-    // On stop() the mic tap has typically just dispatched the last buffer or two
-    // (the tail of the user's final word) to the actor as separate Tasks (see
-    // DoubaoASR.appendAndDrainPCM). Those Tasks aren't ordered relative to
-    // _stop(), so if _stop() flips isRunning=false immediately they get dropped
-    // by appendAndDrainPCM's guard and the final word is truncated — regardless
-    // of trailing-silence padding. _stop() tears down the tap and then holds the
-    // session alive for this window so the queued tail buffers can land in
-    // pcmBuffer and get sent. Imperceptible vs. the old 2s padding.
-    static let stopDrainWindowMs = 50
-
     // WebSocket keepalive. Matches the official Doubao IME client's
     // SAMICore.UpdateFrontierClientPingInterval(3000) — without periodic pings
     // the server tears down long-running sessions mid-stream and the tail

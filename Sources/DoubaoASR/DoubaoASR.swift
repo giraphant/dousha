@@ -3,11 +3,12 @@ import AVFoundation
 import TalkerCommonSync
 import ASRSupport
 
-/// Streaming Doubao IME ASR client. One recording per instance:
-/// call `start()` to begin capturing the mic and streaming to Doubao,
-/// then `stop()` to flush and receive the final transcript.
+/// Streaming Doubao IME ASR client. One recording per instance. Audio is pushed
+/// in from the shared `AudioTapHub` via `ingest(_:)`: `prepareSession` resets
+/// state, `openStream` opens the WebSocket, and `stop()` flushes and receives
+/// the final transcript.
 ///
-/// The WebSocket is opened on `start()` and closed on `stop()` — matches
+/// The WebSocket is opened on `openStream()` and closed on `stop()` — matches
 /// the Python reference. Reusing the connection across recordings caused
 /// Doubao's per-device concurrent quota to fill up after a few fast
 /// sessions; the ~600ms TLS+StartTask cost per call is the price.
@@ -25,8 +26,7 @@ public actor DoubaoASR {
     /// Recognition context hint sent in StartSession `extra.context` to bias the
     /// recognizer toward domain terms / proper nouns (QUA-133). Snapshotted at
     /// `start(contextHint:)` so a Settings change mid-recording can't alter the
-    /// active session, and reused by `retranscribe` so a replay stays consistent
-    /// with the recording that produced the audio. Empty string = no hint.
+    /// active session for the rest of the recording. Empty string = no hint.
     private var contextHint: String = ""
     private var pcmBuffer = Data()
     private var didSendFirstFrame = false
@@ -263,7 +263,6 @@ public actor DoubaoASR {
                 lastResponseAge: nil,
                 lastTranscriptAge: nil,
                 maxSegmentGap: nil,
-                savedAudioURL: nil,
                 traceId: requestId
             )
         }
@@ -328,7 +327,6 @@ public actor DoubaoASR {
         let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
         let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
-        let savedURL: URL? = FileManager.default.fileExists(atPath: AudioCapturePaths.sharedWAV.path) ? AudioCapturePaths.sharedWAV : nil
 
         let maxSegmentGap: TimeInterval? = {
             // Only meaningful with 2+ commits — the lead gap from audioStartedAt
@@ -353,7 +351,6 @@ public actor DoubaoASR {
             lastResponseAge: lastResponseAge,
             lastTranscriptAge: lastTranscriptAge,
             maxSegmentGap: maxSegmentGap,
-            savedAudioURL: savedURL,
             traceId: requestId
         )
         // Close the WebSocket after every session (see class doc), but off the

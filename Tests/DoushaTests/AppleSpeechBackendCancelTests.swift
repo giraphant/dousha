@@ -11,20 +11,20 @@ final class AppleSpeechBackendCancelTests: XCTestCase {
         // touch the audio engine in a way that throws, and must not fire any
         // callbacks (there are none to fire).
         let backend = AppleSpeechBackend(language: "en-US")
-        backend.cancel()
-        backend.cancel()   // idempotent
+        backend.cancelSession()
+        backend.cancelSession()   // idempotent
     }
 
     // MARK: - cancel without prior start — completion behaviour
 
-    func testStop_withoutStart_firesCompletionImmediatelyWithEmptyText() {
-        // Document the existing contract that cancel() must not break: calling
-        // stop() on an un-started backend hands an empty result back synchronously
-        // (the early-return guard in stop()). This protects callers like
-        // AppDelegate.transitionToError that call speech.stop on the cleanup path.
+    func testFinish_withoutStart_firesCompletionImmediatelyWithEmptyText() {
+        // Document the existing contract that cancelSession() must not break:
+        // calling finish() on an un-started backend hands an empty result back
+        // synchronously (the early-return guard in finish()). This protects the
+        // cleanup paths that finish the engine without a prior session.
         let backend = AppleSpeechBackend(language: "en-US")
-        let exp = expectation(description: "stop completion")
-        backend.stop { result in
+        let exp = expectation(description: "finish completion")
+        backend.finish { result in
             XCTAssertEqual(result.text, "")
             exp.fulfill()
         }
@@ -33,11 +33,12 @@ final class AppleSpeechBackendCancelTests: XCTestCase {
 
     // MARK: - protocol conformance
 
-    func testConformsToSpeechBackend() {
-        // Compile-time check via type assignment: AppleSpeechBackend must
-        // implement the cancel() method added to SpeechBackend. If the protocol
-        // requirement is removed or the impl drifts, this test stops compiling.
-        let backend: SpeechBackend = AppleSpeechBackend(language: "en-US")
-        backend.cancel()
+    func testConformsToBufferCaptureEngine() {
+        // Compile-time check via type assignment: AppleSpeechBackend must remain a
+        // BufferCaptureEngine (the shared AudioTapHub pushes it native buffers via
+        // ingest, and MultiEngineBackend drives it through cancelSession()). If the
+        // conformance is removed or the impl drifts, this test stops compiling.
+        let backend: BufferCaptureEngine = AppleSpeechBackend(language: "en-US")
+        backend.cancelSession()
     }
 }

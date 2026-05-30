@@ -28,7 +28,7 @@ protocol SpeechBackend: AnyObject {
     /// Aborts an in-flight session and discards everything captured so far.
     /// MUST NOT call any of the start() callbacks, MUST NOT call any pending
     /// stop() completion, and MUST leave no stale saved-audio file behind that
-    /// could fool retranscribe. Safe to call when not running (no-op).
+    /// could fool a later read of the shared WAV. Safe to call when not running (no-op).
     func cancel()
 }
 
@@ -62,7 +62,7 @@ protocol BufferCaptureEngine: PushCaptureEngine {
 }
 
 enum SpeechBackendFactory {
-    static func make(engine: Engine, language: String) -> SpeechBackend {
+    static func make(engine: Engine, language: String) -> PushCaptureEngine {
         switch engine {
         case .apple:
             return AppleSpeechBackend(language: language)
