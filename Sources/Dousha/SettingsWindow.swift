@@ -90,6 +90,12 @@ struct SettingsView: View {
     @State private var sonioxStatusIsError: Bool = false
     @State private var isTestingSoniox: Bool = false
 
+    // 听写模型 — 多引擎路由 (QUA-145). The parallel-active set is derived as the
+    // union of these three slots, so there's no separate "active" control.
+    @State private var chineseEngine: Engine = Preferences.shared.chineseEngine
+    @State private var englishEngine: Engine = Preferences.shared.englishEngine
+    @State private var mixedEngine: Engine = Preferences.shared.mixedEngine
+
     // 听写模型 — 词库
     @State private var glossaryEnabled: Bool = Preferences.shared.glossaryEnabled
     @State private var glossaryTerms: [String] = Preferences.shared.glossaryTerms
@@ -211,8 +217,38 @@ struct SettingsView: View {
 
     // MARK: - 听写模型
 
+    @ViewBuilder private func engineOptions() -> some View {
+        ForEach(Engine.allCases, id: \.self) { e in
+            Text(e.displayName).tag(e)
+        }
+    }
+
+    /// Persist the three slots and recompute the active set as their union.
+    private func persistRouting() {
+        Preferences.shared.chineseEngine = chineseEngine
+        Preferences.shared.englishEngine = englishEngine
+        Preferences.shared.mixedEngine = mixedEngine
+        let active = Engine.allCases.filter {
+            $0 == chineseEngine || $0 == englishEngine || $0 == mixedEngine
+        }
+        Preferences.shared.activeEngines = active
+    }
+
     private var modelPane: some View {
         Form {
+            Section("引擎路由") {
+                Picker("中文", selection: $chineseEngine) { engineOptions() }
+                    .onChange(of: chineseEngine) { _, _ in persistRouting() }
+                Picker("英文", selection: $englishEngine) { engineOptions() }
+                    .onChange(of: englishEngine) { _, _ in persistRouting() }
+                Picker("中英混合", selection: $mixedEngine) { engineOptions() }
+                    .onChange(of: mixedEngine) { _, _ in persistRouting() }
+                Text("按语言把识别结果路由到对应引擎。用到的引擎会在录音时并行运行——例如「中文→豆包、英文→Soniox」就会同时跑两家，停录后按整段语言占比挑一家的结果。三个都选同一个引擎即单引擎、零额外开销。主要语言（菜单「语言」）对应的引擎为主引擎，其实时字幕显示在悬浮窗。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("Soniox") {
                 Picker("模式", selection: $sonioxMode) {
                     Text("实时").tag(SonioxMode.realtime)
