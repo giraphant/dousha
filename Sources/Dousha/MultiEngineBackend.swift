@@ -85,6 +85,8 @@ final class MultiEngineBackend: SpeechBackend {
         let group = DispatchGroup()
         let lock = NSLock()
         var results: [Engine: TranscriptionResult] = [:]
+        var timings: [Engine: TimeInterval] = [:]
+        let t0 = Date()
 
         for entry in entries {
             let engine = entry.engine
@@ -92,6 +94,7 @@ final class MultiEngineBackend: SpeechBackend {
             entry.backend.stop { result in
                 lock.lock()
                 results[engine] = result
+                timings[engine] = Date().timeIntervalSince(t0)
                 lock.unlock()
                 group.leave()
             }
@@ -99,15 +102,25 @@ final class MultiEngineBackend: SpeechBackend {
 
         let primary = self.primary
         let router = self.router
+        let orderedEngines = entries.map(\.engine)
         group.notify(queue: .main) {
             let textMap = results.mapValues {
                 $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
             }
+            let elapsed = Date().timeIntervalSince(t0)
+            // Per-engine: transcript length + when it returned (ms after stop).
+            let perEngine = orderedEngines.map { e -> String in
+                let len = textMap[e]?.count ?? -1
+                let ms = timings[e].map { Int($0 * 1000) } ?? -1
+                return "\(e.rawValue)(len=\(len),\(ms)ms\(e == primary ? ",PRIMARY" : ""))"
+            }.joined(separator: " ")
             if let pick = router.pickBest(results: textMap, primary: primary),
                let chosen = results[pick.engine] {
+                qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | picked=\(pick.engine.rawValue)")
                 doushaLog("[MultiEngine] picked \(pick.engine.rawValue) (len=\(chosen.text.count)) from \(results.count) engines")
                 completion(chosen)
             } else {
+                qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | picked=NONE(all empty)")
                 // Everything came back empty — hand back the primary's (empty)
                 // result so the caller's empty-text guard runs as usual.
                 let fallback = results[primary] ?? results.values.first
