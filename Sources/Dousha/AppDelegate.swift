@@ -76,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyDockIconVisibility()
+        installMainMenu()
         setupMenuBar()
         floatingWindow = FloatingWindow(model: hudModel)
         // Wire HUD button actions. Captured weakly to avoid retain cycles via
@@ -102,12 +103,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self,
             selector: #selector(handleCancelHotkeyConfigChanged),
             name: .doushaCancelHotkeyConfigChanged,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleSonioxConfigChanged),
-            name: .doushaSonioxConfigChanged,
             object: nil
         )
         NotificationCenter.default.addObserver(
@@ -141,6 +136,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Apply the persisted Dock-icon preference to the activation policy.
     private func applyDockIconVisibility() {
         NSApp.setActivationPolicy(prefs.showDockIcon ? .regular : .accessory)
+    }
+
+    /// A menu-bar accessory app (`LSUIElement`) gets no main menu by default, so
+    /// the standard ⌘X/⌘C/⌘V/⌘A editing shortcuts have nothing to route to in the
+    /// responder chain — text fields in the Settings window can't cut/copy/paste/
+    /// select-all from the keyboard. Installing a main menu with the standard Edit
+    /// items wires those key equivalents to the first responder. The menu itself
+    /// stays hidden while the app is an accessory; only its shortcuts are live.
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+
+        let editMenu = NSMenu(title: "编辑")
+        editItem.submenu = editMenu
+
+        // nil target → AppKit dispatches the action up the responder chain to the
+        // focused text field. String selectors avoid the `copy:` / NSObject.copy
+        // ambiguity.
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: Selector(("cut:")), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "拷贝", action: Selector(("copy:")), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: Selector(("paste:")), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: Selector(("selectAll:")), keyEquivalent: "a")
+
+        NSApp.mainMenu = mainMenu
     }
 
     // MARK: - Menu bar
@@ -211,7 +235,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(engineItem)
 
         // 语言 — 子菜单，标题右侧带当前选中值
-        let langOptions = LanguageMenu.options(for: prefs.engine, selectedLanguage: prefs.language)
+        let langOptions = LanguageMenu.options(activeEngines: prefs.activeEngines,
+                                               primaryEngine: prefs.engine,
+                                               selectedLanguage: prefs.language)
         let currentLang = langOptions.first(where: { $0.isSelected })?.title ?? "自动"
         let langItem = NSMenuItem(title: "语言：\(currentLang)", action: nil, keyEquivalent: "")
         langItem.image = menuIcon("globe")
@@ -402,12 +428,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Routing slots / primary language changed in Settings. Refresh the menu
         // (engine summary, checkmarks, language) and warm Doubao if now active.
         if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
-        rebuildMenu()
-    }
-
-    @objc private func handleSonioxConfigChanged() {
-        // The backend is rebuilt from preferences at the start of each recording,
-        // so a changed Soniox API key is picked up automatically next time.
         rebuildMenu()
     }
 
