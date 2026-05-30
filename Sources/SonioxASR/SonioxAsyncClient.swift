@@ -63,6 +63,8 @@ public struct SonioxAsyncClient: Sendable {
     private let model: String
     /// Glossary terms for the async `context.terms` (QUA-133). Empty => omitted.
     private let contextTerms: [String]
+    /// ISO codes for the async `language_hints` (biases auto-detect). Empty => omitted.
+    private let languageHints: [String]
     private let session: URLSession
 
     /// Max time to wait for the server-side transcription to finish.
@@ -74,6 +76,7 @@ public struct SonioxAsyncClient: Sendable {
                 baseURL: String = SonioxConfig.asyncBaseURL,
                 model: String = SonioxConfig.asyncModel,
                 contextTerms: [String] = [],
+                languageHints: [String] = [],
                 pollTimeout: TimeInterval = 120,
                 pollInterval: TimeInterval = 0.75,
                 session: URLSession? = nil) {
@@ -81,6 +84,7 @@ public struct SonioxAsyncClient: Sendable {
         self.baseURL = baseURL
         self.model = model
         self.contextTerms = contextTerms
+        self.languageHints = languageHints
         self.pollTimeout = pollTimeout
         self.pollInterval = pollInterval
         if let session {
@@ -154,13 +158,16 @@ public struct SonioxAsyncClient: Sendable {
 
     /// Builds the POST /v1/transcriptions JSON body. Pure + public so the
     /// glossary `context.terms` inclusion is unit-testable without HTTP (QUA-133).
-    public static func transcriptionRequestBody(model: String, fileId: String, contextTerms: [String]) -> [String: Any] {
+    public static func transcriptionRequestBody(model: String, fileId: String, contextTerms: [String], languageHints: [String] = []) -> [String: Any] {
         var body: [String: Any] = [
             "model": model,
             "file_id": fileId
         ]
         if let context = SonioxConfig.contextObject(terms: contextTerms) {
             body["context"] = context
+        }
+        if !languageHints.isEmpty {
+            body["language_hints"] = languageHints
         }
         return body
     }
@@ -170,7 +177,7 @@ public struct SonioxAsyncClient: Sendable {
         req.httpMethod = "POST"
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body = SonioxAsyncClient.transcriptionRequestBody(model: model, fileId: fileId, contextTerms: contextTerms)
+        let body = SonioxAsyncClient.transcriptionRequestBody(model: model, fileId: fileId, contextTerms: contextTerms, languageHints: languageHints)
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let obj = try await sendJSON(req)
