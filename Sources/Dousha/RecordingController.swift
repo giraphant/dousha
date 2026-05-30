@@ -185,9 +185,54 @@ final class RecordingController {
         transition(to: .idle)
     }
 
+    func stop() {
+        guard status == .recording else {
+            doushaLog("[RecordingController] stop REJECTED (status=\(status))")
+            return
+        }
+        transition(to: .transcribing)
+        let myGen = generation
+        backend?.stop { [weak self] result in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self = self, self.generation == myGen else {
+                        doushaLog("[RecordingController] stop completion superseded — dropping")
+                        return
+                    }
+                    let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { self.transition(to: .idle); return }
+                    self.env.setFinalTranscript(text)
+                    self.refineAndInject(text)
+                }
+            }
+        }
+    }
+
+    private func refineAndInject(_ text: String) {
+        guard env.isRefineEnabled() else { injectAndFinish(text); return }
+        switch env.refineMode() {
+        case .immediate:
+            env.refineImmediate(text) { [weak self] refined in
+                self?.injectAndFinish(refined ?? text)
+            }
+        case .deferred:
+            injectAndFinish(text)
+            env.refineLater(text)
+        }
+    }
+
+    private func injectAndFinish(_ text: String) {
+        transition(to: .injecting)
+        env.inject(text)
+        env.scheduleAfter(Self.injectGreenFlash) { [weak self] in
+            self?.transition(to: .idle)
+        }
+    }
+
     // Test-only seam to exercise `transition` directly.
     #if DEBUG
     func testHook_transition(to next: RecordingStatus) { transition(to: next) }
+    func testHook_bumpGenerationLikeCancel() { generation &+= 1 }
     #endif
 
     private func isErrorStatus(_ s: RecordingStatus) -> Bool {

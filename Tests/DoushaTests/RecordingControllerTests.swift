@@ -225,3 +225,86 @@ final class RecordingControllerCallbackTests: XCTestCase {
         XCTAssertEqual(spy.resetTranscriptCount, 2)  // once at start, once on error
     }
 }
+
+@MainActor
+final class RecordingControllerStopTests: XCTestCase {
+
+    func testStop_fromRecording_entersTranscribing() {
+        let backend = MockSpeechBackend()
+        let (c, _, _) = makeSUT(backend: backend)
+        c.start()
+        c.stop()
+        XCTAssertEqual(c.status, .transcribing)
+        XCTAssertTrue(backend.stopCalled)
+    }
+
+    func testStop_notRecording_isRejected() {
+        let backend = MockSpeechBackend()
+        let (c, _, _) = makeSUT(backend: backend)
+        c.stop()
+        XCTAssertFalse(backend.stopCalled)
+        XCTAssertEqual(c.status, .idle)
+    }
+
+    func testStop_emptyResult_returnsToIdle_noInject() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start(); c.stop()
+        fireStop(backend, text: "   ")
+        XCTAssertEqual(c.status, .idle)
+        XCTAssertTrue(spy.injected.isEmpty)
+    }
+
+    func testStop_withText_refineDisabled_injectsRawThenGreenFlashToIdle() {
+        let backend = MockSpeechBackend()
+        let (c, spy, sched) = makeSUT(backend: backend)
+        spy.refineEnabled = false
+        c.start(); c.stop()
+        fireStop(backend, text: "hello world")
+        XCTAssertEqual(spy.finalTranscripts, ["hello world"])
+        XCTAssertEqual(spy.injected, ["hello world"])
+        XCTAssertEqual(c.status, .injecting)
+        sched.advance(by: 0.25)
+        XCTAssertEqual(c.status, .idle)
+    }
+
+    func testStop_immediateRefine_injectsRefinedText() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        spy.refineEnabled = true; spy.refineMode = .immediate
+        spy.refineResult = .some("polished")
+        c.start(); c.stop()
+        fireStop(backend, text: "raw")
+        XCTAssertEqual(spy.injected, ["polished"])
+    }
+
+    func testStop_deferredRefine_injectsRawAndRewritesClipboard() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        spy.refineEnabled = true; spy.refineMode = .deferred
+        spy.refineResult = .some("polished")
+        c.start(); c.stop()
+        fireStop(backend, text: "raw")
+        XCTAssertEqual(spy.injected, ["raw"])
+        XCTAssertEqual(spy.clipboardWrites, ["polished"])
+    }
+
+    func testStop_completionAfterCancel_isDropped() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start(); c.stop()
+        c.testHook_bumpGenerationLikeCancel()
+        fireStop(backend, text: "should be dropped")
+        XCTAssertTrue(spy.injected.isEmpty)
+        XCTAssertTrue(spy.finalTranscripts.isEmpty)
+    }
+
+    /// Fire the captured stop completion synchronously on main.
+    private func fireStop(_ b: MockSpeechBackend, text: String) {
+        let exp = expectation(description: "stop completion")
+        b.stopCompletion?(TranscriptionResult(text: text, audioDuration: 1,
+                                              lastResponseAge: nil, lastTranscriptAge: nil))
+        DispatchQueue.main.async { exp.fulfill() }
+        wait(for: [exp], timeout: 1)
+    }
+}
