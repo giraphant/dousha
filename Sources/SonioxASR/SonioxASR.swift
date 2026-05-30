@@ -22,10 +22,6 @@ public actor SonioxASR {
     /// with the recording that produced the audio. Empty => no `context` sent.
     private var contextTerms: [String] = []
 
-    private let audioEngine = AVAudioEngine()
-    private var pcmConverter: AVAudioConverter?
-    private var pcmTargetFormat: AVAudioFormat?
-
     private var session: URLSession?
     private var ws: URLSessionWebSocketTask?
 
@@ -61,33 +57,23 @@ public actor SonioxASR {
     /// pauses cuts the recording off early.
     private var keepaliveTask: Task<Void, Never>?
 
-    // Callbacks (assigned in start)
+    // Callbacks (assigned in prepareSession). Audio level is owned by the
+    // AudioTapHub now, so the engine no longer forwards it.
     private var onPartial: (@Sendable (PartialTranscript) -> Void)?
-    private var onAudioLevel: (@Sendable (Float) -> Void)?
     private var onError: (@Sendable (Error) -> Void)?
 
     private var totalPcmBytesOut: Int = 0
 
-    // WAV side-recording for fallback retranscription. Held so the audio-thread
-    // tap closure (non-isolated) can call .append() directly without hopping
-    // into the actor; the actor's reference is just for close().
-    private var wavWriter: WavFileWriter?
+    /// When audio capture began for this session. Set in `prepareSession`
+    /// (the mic + shared WAV are owned by the `AudioTapHub`); drives the
+    /// reported `audioDuration`.
     private var audioStartedAt: Date?
     private var lastResponseAt: Date?
     private var lastTranscriptAt: Date?
 
-    /// Per-engine WAV path so Soniox and Doubao don't clobber each other's
-    /// last-recording file.
-    public static var savedAudioURL: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Dousha", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("last_recording_soniox.wav")
-    }
-
     /// Creates an idle recognizer. No mic, network, or key validation happens
-    /// until `start()`. `mode` picks real-time WebSocket streaming or async
-    /// (batch) upload-on-stop.
+    /// until `prepareSession()` / `openStream()`. `mode` picks real-time
+    /// WebSocket streaming or async (batch) upload-on-stop.
     public init(apiKey: String, mode: SonioxMode = .realtime) {
         self.apiKey = apiKey
         self.mode = mode
@@ -95,24 +81,22 @@ public actor SonioxASR {
 
     // MARK: - Lifecycle
 
+    /// Phase 1 — reset session state and mark the engine ready to accept pushed
+    /// PCM, without touching the network. `MultiEngineBackend` awaits this for
+    /// every engine BEFORE starting the shared `AudioTapHub`, so a buffer pushed
+    /// the instant the mic goes live can't arrive before `isRunning` flips. Mic
+    /// capture + the shared WAV are now owned by the hub; audio arrives via
+    /// `ingest(_:)`.
+    ///
     /// - Parameter contextTerms: Glossary terms for Soniox's `context.terms`.
     ///   Pass `[]` for none. Snapshotted for the duration of this recording.
-    public nonisolated func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-                                  onAudioLevel: @escaping @Sendable (Float) -> Void,
-                                  onError: @escaping @Sendable (Error) -> Void,
-                                  contextTerms: [String] = []) {
-        Task { await self._start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError, contextTerms: contextTerms) }
-    }
-
-    private func _start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-                        onAudioLevel: @escaping @Sendable (Float) -> Void,
-                        onError: @escaping @Sendable (Error) -> Void,
-                        contextTerms: [String]) async {
+    public func prepareSession(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
+                               onError: @escaping @Sendable (Error) -> Void,
+                               contextTerms: [String] = []) {
         guard !isRunning else { return }
         isRunning = true
         self.contextTerms = contextTerms
         self.onPartial = onPartial
-        self.onAudioLevel = onAudioLevel
         self.onError = onError
         self.parser = SonioxResponseParser()
         self.pcmBuffer = Data()
@@ -120,12 +104,22 @@ public actor SonioxASR {
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
         self.finishedChannel = OneShotChannel<Void>()
-        self.audioStartedAt = nil
+        self.audioStartedAt = Date()
         self.lastResponseAt = nil
         self.lastTranscriptAt = nil
-        self.wavWriter = nil
+        doushaLog("[SonioxASR] traceId=\(requestId) prepareSession mode=\(mode.rawValue) (capture owned by AudioTapHub)")
+    }
 
-        doushaLog("[SonioxASR] traceId=\(requestId) start")
+    /// Phase 2 — for realtime mode, open the WebSocket, send the config frame,
+    /// and flush whatever PCM buffered during setup. Async mode is a no-op here:
+    /// it has no live socket; the whole shared WAV is uploaded to the batch REST
+    /// API on `stop()`. Fire-and-forget so the hub's capture overlaps setup.
+    public nonisolated func openStream() {
+        Task { await self._openStream() }
+    }
+
+    private func _openStream() async {
+        guard isRunning else { return }
 
         guard !apiKey.isEmpty else {
             let err = NSError(domain: "SonioxASR", code: 401,
@@ -136,34 +130,14 @@ public actor SonioxASR {
             return
         }
 
+        // Async mode streams nothing live — the shared WAV (written by the hub)
+        // is uploaded to the batch REST API on stop().
+        guard mode == .realtime else {
+            doushaLog("[SonioxASR] traceId=\(requestId) async mode — WAV-only capture, no WS")
+            return
+        }
+
         do {
-            // Open the rolling WAV before the mic tap so startMicTap can snapshot
-            // the writer reference into the tap closure.
-            do {
-                try? FileManager.default.removeItem(at: Self.savedAudioURL)
-                self.wavWriter = try WavFileWriter(
-                    url: Self.savedAudioURL,
-                    sampleRate: SonioxConfig.sampleRate,
-                    channels: SonioxConfig.channels
-                )
-                self.audioStartedAt = Date()
-                doushaLog("[SonioxASR] WAV side-recording opened at \(Self.savedAudioURL.path)")
-            } catch {
-                doushaLog("[SonioxASR] WAV writer failed to open: \(error.localizedDescription) — continuing without side recording")
-                self.wavWriter = nil
-            }
-
-            // Start mic FIRST so audio buffers while the WS sets up.
-            try startMicTap()
-            doushaLog("[SonioxASR] mic tap started (pre-WS)")
-
-            // Async mode captures to the WAV only — no live WebSocket. The whole
-            // file is uploaded to the batch REST API on stop().
-            guard mode == .realtime else {
-                doushaLog("[SonioxASR] traceId=\(requestId) async mode — WAV-only capture, no WS")
-                return
-            }
-
             try openWebSocket()
             try await sendConfigMessage()
             doushaLog("[SonioxASR] traceId=\(requestId) config sent pcmBufferBytes=\(pcmBuffer.count)")
@@ -174,17 +148,19 @@ public actor SonioxASR {
             self.canSendAudio = true
             try await flushPendingFrames()
         } catch {
-            doushaLog("[SonioxASR] start() failed: \(error.localizedDescription)")
+            doushaLog("[SonioxASR] openStream() failed: \(error.localizedDescription)")
             deliverError(error)
             await closeWebSocket()
-            teardownAudio()
-            if let writer = self.wavWriter {
-                try? writer.close()
-                self.wavWriter = nil
-            }
             isRunning = false
             signalFinished()
         }
+    }
+
+    /// Push one chunk of int16 16 kHz mono PCM from the shared `AudioTapHub`.
+    /// Replaces the old internal mic-tap callback. A no-op in async mode (the
+    /// WAV side-recording is the payload there).
+    public nonisolated func ingest(_ pcm: Data) {
+        Task { await self.appendAndDrainPCM(pcm) }
     }
 
     /// Aborts the current recording without sending end-of-audio, discarding any
@@ -201,16 +177,10 @@ public actor SonioxASR {
         isRunning = false
 
         self.onPartial = nil
-        self.onAudioLevel = nil
         self.onError = nil
 
-        teardownAudio()
-
-        if let writer = self.wavWriter {
-            try? writer.close()
-            self.wavWriter = nil
-        }
-        try? FileManager.default.removeItem(at: Self.savedAudioURL)
+        // Mic capture + the shared WAV are owned by the AudioTapHub, which the
+        // coordinator cancels separately — nothing to tear down here.
 
         await closeWebSocket()
         signalFinished()
@@ -232,16 +202,13 @@ public actor SonioxASR {
         guard isRunning else {
             return makeResult()
         }
+
+        // The shared AudioTapHub has already removed the mic tap and held its own
+        // drain window before calling us. Yield a few times so the last pushed
+        // buffers (the tail) land in pcmBuffer before we flip isRunning=false
+        // (which would otherwise drop them via the ingest guard).
+        for _ in 0..<4 { await Task.yield() }
         isRunning = false
-
-        teardownAudio()
-
-        if let writer = self.wavWriter {
-            // close() blocks until queued writes flush — makes it safe for the
-            // retranscribe path to read the file right after stop() returns.
-            try? writer.close()
-            self.wavWriter = nil
-        }
 
         if mode == .async {
             return await stopAsync()
@@ -311,7 +278,7 @@ public actor SonioxASR {
     /// onError and returns an empty-text result (the WAV is preserved so the
     /// retranscribe path can retry).
     private func stopAsync() async -> TranscriptionResult {
-        let savedURL = Self.savedAudioURL
+        let savedURL = AudioCapturePaths.sharedWAV
         guard FileManager.default.fileExists(atPath: savedURL.path) else {
             doushaLog("[SonioxASR] traceId=\(requestId) async stop — no WAV captured")
             return makeResult()
@@ -332,7 +299,7 @@ public actor SonioxASR {
         let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
         let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
-        let savedURL: URL? = FileManager.default.fileExists(atPath: Self.savedAudioURL.path) ? Self.savedAudioURL : nil
+        let savedURL: URL? = FileManager.default.fileExists(atPath: AudioCapturePaths.sharedWAV.path) ? AudioCapturePaths.sharedWAV : nil
         return TranscriptionResult(
             // displayText = finalText + interim. When finished, interim is
             // flushed so this equals finalText; on a finished-wait timeout it
@@ -345,13 +312,6 @@ public actor SonioxASR {
             savedAudioURL: savedURL,
             traceId: requestId
         )
-    }
-
-    private func teardownAudio() {
-        if audioEngine.isRunning {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            audioEngine.stop()
-        }
     }
 
     private func closeWebSocket() async {
@@ -529,76 +489,7 @@ public actor SonioxASR {
         finishedChannel?.finish(())
     }
 
-    // MARK: - Mic capture
-
-    private func startMicTap() throws {
-        let inputNode = audioEngine.inputNode
-        let inFormat = inputNode.outputFormat(forBus: 0)
-
-        guard let target = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: Double(SonioxConfig.sampleRate),
-            channels: AVAudioChannelCount(SonioxConfig.channels),
-            interleaved: true
-        ) else {
-            throw NSError(domain: "SonioxASR", code: -10,
-                          userInfo: [NSLocalizedDescriptionKey: "Failed to build target audio format"])
-        }
-        self.pcmTargetFormat = target
-
-        guard let converter = AVAudioConverter(from: inFormat, to: target) else {
-            throw NSError(domain: "SonioxASR", code: -11,
-                          userInfo: [NSLocalizedDescriptionKey: "Failed to init audio converter"])
-        }
-        self.pcmConverter = converter
-
-        let audioLevelCallback = self.onAudioLevel
-        let capturedConverter = UncheckedSendable(converter)
-        let capturedTarget = UncheckedSendable(target)
-        let capturedWavWriter = self.wavWriter
-
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { [weak self] buffer, _ in
-            let level = AudioLevel.computeRMS(buffer)
-            DispatchQueue.main.async { audioLevelCallback?(level) }
-
-            let converter = capturedConverter.value
-            let target = capturedTarget.value
-
-            let ratio = target.sampleRate / buffer.format.sampleRate
-            let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 1024)
-            guard let outBuf = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
-
-            var fed = false
-            var convError: NSError?
-            _ = converter.convert(to: outBuf, error: &convError) { _, outStatus in
-                if fed {
-                    outStatus.pointee = .noDataNow
-                    return nil
-                }
-                fed = true
-                outStatus.pointee = .haveData
-                return buffer
-            }
-            if let e = convError {
-                doushaLog("[SonioxASR] mic convert error: \(e)")
-                return
-            }
-            let n = Int(outBuf.frameLength)
-            guard n > 0, let src = outBuf.int16ChannelData?[0] else { return }
-
-            if let writer = capturedWavWriter {
-                writer.append(int16Samples: src, count: n)
-            }
-
-            let byteCount = n * MemoryLayout<Int16>.size
-            let chunk = Data(bytes: src, count: byteCount)
-            Task { await self?.appendAndDrainPCM(chunk) }
-        }
-
-        audioEngine.prepare()
-        try audioEngine.start()
-    }
+    // MARK: - PCM ingest (audio pushed from the shared AudioTapHub)
 
     private func appendAndDrainPCM(_ data: Data) async {
         guard isRunning else { return }
@@ -641,131 +532,6 @@ public actor SonioxASR {
     private func deliverError(_ error: Error) {
         let cb = onError
         DispatchQueue.main.async { cb?(error) }
-    }
-
-    // MARK: - Retranscribe
-
-    /// Open a fresh session and stream the given WAV file's audio through
-    /// Soniox, returning the final transcript. Does NOT touch the mic or HUD.
-    /// On any error, returns whatever partial text was assembled.
-    public func retranscribe(wavURL: URL, parentTraceId: String? = nil) async -> String {
-        guard !isRunning else {
-            doushaLog("[SonioxASR] retranscribe rejected — session already running")
-            return ""
-        }
-        guard !apiKey.isEmpty else {
-            doushaLog("[SonioxASR] retranscribe rejected — missing API key")
-            return ""
-        }
-
-        // Async mode replays through the batch REST API for accuracy parity with
-        // a live async recording, rather than streaming the WAV over the RT WS.
-        if mode == .async {
-            self.requestId = UUID().uuidString.lowercased()
-            let parentField = parentTraceId.map { " parent_traceId=\($0)" } ?? ""
-            doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) async retranscribe \(wavURL.lastPathComponent) starting")
-            do {
-                return try await SonioxAsyncClient(apiKey: apiKey, contextTerms: contextTerms).transcribe(fileURL: wavURL, traceId: requestId)
-            } catch {
-                doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) async retranscribe error=\(error.localizedDescription)")
-                return ""
-            }
-        }
-
-        let savedOnPartial = self.onPartial
-        let savedOnAudioLevel = self.onAudioLevel
-        let savedOnError = self.onError
-        defer {
-            self.onPartial = savedOnPartial
-            self.onAudioLevel = savedOnAudioLevel
-            self.onError = savedOnError
-        }
-        self.onPartial = { _ in }
-        self.onAudioLevel = { _ in }
-        self.onError = { _ in }
-
-        self.parser = SonioxResponseParser()
-        self.pcmBuffer = Data()
-        self.canSendAudio = false
-        self.totalPcmBytesOut = 0
-        self.requestId = UUID().uuidString.lowercased()
-        let parentField = parentTraceId.map { " parent_traceId=\($0)" } ?? ""
-        doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) retranscribe \(wavURL.lastPathComponent) starting")
-        self.finishedChannel = OneShotChannel<Void>()
-        self.lastResponseAt = nil
-        self.lastTranscriptAt = nil
-        self.audioStartedAt = Date()
-        self.isRunning = true
-        defer { self.isRunning = false }
-
-        do {
-            await closeWebSocket()
-            try openWebSocket()
-            try await sendConfigMessage()
-            self.canSendAudio = true
-
-            try await streamWavFile(at: wavURL)
-            try await sendEndOfAudio()
-
-            if let channel = finishedChannel {
-                _ = await waitWithTimeout(channel: channel, timeout: 10.0)
-            }
-        } catch {
-            doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) retranscribe error=\(error.localizedDescription)")
-        }
-
-        await closeWebSocket()
-        let final = parser.displayText
-        doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) retranscribe done text.len=\(final.count)")
-        return final
-    }
-
-    /// Read a WAV file, convert to int16 16kHz mono, and burst it through the
-    /// send pipeline. Soniox accepts whole-file bursts (it's designed around
-    /// streaming but doesn't penalize a fast feed for short clips).
-    private func streamWavFile(at url: URL) async throws {
-        let file = try AVAudioFile(forReading: url)
-        let frameCount = AVAudioFrameCount(file.length)
-        guard let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
-            throw NSError(domain: "SonioxASR", code: -1, userInfo: [NSLocalizedDescriptionKey: "WAV buffer alloc failed"])
-        }
-        try file.read(into: buf)
-
-        let target = pcmTargetFormat ?? AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: Double(SonioxConfig.sampleRate),
-            channels: AVAudioChannelCount(SonioxConfig.channels),
-            interleaved: true
-        )!
-        let outBuf: AVAudioPCMBuffer
-        if buf.format == target {
-            outBuf = buf
-        } else {
-            guard let converter = AVAudioConverter(from: buf.format, to: target),
-                  let conv = AVAudioPCMBuffer(pcmFormat: target,
-                                              frameCapacity: AVAudioFrameCount(Double(buf.frameLength) * target.sampleRate / buf.format.sampleRate + 1024)) else {
-                throw NSError(domain: "SonioxASR", code: -2, userInfo: [NSLocalizedDescriptionKey: "WAV converter init failed"])
-            }
-            var error: NSError?
-            var fed = false
-            converter.convert(to: conv, error: &error) { _, status in
-                if fed { status.pointee = .endOfStream; return nil }
-                fed = true
-                status.pointee = .haveData
-                return buf
-            }
-            if let e = error { throw e }
-            outBuf = conv
-        }
-
-        guard let i16 = outBuf.int16ChannelData?[0] else { return }
-        let totalSamples = Int(outBuf.frameLength)
-        let totalBytes = totalSamples * MemoryLayout<Int16>.size
-        let allData = Data(bytes: UnsafeRawPointer(i16), count: totalBytes)
-        self.pcmBuffer.append(allData)
-        self.totalPcmBytesOut += totalBytes
-        try await flushPendingFrames()
-        try await flushLastPartialFrame()
     }
 
     private enum WaitOutcome<T: Sendable>: Sendable {

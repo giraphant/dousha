@@ -457,8 +457,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Backend cancel returns immediately but the actual teardown runs
         // asynchronously (DoubaoASR enqueues a Task). Refuse the next start
         // for a short window so we don't race a fresh `start()` against the
-        // still-draining cancel — DoubaoASR._start would observe isRunning=true
-        // and silently no-op, leaving the UI in .recording but the backend dead.
+        // still-draining cancel — DoubaoASR.prepareSession would observe
+        // isRunning=true and silently no-op, leaving the UI in .recording but the
+        // backend dead.
         nextStartAllowedAt = Date(timeIntervalSinceNow: Self.cancelTeardownGuard)
         status = .idle
     }
