@@ -82,6 +82,67 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(prefs2.refineMode, .deferred)
     }
 
+    // MARK: - Multi-engine routing (QUA-145)
+
+    func testEngineSlots_defaultToLegacyApple() {
+        XCTAssertEqual(prefs.chineseEngine, .apple)
+        XCTAssertEqual(prefs.englishEngine, .apple)
+        XCTAssertEqual(prefs.mixedEngine, .apple)
+        XCTAssertEqual(prefs.activeEngines, [.apple])
+    }
+
+    func testEngineSlots_migrateFromLegacySingleEngine() {
+        defaults.set(Engine.soniox.rawValue, forKey: "engine")
+        let p = Preferences(defaults: defaults)
+        XCTAssertEqual(p.chineseEngine, .soniox)
+        XCTAssertEqual(p.englishEngine, .soniox)
+        XCTAssertEqual(p.mixedEngine, .soniox)
+        XCTAssertEqual(p.activeEngines, [.soniox])
+    }
+
+    func testPrimaryEngine_followsLanguageSlots() {
+        prefs.chineseEngine = .doubao
+        prefs.englishEngine = .soniox
+        prefs.mixedEngine = .soniox
+        XCTAssertEqual(prefs.primaryEngine(forLanguage: "zh-CN"), .doubao)
+        XCTAssertEqual(prefs.primaryEngine(forLanguage: "en-US"), .soniox)
+        XCTAssertEqual(prefs.primaryEngine(forLanguage: "ja-JP"), .soniox) // catch-all → mixed
+    }
+
+    func testEngineComputed_getIsPrimaryForLanguage() {
+        prefs.chineseEngine = .doubao
+        prefs.englishEngine = .soniox
+        prefs.mixedEngine = .soniox
+        prefs.language = "zh-CN"
+        XCTAssertEqual(prefs.engine, .doubao)
+        prefs.language = "en-US"
+        XCTAssertEqual(prefs.engine, .soniox)
+    }
+
+    func testSetSingleEngine_collapsesSlotsAndActive() {
+        prefs.chineseEngine = .doubao
+        prefs.englishEngine = .soniox
+        prefs.setSingleEngine(.apple)
+        XCTAssertEqual(prefs.chineseEngine, .apple)
+        XCTAssertEqual(prefs.englishEngine, .apple)
+        XCTAssertEqual(prefs.mixedEngine, .apple)
+        XCTAssertEqual(prefs.activeEngines, [.apple])
+    }
+
+    func testEngineSetter_switchesToSingleEngineMode() {
+        prefs.engine = .doubao
+        XCTAssertEqual(prefs.activeEngines, [.doubao])
+        XCTAssertEqual(prefs.chineseEngine, .doubao)
+        XCTAssertEqual(prefs.mixedEngine, .doubao)
+    }
+
+    func testActiveEngines_persistDedupAndNonEmpty() {
+        prefs.activeEngines = [.doubao, .soniox, .doubao]
+        XCTAssertEqual(Preferences(defaults: defaults).activeEngines, [.doubao, .soniox])
+        prefs.activeEngines = []
+        XCTAssertFalse(Preferences(defaults: defaults).activeEngines.isEmpty)
+    }
+
     // MARK: - Glossary (QUA-133) — shared across Doubao + Soniox
 
     func testGlossaryEnabled_defaultsToDisabled() {

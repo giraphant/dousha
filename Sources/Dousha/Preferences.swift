@@ -37,7 +37,15 @@ final class Preferences {
 
     private enum Keys {
         static let language                  = "language"
+        // Legacy single-engine pref (pre-QUA-145). Still read as the migration
+        // seed for the per-language engine slots below, and still written by
+        // single-engine quick-switch from the menu bar.
         static let engine                    = "engine"
+        // QUA-145 multi-engine: per-language routing slots + the parallel-active set.
+        static let chineseEngine             = "chineseEngine"
+        static let englishEngine             = "englishEngine"
+        static let mixedEngine               = "mixedEngine"
+        static let activeEngines             = "activeEngines"
         static let llmEnabled                = "llmEnabled"
         static let llmBaseURL                = "llmBaseURL"
         static let llmAPIKey                 = "llmAPIKey"
@@ -112,9 +120,79 @@ final class Preferences {
         set { defaults.set(newValue, forKey: Keys.language) }
     }
 
+    /// Legacy single-engine value (pre-QUA-145). Used only as the migration
+    /// seed for the routing slots / active set when those haven't been set yet.
+    private var legacySingleEngine: Engine {
+        Engine(rawValue: defaults.string(forKey: Keys.engine) ?? "") ?? .apple
+    }
+
+    /// The primary engine — the slot matching the current primary language. Drives
+    /// HUD partials/level. Computed, not stored: it follows `language`.
+    /// Setting it switches to single-engine mode (all slots + active = that engine),
+    /// which is what the menu-bar engine quick-switch does.
     var engine: Engine {
-        get { Engine(rawValue: defaults.string(forKey: Keys.engine) ?? "") ?? .apple }
-        set { defaults.set(newValue.rawValue, forKey: Keys.engine) }
+        get { primaryEngine(forLanguage: language) }
+        set { setSingleEngine(newValue) }
+    }
+
+    private func engineSlot(_ key: String) -> Engine {
+        Engine(rawValue: defaults.string(forKey: key) ?? "") ?? legacySingleEngine
+    }
+
+    /// Engine used when the transcript is ≥95% CJK.
+    var chineseEngine: Engine {
+        get { engineSlot(Keys.chineseEngine) }
+        set { defaults.set(newValue.rawValue, forKey: Keys.chineseEngine) }
+    }
+
+    /// Engine used when the transcript is >50% Latin.
+    var englishEngine: Engine {
+        get { engineSlot(Keys.englishEngine) }
+        set { defaults.set(newValue.rawValue, forKey: Keys.englishEngine) }
+    }
+
+    /// Engine used for mixed transcripts (between the two thresholds).
+    var mixedEngine: Engine {
+        get { engineSlot(Keys.mixedEngine) }
+        set { defaults.set(newValue.rawValue, forKey: Keys.mixedEngine) }
+    }
+
+    /// Engines that run in parallel during a recording. Master set; the three
+    /// slots are expected to be chosen from it. Never empty (migrates to the
+    /// legacy single engine, then guards against an empty stored array).
+    var activeEngines: [Engine] {
+        get {
+            guard let raw = defaults.stringArray(forKey: Keys.activeEngines) else {
+                return [legacySingleEngine]
+            }
+            let engines = raw.compactMap(Engine.init(rawValue:))
+            return engines.isEmpty ? [legacySingleEngine] : engines
+        }
+        set {
+            let unique = newValue.reduce(into: [Engine]()) { acc, e in
+                if !acc.contains(e) { acc.append(e) }
+            }
+            defaults.set((unique.isEmpty ? [legacySingleEngine] : unique).map(\.rawValue),
+                         forKey: Keys.activeEngines)
+        }
+    }
+
+    /// The primary engine for a given primary-language identifier: zh→Chinese
+    /// slot, en→English slot, anything else→Mixed slot (catch-all).
+    func primaryEngine(forLanguage lang: String) -> Engine {
+        if lang.hasPrefix("zh") { return chineseEngine }
+        if lang.hasPrefix("en") { return englishEngine }
+        return mixedEngine
+    }
+
+    /// Collapse to single-engine mode: all three slots and the active set point
+    /// at one engine. Zero-overhead degenerate case; what the menu quick-switch uses.
+    func setSingleEngine(_ e: Engine) {
+        defaults.set(e.rawValue, forKey: Keys.engine)   // keep legacy seed in sync
+        chineseEngine = e
+        englishEngine = e
+        mixedEngine = e
+        activeEngines = [e]
     }
 
     var llmEnabled: Bool {
