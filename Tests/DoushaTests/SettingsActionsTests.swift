@@ -47,6 +47,8 @@ final class SettingsActionsTests: XCTestCase {
     /// SettingsActions is the seam the SwiftUI panes call. Verify a set of
     /// closures backed by simple state route through correctly: reading
     /// reflects current state, and setting mutates it.
+    // @MainActor: SettingsActions' closures are @MainActor (UI-side actions).
+    @MainActor
     func testSettingsActions_routeThroughToBackingState() throws {
         let fake = FakeLaunchAtLogin(enabled: false)
         var dockVisible = false

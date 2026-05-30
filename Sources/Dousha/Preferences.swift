@@ -31,7 +31,12 @@ enum RefineMode: String, CaseIterable {
     }
 }
 
-final class Preferences {
+/// `@unchecked Sendable`: every stored property is an immutable `let` and all
+/// accessors funnel through `UserDefaults`, which is documented thread-safe. The
+/// shared instance is read off the main actor (e.g. `DoubaoBackend`/`SonioxBackend`
+/// snapshot the glossary inside their `beginSession` on a backend actor), so this
+/// must be `Sendable` rather than `@MainActor`.
+final class Preferences: @unchecked Sendable {
     static let shared = Preferences(defaults: .standard)
     private let defaults: UserDefaults
 

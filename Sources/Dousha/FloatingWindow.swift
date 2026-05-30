@@ -2,6 +2,7 @@ import Cocoa
 import Combine
 import SwiftUI
 
+@MainActor
 final class FloatingWindow {
     private let panel: NSPanel
     let model: FloatingHUDModel
@@ -60,7 +61,11 @@ final class FloatingWindow {
         // clicks that should reach the user's app.
         model.$status
             .sink { [weak self] newStatus in
-                self?.applyMouseAcceptance(for: newStatus)
+                // @Published fires synchronously on whoever sets `status`; the HUD
+                // status is only ever mutated on the main actor (AppDelegate), so
+                // the sink runs on main — assume the isolation to reach the
+                // main-actor-isolated panel update.
+                MainActor.assumeIsolated { self?.applyMouseAcceptance(for: newStatus) }
             }
             .store(in: &cancellables)
     }
@@ -82,16 +87,20 @@ final class FloatingWindow {
         }
     }
 
-    func hide(completion: (() -> Void)? = nil) {
+    func hide(completion: (@Sendable () -> Void)? = nil) {
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.22
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            self?.panel.orderOut(nil)
-            // Reset expansion so the next show() starts collapsed.
-            self?.model.isExpanded = false
-            completion?()
+            // NSAnimationContext fires the completion handler on the main thread,
+            // so assume main-actor isolation to touch the panel + model.
+            MainActor.assumeIsolated {
+                self?.panel.orderOut(nil)
+                // Reset expansion so the next show() starts collapsed.
+                self?.model.isExpanded = false
+                completion?()
+            }
         })
     }
 

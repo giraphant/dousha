@@ -42,11 +42,11 @@ let package = Package(
             name: "Dousha",
             dependencies: ["DoubaoASR", "SonioxASR", "ASRSupport"],
             path: "Sources/Dousha",
-            // dousha: vendored SpeechMore code was written under Swift 5
-            // concurrency semantics. Pinned to .v5 for the baseline so the
-            // upstream builds clean; Task 11 rewrites AppDelegate and can
-            // drop this and adopt Swift 6 strict concurrency.
-            swiftSettings: [.swiftLanguageMode(.v5)],
+            // dousha (QUA-159): adopts Swift 6 strict concurrency. The UI /
+            // controller layer (AppDelegate, FloatingWindow, FloatingHUDModel,
+            // AppFocusTracker, the hotkey dispatcher) is @MainActor; the event-tap
+            // monitors are main-runloop-confined @unchecked Sendable; Preferences
+            // is UserDefaults-backed @unchecked Sendable. No more .v5 fallback.
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedFramework("Cocoa"),

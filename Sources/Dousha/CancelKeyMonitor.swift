@@ -17,19 +17,22 @@ import TalkerCommonSync
 /// CFRunLoop the tap was added to). Callers should ensure it's safe to query
 /// from that context; in Dousha it reads a `Lock<Bool>` mirror of AppDelegate's
 /// recording state.
-final class CancelKeyMonitor {
+/// `@unchecked Sendable`: like `HotkeyMonitor`, the tap is installed on the main
+/// run loop, so the callback and the mutable tap state run on the main thread; the
+/// annotation lets the callback capture `self` into the `@Sendable` main hop.
+final class CancelKeyMonitor: @unchecked Sendable {
     /// Virtual keycode we listen for, or nil if cancel is disabled (in which
     /// case `start()` is a no-op and the tap is never installed at all).
     private let keyCode: UInt16?
     private let shouldFire: @Sendable () -> Bool
-    private let onFire: () -> Void
+    private let onFire: @MainActor () -> Void
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
     init(keyCode: UInt16?,
          shouldFire: @escaping @Sendable () -> Bool,
-         onFire: @escaping () -> Void) {
+         onFire: @escaping @MainActor () -> Void) {
         self.keyCode = keyCode
         self.shouldFire = shouldFire
         self.onFire = onFire
@@ -110,7 +113,7 @@ final class CancelKeyMonitor {
 
         DispatchQueue.main.async { [weak self] in
             doushaLog("[Dousha] CancelKeyMonitor: firing onFire (kc=\(kc))")
-            self?.onFire()
+            MainActor.assumeIsolated { self?.onFire() }
         }
         return nil
     }
@@ -119,12 +122,12 @@ final class CancelKeyMonitor {
 /// One-shot CGEvent tap that captures the next keyDown of any key and reports
 /// its keycode. Used by the Settings "Record" button for the cancel hotkey.
 /// Mirrors `HotkeyRecorder` but listens to keyDown instead of flagsChanged.
-final class CancelKeyRecorder {
+final class CancelKeyRecorder: @unchecked Sendable {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var onCaptured: ((UInt16) -> Void)?
+    private var onCaptured: (@MainActor (UInt16) -> Void)?
 
-    func start(onCaptured: @escaping (UInt16) -> Void) {
+    func start(onCaptured: @escaping @MainActor (UInt16) -> Void) {
         guard eventTap == nil else { return }
         self.onCaptured = onCaptured
 
@@ -160,8 +163,10 @@ final class CancelKeyRecorder {
         let kc = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let captured = kc
         DispatchQueue.main.async { [weak self] in
-            self?.onCaptured?(captured)
-            self?.teardown()
+            MainActor.assumeIsolated {
+                self?.onCaptured?(captured)
+                self?.teardown()
+            }
         }
         return nil
     }

@@ -3,6 +3,10 @@ import AppKit
 /// Tracks the frontmost application, ignoring activations of Dousha itself.
 /// Designed so the floating HUD's "left side" can display where dictated text
 /// will go, even while the user is interacting with Dousha's Settings window.
+///
+/// `@MainActor`: AppKit-only (NSWorkspace), its `onChange` sink writes the HUD
+/// model, and its activation observer is delivered on `.main`.
+@MainActor
 final class AppFocusTracker {
     struct Focus: Equatable {
         let icon: NSImage
@@ -13,7 +17,10 @@ final class AppFocusTracker {
     var onChange: ((Focus?) -> Void)?
 
     private let selfBundleId: String
-    private var observer: NSObjectProtocol?
+    // nonisolated(unsafe): written only on the main actor (in `start()`) and read
+    // only from the nonisolated `deinit`, which has exclusive access — so the
+    // unaudited-Sendable token can be removed during teardown.
+    private nonisolated(unsafe) var observer: NSObjectProtocol?
 
     init(selfBundleId: String) {
         self.selfBundleId = selfBundleId
@@ -34,11 +41,15 @@ final class AppFocusTracker {
             queue: .main
         ) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            self?.applyActivation(
-                bundleId: app.bundleIdentifier,
-                name: app.localizedName ?? app.bundleIdentifier ?? "",
-                icon: app.icon ?? NSImage()
-            )
+            // Delivered on `.main` (queue above), so assume main-actor isolation
+            // to reach the @MainActor tracker state.
+            MainActor.assumeIsolated {
+                self?.applyActivation(
+                    bundleId: app.bundleIdentifier,
+                    name: app.localizedName ?? app.bundleIdentifier ?? "",
+                    icon: app.icon ?? NSImage()
+                )
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 import SwiftUI
 import ASRSupport
 
+@MainActor
 final class FloatingHUDModel: ObservableObject {
     @Published var status: RecordingStatus = .idle
     @Published var focus: AppFocusTracker.Focus?
@@ -65,7 +66,10 @@ final class FloatingHUDModel: ObservableObject {
     private func startRevealTimerIfNeeded() {
         guard revealTimer == nil, revealProgress < Double(target.combined.count) else { return }
         let t = Timer(timeInterval: Self.revealFrameInterval, repeats: true) { [weak self] _ in
-            self?.advanceReveal()
+            // The timer is scheduled on RunLoop.main, so its block always fires on
+            // the main actor — assume the isolation rather than hop (preserves the
+            // exact per-frame cadence the reveal animation depends on).
+            MainActor.assumeIsolated { self?.advanceReveal() }
         }
         RunLoop.main.add(t, forMode: .common)
         revealTimer = t
@@ -420,7 +424,7 @@ struct FloatingHUDView: View {
 /// Carries the full (unclamped) transcript text height up from the off-screen
 /// measurer so the card can size itself.
 private struct TranscriptHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static var defaultValue: CGFloat { 0 }
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
