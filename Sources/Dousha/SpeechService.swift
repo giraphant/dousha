@@ -185,10 +185,6 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         lastText = ""
     }
 
-    func retranscribeLastRecording(parentTraceId: String?, completion: @escaping @Sendable (String?) -> Void) {
-        completion(nil)  // Apple backend doesn't save WAVs
-    }
-
     static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
         guard let channelData = buffer.floatChannelData?[0] else { return 0 }
         let frameLength = Int(buffer.frameLength)

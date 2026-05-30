@@ -12,11 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
 
-    private var speech: SpeechBackend = SpeechBackendFactory.make(
-        engine: Preferences.shared.engine,
-        language: Preferences.shared.language
-    )
+    // Rebuilt from preferences at the start of each recording (see handleStart),
+    // so engine selection / multi-engine active set / routing slots / Soniox key
+    // / language always reflect current settings.
+    private var speech: SpeechBackend = MultiEngineBackend.fromPreferences(Preferences.shared)
     private let injector = TextInjector()
+    // Settings "test connection" button still uses LLMRefiner (see SettingsWindow).
+    // The dictation inject path uses TextRefiner instead (see refineAndInject).
     private let llm = LLMRefiner()
     private let prefs = Preferences.shared
     private let launchAtLogin: LaunchAtLoginManaging = LaunchAtLoginController()
@@ -44,11 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var nextStartAllowedAt: Date?
     private static let cancelTeardownGuard: TimeInterval = 0.25
     private let focusTracker = AppFocusTracker(selfBundleId: "com.dousha.app")
-    private let incompleteDetector = IncompleteTranscriptDetector()
-    /// Set when a Soniox API-key change arrives while a session is live, so the
-    /// stale-key rebuild can't run immediately. Consumed at the next start so
-    /// the next recording always uses a backend built from the current key.
-    private var sonioxBackendDirty = false
 
     private var status: RecordingStatus = .idle {
         didSet {
@@ -122,8 +119,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: .doushaLLMEnabledChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleEngineRoutingChanged),
+            name: .doushaEngineRoutingChanged,
+            object: nil
+        )
 
-        if prefs.engine == .doubao { DoubaoCredentialStore.shared.warmup() }
+        if prefs.activeEngines.contains(.doubao) {
+            DoubaoCredentialStore.shared.warmup()
+        }
     }
 
     /// If the app is relaunched while already running (Finder/Spotlight), bring
@@ -182,7 +187,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         // 引擎 — 子菜单，标题右侧带当前选中值
-        let engineItem = NSMenuItem(title: "引擎：\(prefs.engine.displayName)",
+        let engineSummary = prefs.activeEngines.count > 1
+            ? prefs.activeEngines.map(\.displayName).joined(separator: "+")
+            : prefs.engine.displayName
+        let engineItem = NSMenuItem(title: "引擎：\(engineSummary)",
                                     action: nil, keyEquivalent: "")
         engineItem.image = menuIcon("waveform")
         let engineMenu = NSMenu()
@@ -192,7 +200,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                   keyEquivalent: "")
             item.target = self
             item.representedObject = e.rawValue
-            if e == prefs.engine { item.state = .on }
+            // Check every active engine; clicking one collapses to single-engine.
+            if prefs.activeEngines.contains(e) { item.state = .on }
             engineMenu.addItem(item)
         }
         engineMenu.addItem(.separator())
@@ -229,22 +238,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         llmItem.image = menuIcon("sparkles")
         llmItem.target = self
         menu.addItem(llmItem)
-
-        // 重新转写 — 漏检时的手动补救入口
-        let retranscribeItem = NSMenuItem(
-            title: "重新转写",
-            action: #selector(retranscribeLastRecording),
-            keyEquivalent: ""
-        )
-        retranscribeItem.image = menuIcon("arrow.clockwise")
-        retranscribeItem.target = self
-        // Disable when the backend has no replayable recording (no saved WAV,
-        // or the engine doesn't support retranscribe — e.g. Apple), or when a
-        // session is live.
-        let canRetry = speech.canRetranscribe
-            && (status == .idle || isErrorStatus(status))
-        retranscribeItem.isEnabled = canRetry
-        menu.addItem(retranscribeItem)
 
         menu.addItem(.separator())
 
@@ -286,10 +279,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let raw = sender.representedObject as? String,
               let e = Engine(rawValue: raw),
               e != prefs.engine else { return }
+        // Menu engine pick = single-engine quick switch (collapses the routing
+        // slots + active set to this one engine). Multi-engine routing is set up
+        // in Settings. The backend itself is rebuilt at the next handleStart.
         prefs.engine = e
-        speech = SpeechBackendFactory.make(engine: e, language: prefs.language)
-        sonioxBackendDirty = false
-        if e == .doubao { DoubaoCredentialStore.shared.warmup() }
+        if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
         rebuildMenu()
     }
 
@@ -303,38 +297,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task { @MainActor in
             await DoubaoCredentialStore.shared.reset()
-            if prefs.engine == .doubao { DoubaoCredentialStore.shared.warmup() }
+            if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
         }
     }
 
     @objc private func toggleLLM() {
         prefs.llmEnabled.toggle()
         rebuildMenu()
-    }
-
-    @objc private func retranscribeLastRecording() {
-        guard status == .idle || isErrorStatus(status) else {
-            doushaLog("[Dousha] retranscribe menu rejected — busy (status=\(status))")
-            return
-        }
-        doushaLog("[Dousha] retranscribe menu fired")
-        status = .transcribing
-        // Clear any leftover transcript from the previous session — the HUD is
-        // visible during .transcribing, so without this it would show the last
-        // recording's final text while this manual retry runs.
-        hudModel.resetTranscript()
-        speech.retranscribeLastRecording { [weak self] text in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-                    doushaLog("[Dousha] retranscribe returned empty — back to idle")
-                    self.status = .idle
-                    return
-                }
-                self.hudModel.setFinalTranscript(text)
-                self.refineAndInject(text)
-            }
-        }
     }
 
     @objc private func handleLLMEnabledChanged() {
@@ -428,19 +397,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startCancelKeyMonitor()
     }
 
+    @objc private func handleEngineRoutingChanged() {
+        // Routing slots / primary language changed in Settings. Refresh the menu
+        // (engine summary, checkmarks, language) and warm Doubao if now active.
+        if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
+        rebuildMenu()
+    }
+
     @objc private func handleSonioxConfigChanged() {
-        // Rebuild the backend so a changed API key takes effect; only matters
-        // while Soniox is the active engine (the factory reads the key at
-        // construction).
-        guard prefs.engine == .soniox else { return }
-        // A session is live — can't stomp it. Defer the rebuild to the next
-        // start so the next recording doesn't reuse the stale-key backend.
-        guard status == .idle || isErrorStatus(status) else {
-            sonioxBackendDirty = true
-            return
-        }
-        speech = SpeechBackendFactory.make(engine: .soniox, language: prefs.language)
-        sonioxBackendDirty = false
+        // The backend is rebuilt from preferences at the start of each recording,
+        // so a changed Soniox API key is picked up automatically next time.
         rebuildMenu()
     }
 
@@ -515,12 +481,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         nextStartAllowedAt = nil
-        // A Soniox key change arrived mid-session and the rebuild was deferred;
-        // apply it now so this recording uses the current key.
-        if sonioxBackendDirty, prefs.engine == .soniox {
-            speech = SpeechBackendFactory.make(engine: .soniox, language: prefs.language)
-            sonioxBackendDirty = false
-        }
+        // Rebuild from current preferences so engine selection, the multi-engine
+        // active set / routing slots, the Soniox API key, and the language all
+        // reflect the latest settings for this recording. Backends are cheap to
+        // construct (no mic/WS opens until start()).
+        speech = MultiEngineBackend.fromPreferences(prefs)
         status = .recording
         doushaLog("[Dousha] AppDelegate.handleStart: engine=\(prefs.engine.rawValue) language=\(prefs.language)")
         speech.setLanguage(prefs.language)
@@ -588,50 +553,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                let detectorLanguage = LanguageMenu.detectorLanguage(for: self.prefs.engine, selectedLanguage: self.prefs.language)
-                let decision = self.incompleteDetector.decision(for: result, language: detectorLanguage)
-                let traceId = result.traceId ?? "none"
-                doushaLog("[Dousha] traceId=\(traceId) detector incomplete=\(decision.isIncomplete) stale=\(decision.staleLastTranscript) segmentGap=\(decision.largeSegmentGap) charFloor=\(decision.belowCharFloor) cps=\(String(format: "%.2f", decision.charsPerSecond)) text.len=\(text.count) dur=\(String(format: "%.1f", result.audioDuration))s lastTranscriptAge=\(result.lastTranscriptAge.map { String(format: "%.1f", $0) } ?? "nil") lastRespAge=\(result.lastResponseAge.map { String(format: "%.1f", $0) } ?? "nil") maxSegmentGap=\(result.maxSegmentGap.map { String(format: "%.1f", $0) } ?? "nil")")
-
-                // Heuristic: did the stream probably get truncated? If so, hold off
-                // injection and re-transcribe from the saved WAV.
-                if decision.isIncomplete && self.prefs.smartRetranscribeEnabled {
-                    doushaLog("[Dousha] traceId=\(traceId) heuristic flagged incomplete originalText.len=\(text.count) — triggering retranscribe")
-                    // Keep HUD in transcribing state — don't drop to idle while retrying.
-                    self.speech.retranscribeLastRecording(parentTraceId: traceId) { retried in
-                        DispatchQueue.main.async {
-                            let retriedText = (retried?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-                            let finalText: String
-                            // Only adopt the retry if it actually recovered more
-                            // text. The retranscribe path itself can be truncated
-                            // (server drops, our own finish-wait expiring early)
-                            // and in those cases we'd be replacing a good original
-                            // transcript with a shorter, worse one.
-                            if let r = retriedText, r.count > text.count {
-                                doushaLog("[Dousha] traceId=\(traceId) retranscribe adopted original.len=\(text.count) retried.len=\(r.count)")
-                                finalText = r
-                            } else if let r = retriedText {
-                                doushaLog("[Dousha] traceId=\(traceId) retranscribe shorter original.len=\(text.count) retried.len=\(r.count) — keeping original")
-                                finalText = text
-                            } else {
-                                doushaLog("[Dousha] traceId=\(traceId) retranscribe empty — falling back to original len=\(text.count)")
-                                finalText = text
-                            }
-                            guard !finalText.isEmpty else {
-                                self.status = .idle
-                                return
-                            }
-                            self.hudModel.setFinalTranscript(finalText)
-                            self.refineAndInject(finalText)
-                        }
-                    }
-                    return
-                }
-
-                if decision.isIncomplete {
-                    doushaLog("[Dousha] traceId=\(traceId) heuristic flagged incomplete but 智能重录 disabled — using original len=\(text.count)")
-                }
-
                 guard !text.isEmpty else {
                     self.status = .idle
                     return
@@ -643,21 +564,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refineAndInject(_ text: String) {
-        if self.prefs.llmEnabled && self.llm.isConfigured {
-            self.llm.refine(text) { result in
+        let refiner = TextRefiner(baseURL: prefs.llmBaseURL,
+                                  apiKey: prefs.llmAPIKey,
+                                  model: prefs.llmModel)
+
+        // Off: LLM disabled or unconfigured — paste raw, done.
+        guard prefs.llmEnabled, refiner.isConfigured else {
+            injectAndFinish(text)
+            return
+        }
+
+        switch prefs.refineMode {
+        case .immediate:
+            // Wait for the polished text, then paste it (fall back to raw on failure).
+            Task {
+                let refined = await refiner.refine(text)
                 DispatchQueue.main.async {
-                    let final: String
-                    switch result {
-                    case .success(let refined): final = refined
-                    case .failure(let err):
-                        doushaLog("[Dousha] LLM refine failed: \(err.localizedDescription)")
-                        final = text
-                    }
-                    self.injectAndFinish(final)
+                    self.injectAndFinish(refined ?? text)
                 }
             }
-        } else {
-            self.injectAndFinish(text)
+
+        case .deferred:
+            // Paste raw immediately; quietly replace the clipboard with the
+            // polished text when it arrives. injectAndFinish already left raw on
+            // the clipboard, so the user can re-paste to pick up the refined copy.
+            injectAndFinish(text)
+            refiner.refineLater(text) { refined in
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(refined, forType: .string)
+                doushaLog("[Dousha] deferred refine wrote refined text to clipboard (len=\(refined.count))")
+            }
         }
     }
 

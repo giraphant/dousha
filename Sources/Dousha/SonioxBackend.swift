@@ -34,20 +34,4 @@ final class SonioxBackend: SpeechBackend {
     func cancel() {
         asr.cancel()
     }
-
-    var canRetranscribe: Bool {
-        FileManager.default.fileExists(atPath: SonioxASR.savedAudioURL.path)
-    }
-
-    func retranscribeLastRecording(parentTraceId: String?, completion: @escaping @Sendable (String?) -> Void) {
-        let url = SonioxASR.savedAudioURL
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            completion(nil)
-            return
-        }
-        Task {
-            let text = await asr.retranscribe(wavURL: url, parentTraceId: parentTraceId)
-            DispatchQueue.main.async { completion(text) }
-        }
-    }
 }

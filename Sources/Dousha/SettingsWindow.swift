@@ -73,14 +73,12 @@ struct SettingsView: View {
     @State private var showDockIcon: Bool
     @State private var showMenuBarIcon: Bool
 
-    // 智能增强 — 自动重录
-    @State private var smartRetranscribeEnabled: Bool = Preferences.shared.smartRetranscribeEnabled
-
     // 智能增强 — 润色
     @State private var llmEnabled: Bool = Preferences.shared.llmEnabled
     @State private var baseURL: String = Preferences.shared.llmBaseURL
     @State private var apiKey:  String = Preferences.shared.llmAPIKey
     @State private var model:   String = Preferences.shared.llmModel
+    @State private var refineMode: RefineMode = Preferences.shared.refineMode
     @State private var status: String = ""
     @State private var statusIsError: Bool = false
     @State private var isTesting: Bool = false
@@ -91,6 +89,16 @@ struct SettingsView: View {
     @State private var sonioxStatus: String = ""
     @State private var sonioxStatusIsError: Bool = false
     @State private var isTestingSoniox: Bool = false
+
+    // 听写模型 — 多引擎路由 (QUA-145). The parallel-active set is derived as the
+    // union of these three slots, so there's no separate "active" control.
+    @State private var chineseEngine: Engine = Preferences.shared.chineseEngine
+    @State private var englishEngine: Engine = Preferences.shared.englishEngine
+    @State private var mixedEngine: Engine = Preferences.shared.mixedEngine
+    // Primary language steers which slot is the primary engine (HUD source).
+    // Settable here because auto-detect engines (豆包/Soniox) only offer 自动 in
+    // the menu bar's language list.
+    @State private var primaryLanguage: Language = Language(rawValue: Preferences.shared.language) ?? .zh_CN
 
     // 听写模型 — 词库
     @State private var glossaryEnabled: Bool = Preferences.shared.glossaryEnabled
@@ -213,8 +221,48 @@ struct SettingsView: View {
 
     // MARK: - 听写模型
 
+    @ViewBuilder private func engineOptions() -> some View {
+        ForEach(Engine.allCases, id: \.self) { e in
+            Text(e.displayName).tag(e)
+        }
+    }
+
+    /// Persist the three slots and recompute the active set as their union.
+    private func persistRouting() {
+        Preferences.shared.chineseEngine = chineseEngine
+        Preferences.shared.englishEngine = englishEngine
+        Preferences.shared.mixedEngine = mixedEngine
+        let active = Engine.allCases.filter {
+            $0 == chineseEngine || $0 == englishEngine || $0 == mixedEngine
+        }
+        Preferences.shared.activeEngines = active
+        NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
+    }
+
     private var modelPane: some View {
         Form {
+            Section("引擎路由") {
+                Picker("主要语言", selection: $primaryLanguage) {
+                    ForEach(Language.allCases, id: \.self) { lang in
+                        Text(lang.displayName).tag(lang)
+                    }
+                }
+                .onChange(of: primaryLanguage) { _, newValue in
+                    Preferences.shared.language = newValue.rawValue
+                    NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
+                }
+                Picker("中文", selection: $chineseEngine) { engineOptions() }
+                    .onChange(of: chineseEngine) { _, _ in persistRouting() }
+                Picker("英文", selection: $englishEngine) { engineOptions() }
+                    .onChange(of: englishEngine) { _, _ in persistRouting() }
+                Picker("中英混合", selection: $mixedEngine) { engineOptions() }
+                    .onChange(of: mixedEngine) { _, _ in persistRouting() }
+                Text("按语言把识别结果路由到对应引擎。用到的引擎会在录音时并行运行——例如「中文→豆包、英文→Soniox」就会同时跑两家，停录后按整段语言占比挑一家的结果。三个都选同一个引擎即单引擎、零额外开销。主要语言（菜单「语言」）对应的引擎为主引擎，其实时字幕显示在悬浮窗。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("Soniox") {
                 Picker("模式", selection: $sonioxMode) {
                     Text("实时").tag(SonioxMode.realtime)
@@ -376,6 +424,18 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                         .disableAutocorrection(true)
                 }
+                LabeledContent("校正模式") {
+                    Picker("", selection: $refineMode) {
+                        ForEach(RefineMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .onChange(of: refineMode) { _, newValue in
+                        Preferences.shared.refineMode = newValue
+                    }
+                }
                 if !status.isEmpty {
                     Text(status)
                         .font(.callout)
@@ -396,16 +456,6 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("自动重录") {
-                Toggle("检测到可能漏转写时，自动用上一段录音重新转写", isOn: $smartRetranscribeEnabled)
-                    .onChange(of: smartRetranscribeEnabled) { _, newValue in
-                        Preferences.shared.smartRetranscribeEnabled = newValue
-                    }
-                Text("Beta 测试中，默认关闭。关闭后豆沙直接使用首次转写结果；菜单里的「重新转写」仍可手动使用。")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .formStyle(.grouped)
     }
@@ -593,4 +643,7 @@ extension Notification.Name {
     static let doushaHotkeyConfigChanged = Notification.Name("DoushaHotkeyConfigChanged")
     static let doushaSonioxConfigChanged = Notification.Name("DoushaSonioxConfigChanged")
     static let doushaLLMEnabledChanged = Notification.Name("DoushaLLMEnabledChanged")
+    /// Posted when the engine routing slots / primary language change in Settings,
+    /// so the menu bar can rebuild to reflect the new active set / primary.
+    static let doushaEngineRoutingChanged = Notification.Name("DoushaEngineRoutingChanged")
 }

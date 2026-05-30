@@ -31,16 +31,6 @@ final class AppleSpeechBackendCancelTests: XCTestCase {
         wait(for: [exp], timeout: 1.0)
     }
 
-    func testRetranscribe_isNotSupportedAndReturnsNil() {
-        let backend = AppleSpeechBackend(language: "en-US")
-        let exp = expectation(description: "retranscribe completion")
-        backend.retranscribeLastRecording { result in
-            XCTAssertNil(result)
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 1.0)
-    }
-
     // MARK: - protocol conformance
 
     func testConformsToSpeechBackend() {

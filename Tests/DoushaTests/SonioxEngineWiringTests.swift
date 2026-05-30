@@ -19,8 +19,4 @@ final class SonioxEngineWiringTests: XCTestCase {
         XCTAssertTrue(backend is SonioxBackend)
     }
 
-    func test_appleBackendCannotRetranscribeByDefault() {
-        let backend = SpeechBackendFactory.make(engine: .apple, language: "en-US")
-        XCTAssertFalse(backend.canRetranscribe)
-    }
 }

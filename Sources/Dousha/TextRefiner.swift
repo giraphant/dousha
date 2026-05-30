@@ -1,12 +1,16 @@
 import Foundation
 import TalkerCommonSync
 
-final class LLMRefiner {
-    private let prefs = Preferences.shared
+/// Independent, best-effort speech-to-text post-processor. A value type built
+/// per-use from Preferences. On any failure `refine` returns nil so the caller
+/// keeps the user's raw dictation — refinement must never lose text.
+struct TextRefiner: Sendable {
+    let baseURL: String
+    let apiKey: String
+    let model: String
 
     var isConfigured: Bool {
-        let p = Preferences.shared
-        return !p.llmAPIKey.isEmpty && !p.llmBaseURL.isEmpty && !p.llmModel.isEmpty
+        !apiKey.isEmpty && !baseURL.isEmpty && !model.isEmpty
     }
 
     static let systemPrompt = """
@@ -41,65 +45,67 @@ final class LLMRefiner {
     Return only the (possibly identical) corrected text.
     """
 
-    /// Call the configured chat-completions endpoint. On any failure the original text is returned via the success path
-    /// (refinement is best-effort — we never want to lose the user's dictation).
-    func refine(_ text: String, completion: @escaping (Result<String, Error>) -> Void) {
-        guard isConfigured else {
-            completion(.success(text))
-            return
-        }
-        guard let url = LLMRefiner.chatCompletionsURL(base: prefs.llmBaseURL) else {
-            completion(.failure(NSError(domain: "LLMRefiner", code: -1,
-                                        userInfo: [NSLocalizedDescriptionKey: "Invalid base URL"])))
-            return
-        }
+    /// Immediate mode: await the LLM and return polished text, or nil on any
+    /// failure (not configured, HTTP error, empty output).
+    func refine(_ text: String) async -> String? {
+        guard isConfigured, let url = Self.chatCompletionsURL(base: baseURL) else { return nil }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 20
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(prefs.llmAPIKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "model": prefs.llmModel,
+            "model": model,
             "temperature": 0,
             "messages": [
-                ["role": "system", "content": LLMRefiner.systemPrompt],
+                ["role": "system", "content": Self.systemPrompt],
                 ["role": "user",   "content": text]
             ]
         ])
 
-        URLSession.shared.dataTask(with: req) { data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                completion(.failure(NSError(domain: "LLMRefiner", code: http.statusCode,
-                                            userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode): \(body)"])))
-                return
+                doushaLog("[TextRefiner] HTTP \(http.statusCode)")
+                return nil
             }
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let choices = json["choices"] as? [[String: Any]],
                   let first = choices.first,
                   let message = first["message"] as? [String: Any],
                   let content = message["content"] as? String else {
-                completion(.failure(NSError(domain: "LLMRefiner", code: -2,
-                                            userInfo: [NSLocalizedDescriptionKey: "Invalid response payload"])))
-                return
+                doushaLog("[TextRefiner] invalid response payload")
+                return nil
             }
-            let cleaned = LLMRefiner.cleanLLMOutput(content)
-            completion(.success(cleaned.isEmpty ? text : cleaned))
-        }.resume()
+            let cleaned = Self.cleanLLMOutput(content)
+            return cleaned.isEmpty ? nil : cleaned
+        } catch {
+            doushaLog("[TextRefiner] request failed: \(error.localizedDescription)")
+            return nil
+        }
     }
 
-    func test(baseURL: String, apiKey: String, model: String,
-              completion: @escaping (Result<String, Error>) -> Void) {
-        guard let url = LLMRefiner.chatCompletionsURL(base: baseURL) else {
-            completion(.failure(NSError(domain: "LLMRefiner", code: -1,
-                                        userInfo: [NSLocalizedDescriptionKey: "Invalid base URL"])))
-            return
+    /// Deferred mode: returns the original text immediately for the caller to
+    /// paste now, and refines in the background. `completion` fires on the main
+    /// queue with the polished text ONLY when it differs from the original
+    /// (callers use it to silently update the clipboard). If refinement fails or
+    /// is a no-op, completion never fires.
+    @discardableResult
+    func refineLater(_ text: String, completion: @escaping @Sendable (String) -> Void) -> String {
+        Task {
+            guard let refined = await refine(text), refined != text else { return }
+            DispatchQueue.main.async { completion(refined) }
+        }
+        return text
+    }
+
+    /// Settings "test connection" probe. Sends a trivial prompt; success means
+    /// the endpoint/key/model are usable. Migrated from LLMRefiner.test.
+    func test() async -> Result<String, Error> {
+        guard let url = Self.chatCompletionsURL(base: baseURL) else {
+            return .failure(NSError(domain: "TextRefiner", code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Invalid base URL"]))
         }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -110,29 +116,26 @@ final class LLMRefiner {
             "model": model,
             "temperature": 0,
             "messages": [
-                ["role": "system", "content": LLMRefiner.systemPrompt],
+                ["role": "system", "content": Self.systemPrompt],
                 ["role": "user",   "content": "ping"]
             ]
         ])
-
-        URLSession.shared.dataTask(with: req) { data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                completion(.failure(NSError(domain: "LLMRefiner", code: http.statusCode,
-                                            userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode): \(body)"])))
-                return
+                let body = String(data: data, encoding: .utf8) ?? ""
+                return .failure(NSError(domain: "TextRefiner", code: http.statusCode,
+                                        userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode): \(body)"]))
             }
-            completion(.success("OK"))
-        }.resume()
+            return .success("OK")
+        } catch {
+            return .failure(error)
+        }
     }
 
-    // MARK: - Helpers
+    // MARK: - Helpers (pure, unit-tested)
 
-    private static func chatCompletionsURL(base: String) -> URL? {
+    static func chatCompletionsURL(base: String) -> URL? {
         let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return nil }
         if trimmed.hasSuffix("/chat/completions") {
@@ -144,7 +147,6 @@ final class LLMRefiner {
 
     static func cleanLLMOutput(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Strip surrounding quotes / code fences if the model insisted on them.
         if s.hasPrefix("```") {
             if let end = s.range(of: "```", options: .backwards), end.lowerBound > s.startIndex {
                 let firstNL = s.firstIndex(of: "\n") ?? s.startIndex
@@ -153,7 +155,7 @@ final class LLMRefiner {
             }
         }
         if (s.hasPrefix("\"") && s.hasSuffix("\"")) ||
-           (s.hasPrefix("“") && s.hasSuffix("”")) ||
+           (s.hasPrefix("\u{201C}") && s.hasSuffix("\u{201D}")) ||
            (s.hasPrefix("「") && s.hasSuffix("」")) {
             s = String(s.dropFirst().dropLast())
         }
