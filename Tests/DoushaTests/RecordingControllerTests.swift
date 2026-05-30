@@ -182,3 +182,46 @@ final class RecordingControllerStartTests: XCTestCase {
         XCTAssertEqual(spy.madeBackends.count, backendsAfterCancel + 1)
     }
 }
+
+@MainActor
+final class RecordingControllerCallbackTests: XCTestCase {
+
+    func testPartialDuringRecording_updatesHUD() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        backend.onAudioLevel?(0.5)
+        backend.onPartial?(PartialTranscript(finalText: "", interimText: "hi"))
+        let exp = expectation(description: "main hop")
+        DispatchQueue.main.async { exp.fulfill() }
+        wait(for: [exp], timeout: 1)
+        XCTAssertEqual(spy.levels, [0.5])
+        XCTAssertEqual(spy.partials.map(\.combined), ["hi"])
+    }
+
+    func testPartialAfterLeavingRecording_isDropped() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        c.testHook_transition(to: .transcribing)   // leave .recording without needing stop()
+        backend.onPartial?(PartialTranscript(finalText: "", interimText: "late"))
+        let exp = expectation(description: "main hop")
+        DispatchQueue.main.async { exp.fulfill() }
+        wait(for: [exp], timeout: 1)
+        XCTAssertTrue(spy.partials.isEmpty, "partials after .recording must be dropped")
+    }
+
+    func testError_transitionsToError_andReleasesBackend() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        backend.onError?(NSError(domain: "t", code: 1,
+                                 userInfo: [NSLocalizedDescriptionKey: "boom"]))
+        let exp = expectation(description: "main hop")
+        DispatchQueue.main.async { exp.fulfill() }
+        wait(for: [exp], timeout: 1)
+        XCTAssertEqual(c.status, .error("boom"))
+        XCTAssertTrue(backend.stopCalled, "error must release the mic via stop")
+        XCTAssertEqual(spy.resetTranscriptCount, 2)  // once at start, once on error
+    }
+}

@@ -125,8 +125,53 @@ final class RecordingController {
     }
 
     private func installBackendCallbacks(_ backend: SpeechBackend, generation myGen: UInt64) {
-        // Completed in Task 3. Stub for now.
-        backend.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
+        backend.start(
+            onPartial: { [weak self] partial in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self = self, self.generation == myGen else { return }
+                        // Drop late partials once we've left .recording so a batch
+                        // dispatched just before stop() can't clobber the final.
+                        guard self.status == .recording else { return }
+                        self.env.updateHUDTranscript(partial)
+                    }
+                }
+            },
+            onAudioLevel: { [weak self] level in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self = self, self.generation == myGen else { return }
+                        self.env.pushHUDLevel(level)
+                    }
+                }
+            },
+            onError: { [weak self] error in
+                doushaLog("[RecordingController] recognition error: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self = self, self.generation == myGen else {
+                            doushaLog("[RecordingController] dropping stale error")
+                            return
+                        }
+                        self.transitionToError(error.localizedDescription)
+                    }
+                }
+            }
+        )
+    }
+
+    private func transitionToError(_ message: String) {
+        // Idempotent: a flood of cascading server errors must not keep re-deferring
+        // the idle reset.
+        if case .error = status { return }
+        transition(to: .error(message))
+        env.resetHUDTranscript()
+        // Release mic / socket so the next start() isn't stacked on a live session.
+        backend?.stop { _ in }
+        env.scheduleAfter(Self.errorAutoReset) { [weak self] in
+            guard let self = self, self.isErrorStatus(self.status) else { return }
+            self.transition(to: .idle)
+        }
     }
 
     func cancel() {
