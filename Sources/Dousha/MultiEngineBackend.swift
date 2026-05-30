@@ -25,7 +25,7 @@ import TalkerCommonSync
 /// `hub` is injected (nil in unit tests, which exercise routing with canned
 /// mock backends and no real capture).
 final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
-    private let entries: [(engine: Engine, backend: SpeechBackend)]
+    private let entries: [(engine: Engine, backend: PushCaptureEngine)]
     private let primary: Engine
     private let router: LanguageRouter
     private let hub: AudioTapHub?
@@ -61,7 +61,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     ///   - primary: the HUD-driving engine; forced into `entries` if missing.
     ///   - router: language router whose slots index into `entries`.
     ///   - hub: the shared capture hub, or nil to skip real capture (tests).
-    init(entries: [(engine: Engine, backend: SpeechBackend)],
+    init(entries: [(engine: Engine, backend: PushCaptureEngine)],
          primary: Engine,
          router: LanguageRouter,
          hub: AudioTapHub? = nil) {
@@ -89,8 +89,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
 
         // One tap, fanned out to each engine's sink: int16 PCM for Doubao/Soniox,
         // native buffers for Apple. The shared WAV is written whenever a PCM
-        // engine is active (it's the Soniox-async upload payload + future
-        // retranscribe side recording).
+        // engine is active (it's the Soniox-async upload payload).
         var pcmSinks: [AudioTapHub.PCMSink] = []
         var bufferSinks: [AudioTapHub.BufferSink] = []
         for entry in entries {
@@ -98,6 +97,12 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                 pcmSinks.append { p.ingest($0) }
             } else if let b = entry.backend as? BufferCaptureEngine {
                 bufferSinks.append { b.ingest($0) }
+            } else {
+                // Every shipping engine is either PCM (Doubao/Soniox) or Buffer
+                // (Apple). A PushCaptureEngine that is neither would silently get
+                // NO audio — an empty transcript with no error. Make it loud.
+                assertionFailure("\(entry.engine) is a PushCaptureEngine but neither PCMCaptureEngine nor BufferCaptureEngine — it would receive no audio")
+                doushaLog("[MultiEngine] \(entry.engine.rawValue) has no audio sink — check its capture protocol conformance")
             }
         }
         let wantsWAV = entries.contains { $0.engine == .doubao || $0.engine == .soniox }
@@ -115,30 +120,26 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                onError: @escaping @Sendable (Error) -> Void) {
         onlineSignal.reset()   // QUA-153: fresh language signal per recording
         guard let hub else {
-            // Hub-less path (unit tests / degenerate): each backend self-reports.
-            for entry in entries {
-                startLeaf(entry, onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError)
+            // Hub-less path (unit tests only — production always has a hub). Drive
+            // the SAME push protocol, but block until every engine has begun +
+            // opened so callers observe a fully-started state synchronously
+            // (mirrors the old synchronous start the mock tests rely on). The
+            // semaphore is safe here precisely because this branch never runs in
+            // production and the mock backends do no real async work.
+            let sem = DispatchSemaphore(value: 0)
+            Task {
+                await self.beginAllSessions(onPartial: onPartial, onError: onError)
+                for entry in self.entries { entry.backend.openStream() }
+                sem.signal()
             }
+            sem.wait()
             return
         }
 
-        let entries = self.entries
-        let primary = self.primary
         Task {
             // Phase 1 — reset every engine's session state BEFORE capture starts,
             // so a buffer pushed the instant the tap goes live isn't dropped.
-            for entry in entries {
-                guard let engine = entry.backend as? PushCaptureEngine else { continue }
-                let partialCB = self.partialCallback(for: entry.engine, userPartial: onPartial)
-                if entry.engine == primary {
-                    await engine.beginSession(onPartial: partialCB, onError: onError)
-                } else {
-                    let e = entry.engine
-                    await engine.beginSession(onPartial: partialCB, onError: { err in
-                        doushaLog("[MultiEngine] secondary \(e.rawValue) error (non-fatal): \(err.localizedDescription)")
-                    })
-                }
-            }
+            await self.beginAllSessions(onPartial: onPartial, onError: onError)
 
             // Phase 2 — one shared mic tap. Its failure is fatal (no audio at
             // all): tear down the just-prepared engines so they don't sit through
@@ -147,36 +148,32 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                 try await hub.startCapture(onLevel: onAudioLevel)
             } catch {
                 doushaLog("[MultiEngine] capture start failed: \(error.localizedDescription)")
-                for entry in entries {
-                    (entry.backend as? PushCaptureEngine)?.cancelSession()
-                }
+                for entry in self.entries { entry.backend.cancelSession() }
                 DispatchQueue.main.async { onError(error) }
                 return
             }
 
             // Phase 3 — open each engine's stream; audio buffered during setup
             // flushes once the stream is ready.
-            for entry in entries {
-                (entry.backend as? PushCaptureEngine)?.openStream()
-            }
+            for entry in self.entries { entry.backend.openStream() }
         }
     }
 
-    /// Hub-less start for a single entry: primary drives HUD + fatal errors,
-    /// secondaries run silently with non-fatal errors. Preserves the original
-    /// per-engine `SpeechBackend.start` contract used by the mock tests.
-    private func startLeaf(_ entry: (engine: Engine, backend: SpeechBackend),
-                           onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-                           onAudioLevel: @escaping @Sendable (Float) -> Void,
-                           onError: @escaping @Sendable (Error) -> Void) {
-        let partialCB = partialCallback(for: entry.engine, userPartial: onPartial)
-        if entry.engine == primary {
-            entry.backend.start(onPartial: partialCB, onAudioLevel: onAudioLevel, onError: onError)
-        } else {
-            let e = entry.engine
-            entry.backend.start(onPartial: partialCB, onAudioLevel: { _ in }, onError: { err in
-                doushaLog("[MultiEngine] secondary \(e.rawValue) error (non-fatal): \(err.localizedDescription)")
-            })
+    /// Reset every engine's session state. The primary drives the user's HUD
+    /// partials + fatal errors; secondaries run silently with non-fatal (logged)
+    /// errors. Shared by the real-capture and hub-less (test) start paths.
+    private func beginAllSessions(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
+                                  onError: @escaping @Sendable (Error) -> Void) async {
+        for entry in entries {
+            let partialCB = partialCallback(for: entry.engine, userPartial: onPartial)
+            if entry.engine == primary {
+                await entry.backend.beginSession(onPartial: partialCB, onError: onError)
+            } else {
+                let e = entry.engine
+                await entry.backend.beginSession(onPartial: partialCB, onError: { err in
+                    doushaLog("[MultiEngine] secondary \(e.rawValue) error (non-fatal): \(err.localizedDescription)")
+                })
+            }
         }
     }
 
@@ -262,7 +259,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             }.joined(separator: " ")
             let result = results[engine] ?? TranscriptionResult(
                 text: "", audioDuration: 0, lastResponseAge: nil,
-                lastTranscriptAge: nil, savedAudioURL: nil)
+                lastTranscriptAge: nil)
             let onlineTag = onlineChosen.map { "online=\($0.rawValue)" } ?? "online=none"
             qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | \(onlineTag) | picked=\(engine.rawValue)")
             doushaLog("[MultiEngine] picked \(engine.rawValue) len=\(result.text.count)")
@@ -271,7 +268,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
 
         for entry in entries {
             let engine = entry.engine
-            entry.backend.stop { result in
+            entry.backend.finish { result in
                 lock.lock()
                 defer { lock.unlock() }
                 results[engine] = result
@@ -309,6 +306,6 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
 
     func cancel() {
         if let hub { Task { await hub.cancelCapture() } }
-        for entry in entries { entry.backend.cancel() }
+        for entry in entries { entry.backend.cancelSession() }
     }
 }

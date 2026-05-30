@@ -2,7 +2,7 @@ import Foundation
 
 /// Canonical on-disk locations for captured audio. Shared so the single
 /// `AudioTapHub` (which owns the only mic tap + WAV) and the engines that
-/// consume that WAV (e.g. Soniox async upload, a future retranscribe redo)
+/// consume that WAV (e.g. Soniox async upload)
 /// agree on one path instead of each writing its own file.
 public enum AudioCapturePaths {
     /// The one shared WAV that the `AudioTapHub` writes for a recording.

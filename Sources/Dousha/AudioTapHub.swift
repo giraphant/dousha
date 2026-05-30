@@ -39,8 +39,7 @@ actor AudioTapHub {
     ///   - pcmSinks: int16-PCM consumers (Doubao/Soniox `ingest`).
     ///   - bufferSinks: native-buffer consumers (Apple `ingest`).
     ///   - wantsWAV: write the shared WAV (true whenever a PCM engine is active;
-    ///     the WAV is the Soniox-async upload payload and the future-retranscribe
-    ///     side recording).
+    ///     the WAV is the Soniox-async upload payload).
     init(pcmSinks: [PCMSink], bufferSinks: [BufferSink], wantsWAV: Bool) {
         self.pcmSinks = pcmSinks
         self.bufferSinks = bufferSinks
@@ -148,7 +147,7 @@ actor AudioTapHub {
         // get created + processed on each engine actor. The engines additionally
         // yield at the top of their finish() to flush their own queue.
         for _ in 0..<4 { await Task.yield() }
-        try? await Task.sleep(nanoseconds: 50_000_000)  // 50 ms — matches old stopDrainWindowMs
+        try? await Task.sleep(nanoseconds: 50_000_000)  // 50 ms drain window for the tail buffers
         if let wav = wavWriter { try? wav.close(); wavWriter = nil }
         doushaLog("[AudioTapHub] capture stopped + drained")
     }

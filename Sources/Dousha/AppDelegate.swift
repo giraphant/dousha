@@ -17,9 +17,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // / language always reflect current settings.
     private var speech: SpeechBackend = MultiEngineBackend.fromPreferences(Preferences.shared)
     private let injector = TextInjector()
-    // Settings "test connection" button still uses LLMRefiner (see SettingsWindow).
-    // The dictation inject path uses TextRefiner instead (see refineAndInject).
-    private let llm = LLMRefiner()
     private let prefs = Preferences.shared
     private let launchAtLogin: LaunchAtLoginManaging = LaunchAtLoginController()
 
@@ -278,10 +275,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func selectEngine(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let e = Engine(rawValue: raw),
-              e != prefs.engine else { return }
+              prefs.activeEngines != [e] else { return }
         // Menu engine pick = single-engine quick switch (collapses the routing
-        // slots + active set to this one engine). Multi-engine routing is set up
-        // in Settings. The backend itself is rebuilt at the next handleStart.
+        // slots + active set to this one engine). The guard skips only when we're
+        // ALREADY collapsed onto `e` — comparing against `prefs.engine` (the
+        // primary slot) wrongly blocked the collapse whenever `e` happened to be
+        // the current primary while a secondary engine was still active.
+        // Multi-engine routing is set up in Settings. The backend itself is
+        // rebuilt at the next handleStart.
         prefs.engine = e
         if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
         rebuildMenu()
@@ -335,7 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
                 resetDoubaoCredentials: { [weak self] in self?.resetDoubaoCredentials() }
             )
-            settingsWindow = SettingsWindowFactory.create(llmRefiner: llm, actions: actions)
+            settingsWindow = SettingsWindowFactory.create(actions: actions)
         }
         settingsWindow?.center()
         settingsWindow?.makeKeyAndOrderFront(nil)

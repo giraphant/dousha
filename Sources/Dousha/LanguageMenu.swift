@@ -23,13 +23,4 @@ struct LanguageMenu {
             return [Option(title: "自动", rawValue: autoIdentifier, isSelected: true)]
         }
     }
-
-    static func detectorLanguage(for engine: Engine, selectedLanguage: String) -> String {
-        switch engine {
-        case .apple:
-            return selectedLanguage
-        case .doubao, .soniox:
-            return autoIdentifier
-        }
-    }
 }

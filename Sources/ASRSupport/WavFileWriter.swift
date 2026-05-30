@@ -10,7 +10,7 @@ import TalkerCommonSync
 /// dispatches the actual disk write onto an internal serial background queue
 /// so the audio thread never blocks on I/O. `close()` is a barrier: it waits
 /// for all enqueued writes to land before returning, so the caller can read
-/// the file back immediately afterward (the retranscribe path relies on this).
+/// the file back immediately afterward (the Soniox async upload relies on this).
 ///
 /// On any background write failure, the writer flips into a stopped state and
 /// silently swallows subsequent appends — failing per-frame writes would just
@@ -96,7 +96,7 @@ public final class WavFileWriter {
     /// RIFF/data chunk sizes) does not always fire synchronously — empirically
     /// the data chunk size can be left at 0 even though the PCM bytes are
     /// physically on disk, causing AVAudioFile(forReading:) to return an empty
-    /// buffer and silently breaking the retranscribe path.
+    /// buffer and silently breaking the Soniox async upload.
     public func close() throws {
         queue.sync {
             self.stopped = true

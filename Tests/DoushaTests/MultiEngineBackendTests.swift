@@ -4,8 +4,8 @@ import ASRSupport
 
 final class MultiEngineBackendTests: XCTestCase {
 
-    /// Canned-result SpeechBackend for testing the composite without audio/network.
-    private final class MockBackend: SpeechBackend, @unchecked Sendable {
+    /// Canned-result push engine for testing the composite without audio/network.
+    private final class MockBackend: PushCaptureEngine, @unchecked Sendable {
         let result: TranscriptionResult
         let errorOnStart: Error?
         let stopDelay: TimeInterval
@@ -18,23 +18,22 @@ final class MultiEngineBackendTests: XCTestCase {
         init(text: String, errorOnStart: Error? = nil, stopDelay: TimeInterval = 0,
              partialOnStart: String? = nil) {
             self.result = TranscriptionResult(text: text, audioDuration: 1,
-                                              lastResponseAge: nil, lastTranscriptAge: nil,
-                                              savedAudioURL: nil)
+                                              lastResponseAge: nil, lastTranscriptAge: nil)
             self.errorOnStart = errorOnStart
             self.stopDelay = stopDelay
             self.partialOnStart = partialOnStart
         }
         func setLanguage(_ identifier: String) {}
-        func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-                   onAudioLevel: @escaping @Sendable (Float) -> Void,
-                   onError: @escaping @Sendable (Error) -> Void) {
+        func beginSession(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
+                          onError: @escaping @Sendable (Error) -> Void) async {
             startCalled = true
             if let p = partialOnStart {
                 onPartial(PartialTranscript(finalText: p, interimText: ""))
             }
             if let e = errorOnStart { onError(e) }
         }
-        func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
+        func openStream() {}
+        func finish(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
             if stopDelay > 0 {
                 let r = result
                 DispatchQueue.global().asyncAfter(deadline: .now() + stopDelay) { completion(r) }
@@ -42,7 +41,7 @@ final class MultiEngineBackendTests: XCTestCase {
                 completion(result)
             }
         }
-        func cancel() { cancelCalled = true }
+        func cancelSession() { cancelCalled = true }
     }
 
     private final class ErrorBox: @unchecked Sendable { var error: Error? }
