@@ -90,7 +90,6 @@ func makeSUT(backend: MockSpeechBackend = MockSpeechBackend())
         pushHUDLevel: { spy.levels.append($0) },
         setFinalTranscript: { spy.finalTranscripts.append($0) },
         inject: { spy.injected.append($0) },
-        writeClipboard: { spy.clipboardWrites.append($0) },
         isRefineEnabled: { spy.refineEnabled },
         refineMode: { spy.refineMode },
         refineImmediate: { text, done in

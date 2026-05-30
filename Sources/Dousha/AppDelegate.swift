@@ -46,12 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pushHUDLevel: { [hudModel] level in hudModel.pushLevel(level) },
             setFinalTranscript: { [hudModel] text in hudModel.setFinalTranscript(text) },
             inject: { [injector] text in injector.inject(text) },
-            writeClipboard: { text in
-                let pb = NSPasteboard.general
-                pb.clearContents()
-                pb.setString(text, forType: .string)
-                doushaLog("[Dousha] deferred refine wrote refined text to clipboard (len=\(text.count))")
-            },
             isRefineEnabled: { [prefs] in
                 prefs.llmEnabled && TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
                                                 model: prefs.llmModel).isConfigured
@@ -307,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // primary slot) wrongly blocked the collapse whenever `e` happened to be
         // the current primary while a secondary engine was still active.
         // Multi-engine routing is set up in Settings. The backend itself is
-        // rebuilt at the next handleStart.
+        // rebuilt at the next recording.start().
         prefs.engine = e
         if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
         rebuildMenu()

@@ -27,8 +27,6 @@ struct RecordingEnvironment {
     var setFinalTranscript: (String) -> Void
     /// Paste text into the focused field.
     var inject: (String) -> Void
-    /// Replace the clipboard contents (deferred-refine rewrite).
-    var writeClipboard: (String) -> Void
     /// Whether LLM refinement is enabled AND configured.
     var isRefineEnabled: () -> Bool
     /// Immediate vs deferred refine policy.
@@ -107,8 +105,9 @@ final class RecordingController {
         }
         // Defer if a recent cancel hasn't finished tearing down (backend cancel is
         // async; starting into a still-draining session would silently no-op).
-        if let allowedAt = nextStartAllowedAt, allowedAt > env.now() {
-            let delay = allowedAt.timeIntervalSince(env.now())
+        let now = env.now()
+        if let allowedAt = nextStartAllowedAt, allowedAt > now {
+            let delay = allowedAt.timeIntervalSince(now)
             doushaLog("[RecordingController] start deferred \(Int(delay * 1000))ms for cancel teardown")
             env.scheduleAfter(delay) { [weak self] in self?.start() }
             return
