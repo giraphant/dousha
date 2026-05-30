@@ -10,7 +10,8 @@ import ASRSupport
 /// Much simpler than Doubao: no device registration, JWT, Opus, or protobuf.
 /// The first WS message is a JSON config (text frame) carrying the API key and
 /// audio format; every subsequent frame is binary PCM. End-of-audio is an empty
-/// binary frame (`.data(Data())`), matching the JS reference's `ArrayBuffer(0)`.
+/// TEXT frame (`.string("")`) — URLSession silently drops zero-length binary
+/// frames, so an empty binary marker never reached the server (see sendEndOfAudio).
 public actor SonioxASR {
     private let apiKey: String
     private let mode: SonioxMode
@@ -187,7 +188,7 @@ public actor SonioxASR {
         doushaLog("[SonioxASR] cancel() done")
     }
 
-    /// Stops capturing the mic, sends the empty-binary end-of-audio marker, and
+    /// Stops capturing the mic, sends the empty-text end-of-audio marker, and
     /// waits up to ~5s for the server's `finished` flush. Completion fires
     /// exactly once on the main queue.
     public nonisolated func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
@@ -385,8 +386,12 @@ public actor SonioxASR {
 
     private func sendEndOfAudio() async throws {
         guard let ws = ws else { return }
-        // Empty BINARY frame — matches the JS ref's `new ArrayBuffer(0)`.
-        try await ws.send(.data(Data()))
+        // Empty TEXT frame — Soniox accepts an empty text OR binary frame as the
+        // end-of-stream marker, but `URLSessionWebSocketTask` silently drops a
+        // zero-length BINARY frame, so the server never finalized and we ate the
+        // full 5s `finished` timeout on every stop. The Python SDK signals EOS
+        // with `ws.send("")` (text); we mirror that. (QUA-153 follow-up.)
+        try await ws.send(.string(""))
         doushaLog("[SonioxASR] traceId=\(requestId) sent end-of-audio marker")
     }
 

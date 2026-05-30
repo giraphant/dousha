@@ -9,21 +9,29 @@ final class MultiEngineBackendTests: XCTestCase {
         let result: TranscriptionResult
         let errorOnStart: Error?
         let stopDelay: TimeInterval
+        /// Emitted as a cumulative partial the instant start() is called, to
+        /// drive the online language signal in QUA-153 tests.
+        let partialOnStart: String?
         private(set) var startCalled = false
         private(set) var cancelCalled = false
 
-        init(text: String, errorOnStart: Error? = nil, stopDelay: TimeInterval = 0) {
+        init(text: String, errorOnStart: Error? = nil, stopDelay: TimeInterval = 0,
+             partialOnStart: String? = nil) {
             self.result = TranscriptionResult(text: text, audioDuration: 1,
                                               lastResponseAge: nil, lastTranscriptAge: nil,
                                               savedAudioURL: nil)
             self.errorOnStart = errorOnStart
             self.stopDelay = stopDelay
+            self.partialOnStart = partialOnStart
         }
         func setLanguage(_ identifier: String) {}
         func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                    onAudioLevel: @escaping @Sendable (Float) -> Void,
                    onError: @escaping @Sendable (Error) -> Void) {
             startCalled = true
+            if let p = partialOnStart {
+                onPartial(PartialTranscript(finalText: p, interimText: ""))
+            }
             if let e = errorOnStart { onError(e) }
         }
         func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
@@ -148,6 +156,81 @@ final class MultiEngineBackendTests: XCTestCase {
             exp.fulfill()
         }
         wait(for: [exp], timeout: 3)
+    }
+
+    // MARK: - QUA-153 online language judgement
+
+    func testOnline_chineseKnownDuringRecording_waitsOnlyForDoubao_notSlowClassifier() {
+        // Soniox (classifier) streams a Chinese partial DURING recording, so the
+        // language is known before any final arrives. 豆包 finals instantly; Soniox's
+        // FINAL is deliberately slow (1s). The online path must route to 豆包 and
+        // return WITHOUT waiting for the slow classifier final — the QUA-153 win.
+        let doubao = MockBackend(text: "今天天气很好啊")
+        let soniox = MockBackend(text: "今天天气很好", stopDelay: 1.0,
+                                 partialOnStart: "今天天气很好")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
+
+        let exp = expectation(description: "stop")
+        let t0 = Date()
+        multi.stop { result in
+            let elapsed = Date().timeIntervalSince(t0)
+            XCTAssertEqual(result.text, "今天天气很好啊")
+            XCTAssertLessThan(elapsed, 0.5,
+                "Chinese known online must wait only for 豆包, not the slow Soniox final")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+    }
+
+    func testOnline_englishKnownDuringRecording_routesToSoniox_skipsDoubao() {
+        // Soniox streams an English partial during recording → online language is
+        // English → route to Soniox and don't wait for the slow 豆包.
+        let doubao = MockBackend(text: "皮森哈喽", stopDelay: 1.0)
+        let soniox = MockBackend(text: "Python hello there",
+                                 partialOnStart: "Python hello there")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
+
+        let exp = expectation(description: "stop")
+        let t0 = Date()
+        multi.stop { result in
+            let elapsed = Date().timeIntervalSince(t0)
+            XCTAssertEqual(result.text, "Python hello there")
+            XCTAssertLessThan(elapsed, 0.5, "English known online must skip the slow 豆包")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+    }
+
+    func testOnline_chosenEngineEmpty_fallsThroughToNonEmpty() {
+        // Online says Chinese → chosen 豆包, but 豆包 finals empty → fall through to
+        // any non-empty result (Soniox).
+        let doubao = MockBackend(text: "")
+        let soniox = MockBackend(text: "今天天气很好", partialOnStart: "今天天气很好")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
+
+        let exp = expectation(description: "stop")
+        multi.stop { XCTAssertEqual($0.text, "今天天气很好"); exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+    }
+
+    func testOnline_noPartials_fallsBackToClassifierFinalLogic() {
+        // No partials streamed (silence / instant stop) → no online signal → the
+        // existing classifier-final routing must still apply.
+        let doubao = MockBackend(text: "你好世界你好啊")
+        let soniox = MockBackend(text: "你好世界")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
+
+        let exp = expectation(description: "stop")
+        multi.stop { XCTAssertEqual($0.text, "你好世界你好啊"); exp.fulfill() }
+        wait(for: [exp], timeout: 2)
     }
 
     func testCancel_cancelsAllEngines() {
