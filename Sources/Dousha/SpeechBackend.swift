@@ -23,7 +23,7 @@ enum Engine: String, CaseIterable {
 
 protocol SpeechBackend: AnyObject {
     func setLanguage(_ identifier: String)
-    func start(onPartial: @escaping @Sendable (String) -> Void,
+    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                onAudioLevel: @escaping @Sendable (Float) -> Void,
                onError: @escaping @Sendable (Error) -> Void)
     func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void)

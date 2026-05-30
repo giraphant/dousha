@@ -15,6 +15,13 @@ public actor SonioxASR {
     private let apiKey: String
     private let mode: SonioxMode
 
+    /// Glossary terms sent in Soniox's `context.terms` to bias recognition
+    /// toward domain words / proper nouns (QUA-133). Snapshotted at
+    /// `start(contextTerms:)` so a Settings change mid-recording can't alter the
+    /// active session, and reused by `retranscribe` so a replay stays consistent
+    /// with the recording that produced the audio. Empty => no `context` sent.
+    private var contextTerms: [String] = []
+
     private let audioEngine = AVAudioEngine()
     private var pcmConverter: AVAudioConverter?
     private var pcmTargetFormat: AVAudioFormat?
@@ -55,7 +62,7 @@ public actor SonioxASR {
     private var keepaliveTask: Task<Void, Never>?
 
     // Callbacks (assigned in start)
-    private var onPartial: (@Sendable (String) -> Void)?
+    private var onPartial: (@Sendable (PartialTranscript) -> Void)?
     private var onAudioLevel: (@Sendable (Float) -> Void)?
     private var onError: (@Sendable (Error) -> Void)?
 
@@ -88,17 +95,22 @@ public actor SonioxASR {
 
     // MARK: - Lifecycle
 
-    public nonisolated func start(onPartial: @escaping @Sendable (String) -> Void,
+    /// - Parameter contextTerms: Glossary terms for Soniox's `context.terms`.
+    ///   Pass `[]` for none. Snapshotted for the duration of this recording.
+    public nonisolated func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                                   onAudioLevel: @escaping @Sendable (Float) -> Void,
-                                  onError: @escaping @Sendable (Error) -> Void) {
-        Task { await self._start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError) }
+                                  onError: @escaping @Sendable (Error) -> Void,
+                                  contextTerms: [String] = []) {
+        Task { await self._start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError, contextTerms: contextTerms) }
     }
 
-    private func _start(onPartial: @escaping @Sendable (String) -> Void,
+    private func _start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                         onAudioLevel: @escaping @Sendable (Float) -> Void,
-                        onError: @escaping @Sendable (Error) -> Void) async {
+                        onError: @escaping @Sendable (Error) -> Void,
+                        contextTerms: [String]) async {
         guard !isRunning else { return }
         isRunning = true
+        self.contextTerms = contextTerms
         self.onPartial = onPartial
         self.onAudioLevel = onAudioLevel
         self.onError = onError
@@ -304,7 +316,7 @@ public actor SonioxASR {
             doushaLog("[SonioxASR] traceId=\(requestId) async stop — no WAV captured")
             return makeResult()
         }
-        let client = SonioxAsyncClient(apiKey: apiKey)
+        let client = SonioxAsyncClient(apiKey: apiKey, contextTerms: contextTerms)
         do {
             let text = try await client.transcribe(fileURL: savedURL, traceId: requestId)
             parser.ingest(object: ["tokens": [["text": text, "is_final": true]], "finished": true])
@@ -401,7 +413,13 @@ public actor SonioxASR {
 
     private func sendConfigMessage() async throws {
         guard let ws = ws else { throw URLError(.networkConnectionLost) }
-        let json = SonioxConfig.configMessageJSON(apiKey: apiKey)
+        let json = SonioxConfig.configMessageJSON(apiKey: apiKey, contextTerms: contextTerms)
+        if contextTerms.isEmpty {
+            doushaLog("[SonioxASR] traceId=\(requestId) config context: (none)")
+        } else {
+            let preview = contextTerms.prefix(8).joined(separator: "、")
+            doushaLog("[SonioxASR] traceId=\(requestId) config context.terms=\(contextTerms.count) preview=\(preview)")
+        }
         try await ws.send(.string(json))
     }
 
@@ -496,9 +514,9 @@ public actor SonioxASR {
 
         if update.didProduceContent {
             self.lastTranscriptAt = Date()
-            let display = update.displayText
+            let partial = PartialTranscript(finalText: update.finalText, interimText: update.interimText)
             let cb = onPartial
-            DispatchQueue.main.async { cb?(display) }
+            DispatchQueue.main.async { cb?(partial) }
         }
 
         if update.finished {
@@ -647,7 +665,7 @@ public actor SonioxASR {
             let parentField = parentTraceId.map { " parent_traceId=\($0)" } ?? ""
             doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) async retranscribe \(wavURL.lastPathComponent) starting")
             do {
-                return try await SonioxAsyncClient(apiKey: apiKey).transcribe(fileURL: wavURL, traceId: requestId)
+                return try await SonioxAsyncClient(apiKey: apiKey, contextTerms: contextTerms).transcribe(fileURL: wavURL, traceId: requestId)
             } catch {
                 doushaLog("[SonioxASR] traceId=\(requestId)\(parentField) async retranscribe error=\(error.localizedDescription)")
                 return ""

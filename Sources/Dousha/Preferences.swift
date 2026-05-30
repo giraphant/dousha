@@ -45,6 +45,11 @@ final class Preferences {
         static let sonioxAPIKey              = "sonioxAPIKey"
         static let sonioxMode                = "sonioxMode"
         static let smartRetranscribeEnabled  = "smartRetranscribeEnabled"
+        // Engine-agnostic glossary (QUA-133). Key strings keep the historical
+        // "doubao" prefix so terms entered before the Soniox extension survive;
+        // the feature applies to both Doubao and Soniox.
+        static let glossaryEnabled           = "doubaoGlossaryEnabled"
+        static let glossaryTerms             = "doubaoGlossaryTerms"
         static let hotkeyKeyCode             = "hotkey.keyCode"
         static let hotkeyMode                = "hotkey.mode"
         // Sentinel: -1 stored under `cancelHotkey.keyCode` means "disabled".
@@ -53,6 +58,9 @@ final class Preferences {
         // turned cancel off and the app restarted.
         static let cancelHotkeyKeyCode       = "cancelHotkey.keyCode"
         static let refineMode                = "refineMode"
+        static let launchAtLogin             = "launchAtLogin"
+        static let showDockIcon              = "showDockIcon"
+        static let showMenuBarIcon           = "showMenuBarIcon"
     }
 
     /// Stored value used to represent a disabled cancel hotkey. Picked because
@@ -71,11 +79,34 @@ final class Preferences {
             Keys.sonioxAPIKey:             "",
             Keys.sonioxMode:               SonioxMode.realtime.rawValue,
             Keys.smartRetranscribeEnabled: false,
+            Keys.glossaryEnabled:          false,
+            Keys.glossaryTerms:            [String](),
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
             Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
             Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode),
             Keys.refineMode:               RefineMode.immediate.rawValue,
+            // Menu-bar accessory app by default: no Dock icon, status item shown.
+            // `launchAtLogin` here is only a UI mirror; SMAppService is the
+            // source of truth and is consulted directly when the window opens.
+            Keys.launchAtLogin:            false,
+            Keys.showDockIcon:             false,
+            Keys.showMenuBarIcon:          true
         ])
+    }
+
+    var launchAtLogin: Bool {
+        get { defaults.bool(forKey: Keys.launchAtLogin) }
+        set { defaults.set(newValue, forKey: Keys.launchAtLogin) }
+    }
+
+    var showDockIcon: Bool {
+        get { defaults.bool(forKey: Keys.showDockIcon) }
+        set { defaults.set(newValue, forKey: Keys.showDockIcon) }
+    }
+
+    var showMenuBarIcon: Bool {
+        get { defaults.bool(forKey: Keys.showMenuBarIcon) }
+        set { defaults.set(newValue, forKey: Keys.showMenuBarIcon) }
     }
 
     var language: String {
@@ -126,6 +157,16 @@ final class Preferences {
     var sonioxMode: SonioxMode {
         get { SonioxMode(rawValue: defaults.string(forKey: Keys.sonioxMode) ?? "") ?? .realtime }
         set { defaults.set(newValue.rawValue, forKey: Keys.sonioxMode) }
+    }
+
+    var glossaryEnabled: Bool {
+        get { defaults.bool(forKey: Keys.glossaryEnabled) }
+        set { defaults.set(newValue, forKey: Keys.glossaryEnabled) }
+    }
+
+    var glossaryTerms: [String] {
+        get { defaults.stringArray(forKey: Keys.glossaryTerms) ?? [] }
+        set { defaults.set(newValue, forKey: Keys.glossaryTerms) }
     }
 
     var hotkey: HotkeyConfig {

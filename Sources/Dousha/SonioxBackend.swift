@@ -14,10 +14,17 @@ final class SonioxBackend: SpeechBackend {
 
     func setLanguage(_ identifier: String) {}
 
-    func start(onPartial: @escaping @Sendable (String) -> Void,
+    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                onAudioLevel: @escaping @Sendable (Float) -> Void,
                onError: @escaping @Sendable (Error) -> Void) {
-        asr.start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError)
+        // Snapshot the shared glossary into Soniox's context.terms at recording
+        // start (QUA-133). Read synchronously so a Settings change mid-recording
+        // can't alter the active session.
+        let prefs = Preferences.shared
+        let terms = prefs.glossaryEnabled
+            ? GlossaryContext.normalize(prefs.glossaryTerms)
+            : []
+        asr.start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError, contextTerms: terms)
     }
 
     func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {

@@ -17,7 +17,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         language: Preferences.shared.language
     )
     private let injector = TextInjector()
+    // Settings "test connection" button still uses LLMRefiner (see SettingsWindow).
+    // The dictation inject path uses TextRefiner instead (see refineAndInject).
+    private let llm = LLMRefiner()
     private let prefs = Preferences.shared
+    private let launchAtLogin: LaunchAtLoginManaging = LaunchAtLoginController()
 
     private let hudModel = FloatingHUDModel()
     private var floatingWindow: FloatingWindow?
@@ -79,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        applyDockIconVisibility()
         setupMenuBar()
         floatingWindow = FloatingWindow(model: hudModel)
         // Wire HUD button actions. Captured weakly to avoid retain cycles via
@@ -114,11 +118,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: .doushaSonioxConfigChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleLLMEnabledChanged),
+            name: .doushaLLMEnabledChanged,
+            object: nil
+        )
 
         // fusion 模式录音也走豆包,提前预热凭据。
         if prefs.engine == .doubao || prefs.engine == .fusion {
             DoubaoCredentialStore.shared.warmup()
         }
+    }
+
+    /// If the app is relaunched while already running (Finder/Spotlight), bring
+    /// the settings window back. This is the recovery path when the user has
+    /// hidden both the Dock and menu-bar icons.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return true
+    }
+
+    // MARK: - System toggles (Dock icon / menu-bar icon)
+
+    /// Apply the persisted Dock-icon preference to the activation policy.
+    private func applyDockIconVisibility() {
+        NSApp.setActivationPolicy(prefs.showDockIcon ? .regular : .accessory)
     }
 
     // MARK: - Menu bar
@@ -137,6 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 btn.image?.isTemplate = true
             }
         }
+        statusItem.isVisible = prefs.showMenuBarIcon
         rebuildMenu()
     }
 
@@ -298,6 +324,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         doushaLog("[Dousha] retranscribe menu fired")
         status = .transcribing
+        // Clear any leftover transcript from the previous session — the HUD is
+        // visible during .transcribing, so without this it would show the last
+        // recording's final text while this manual retry runs.
+        hudModel.resetTranscript()
         speech.retranscribeLastRecording { [weak self] text in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -306,14 +336,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.status = .idle
                     return
                 }
+                self.hudModel.setFinalTranscript(text)
                 self.refineAndInject(text)
             }
         }
     }
 
+    @objc private func handleLLMEnabledChanged() {
+        // The settings pane already wrote `prefs.llmEnabled`; just refresh the
+        // menu so its "润色：开启/关闭" label stays in sync.
+        rebuildMenu()
+    }
+
+    /// Show/hide the Dock icon at runtime and persist the choice.
+    private func setDockIconVisible(_ visible: Bool) {
+        prefs.showDockIcon = visible
+        applyDockIconVisibility()
+    }
+
+    /// Show/hide the menu-bar status item at runtime and persist the choice.
+    private func setMenuBarIconVisible(_ visible: Bool) {
+        prefs.showMenuBarIcon = visible
+        statusItem.isVisible = visible
+    }
+
     @objc private func openSettings() {
         if settingsWindow == nil {
-            settingsWindow = SettingsWindowFactory.create()
+            let actions = SettingsActions(
+                isLaunchAtLoginEnabled: { [launchAtLogin] in launchAtLogin.isEnabled },
+                setLaunchAtLogin: { [launchAtLogin] enabled in try launchAtLogin.setEnabled(enabled) },
+                isDockIconVisible: { [weak self] in self?.prefs.showDockIcon ?? false },
+                setDockIconVisible: { [weak self] visible in self?.setDockIconVisible(visible) },
+                isMenuBarIconVisible: { [weak self] in self?.prefs.showMenuBarIcon ?? true },
+                setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
+                resetDoubaoCredentials: { [weak self] in self?.resetDoubaoCredentials() }
+            )
+            settingsWindow = SettingsWindowFactory.create(llmRefiner: llm, actions: actions)
         }
         settingsWindow?.center()
         settingsWindow?.makeKeyAndOrderFront(nil)
@@ -472,11 +530,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         doushaLog("[Dousha] AppDelegate.handleStart: engine=\(prefs.engine.rawValue) language=\(prefs.language)")
         speech.setLanguage(prefs.language)
         hudModel.resetLevels()
+        hudModel.resetTranscript()
 
         let myToken = sessionToken
         speech.start(
-            onPartial: { _ in
-                // v1 HUD does not display partial transcript text.
+            onPartial: { [weak self] partial in
+                DispatchQueue.main.async {
+                    guard let self = self, self.sessionToken == myToken else { return }
+                    // Drop late partials once we've left .recording. sessionToken
+                    // is bumped only on cancel, not normal stop, so a batch the
+                    // backend dispatched just before stop() can land here AFTER
+                    // setFinalTranscript — this gate stops it clobbering the final.
+                    guard self.status == .recording else { return }
+                    self.hudModel.updateTranscript(partial)
+                }
             },
             onAudioLevel: { [weak self] level in
                 DispatchQueue.main.async {
@@ -570,6 +637,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 self.status = .idle
                                 return
                             }
+                            self.hudModel.setFinalTranscript(finalText)
                             self.refineAndInject(finalText)
                         }
                     }
@@ -584,6 +652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.status = .idle
                     return
                 }
+                self.hudModel.setFinalTranscript(text)
                 self.refineAndInject(text)
             }
         }
@@ -642,6 +711,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case .error = status { return }
 
         status = .error(message)
+        // Clear any lingering interim so the error state falls back to the logo
+        // placeholder + yellow glow rather than showing stale, unusable text.
+        hudModel.resetTranscript()
 
         // Critical: release the mic / WebSocket. Without this, the speech
         // backend keeps holding the audio device, and the next handleStart

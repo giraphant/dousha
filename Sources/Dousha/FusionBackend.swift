@@ -31,7 +31,7 @@ final class FusionBackend: SpeechBackend {
 
     func setLanguage(_ identifier: String) {}
 
-    func start(onPartial: @escaping @Sendable (String) -> Void,
+    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                onAudioLevel: @escaping @Sendable (Float) -> Void,
                onError: @escaping @Sendable (Error) -> Void) {
         doubao.start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError)
