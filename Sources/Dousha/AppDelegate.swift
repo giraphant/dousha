@@ -119,6 +119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: .doushaLLMEnabledChanged,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleEngineRoutingChanged),
+            name: .doushaEngineRoutingChanged,
+            object: nil
+        )
 
         if prefs.activeEngines.contains(.doubao) {
             DoubaoCredentialStore.shared.warmup()
@@ -389,6 +395,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cancelKey?.stop()
         cancelKey = nil
         startCancelKeyMonitor()
+    }
+
+    @objc private func handleEngineRoutingChanged() {
+        // Routing slots / primary language changed in Settings. Refresh the menu
+        // (engine summary, checkmarks, language) and warm Doubao if now active.
+        if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
+        rebuildMenu()
     }
 
     @objc private func handleSonioxConfigChanged() {

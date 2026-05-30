@@ -95,6 +95,10 @@ struct SettingsView: View {
     @State private var chineseEngine: Engine = Preferences.shared.chineseEngine
     @State private var englishEngine: Engine = Preferences.shared.englishEngine
     @State private var mixedEngine: Engine = Preferences.shared.mixedEngine
+    // Primary language steers which slot is the primary engine (HUD source).
+    // Settable here because auto-detect engines (豆包/Soniox) only offer 自动 in
+    // the menu bar's language list.
+    @State private var primaryLanguage: Language = Language(rawValue: Preferences.shared.language) ?? .zh_CN
 
     // 听写模型 — 词库
     @State private var glossaryEnabled: Bool = Preferences.shared.glossaryEnabled
@@ -232,11 +236,21 @@ struct SettingsView: View {
             $0 == chineseEngine || $0 == englishEngine || $0 == mixedEngine
         }
         Preferences.shared.activeEngines = active
+        NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
     }
 
     private var modelPane: some View {
         Form {
             Section("引擎路由") {
+                Picker("主要语言", selection: $primaryLanguage) {
+                    ForEach(Language.allCases, id: \.self) { lang in
+                        Text(lang.displayName).tag(lang)
+                    }
+                }
+                .onChange(of: primaryLanguage) { _, newValue in
+                    Preferences.shared.language = newValue.rawValue
+                    NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
+                }
                 Picker("中文", selection: $chineseEngine) { engineOptions() }
                     .onChange(of: chineseEngine) { _, _ in persistRouting() }
                 Picker("英文", selection: $englishEngine) { engineOptions() }
@@ -629,4 +643,7 @@ extension Notification.Name {
     static let doushaHotkeyConfigChanged = Notification.Name("DoushaHotkeyConfigChanged")
     static let doushaSonioxConfigChanged = Notification.Name("DoushaSonioxConfigChanged")
     static let doushaLLMEnabledChanged = Notification.Name("DoushaLLMEnabledChanged")
+    /// Posted when the engine routing slots / primary language change in Settings,
+    /// so the menu bar can rebuild to reflect the new active set / primary.
+    static let doushaEngineRoutingChanged = Notification.Name("DoushaEngineRoutingChanged")
 }
