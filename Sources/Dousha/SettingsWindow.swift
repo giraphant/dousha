@@ -5,8 +5,8 @@ import TalkerCommonSync
 import SonioxASR
 
 enum SettingsWindowFactory {
-    static func create(llmRefiner: LLMRefiner) -> NSWindow {
-        let view = SettingsView(llmRefiner: llmRefiner)
+    static func create() -> NSWindow {
+        let view = SettingsView()
         let host = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: host)
         window.title = "豆沙 — 设置"
@@ -18,8 +18,6 @@ enum SettingsWindowFactory {
 }
 
 struct SettingsView: View {
-    let llmRefiner: LLMRefiner
-
     @State private var hotkeyKeyCode: UInt16 = Preferences.shared.hotkey.keyCode
     @State private var hotkeyMode: HotkeyMode = Preferences.shared.hotkey.mode
     @State private var isRecordingHotkey: Bool = false
@@ -34,6 +32,7 @@ struct SettingsView: View {
     @State private var baseURL: String = Preferences.shared.llmBaseURL
     @State private var apiKey:  String = Preferences.shared.llmAPIKey
     @State private var model:   String = Preferences.shared.llmModel
+    @State private var refineMode: RefineMode = Preferences.shared.refineMode
 
     @State private var status: String = ""
     @State private var statusIsError: Bool = false
@@ -159,6 +158,18 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                         .disableAutocorrection(true)
                 }
+                field(label: "校正模式") {
+                    Picker("", selection: $refineMode) {
+                        ForEach(RefineMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .onChange(of: refineMode) { _, newValue in
+                        Preferences.shared.refineMode = newValue
+                    }
+                }
             }
 
             if !status.isEmpty {
@@ -241,15 +252,17 @@ struct SettingsView: View {
         isTesting = true
         status = "正在测试连接…"
         statusIsError = false
-        llmRefiner.test(baseURL: baseURL, apiKey: apiKey, model: model) { result in
-            DispatchQueue.main.async {
+        let refiner = TextRefiner(baseURL: baseURL, apiKey: apiKey, model: model)
+        Task {
+            let result = await refiner.test()
+            await MainActor.run {
                 isTesting = false
                 switch result {
                 case .success:
-                    status = "连接正常。"
+                    status = "连接成功"
                     statusIsError = false
                 case .failure(let err):
-                    status = "失败：\(err.localizedDescription)"
+                    status = err.localizedDescription
                     statusIsError = true
                 }
             }
