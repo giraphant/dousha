@@ -30,8 +30,9 @@ public enum SonioxConnectivityTest {
 
         do {
             try await ws.send(.string(SonioxConfig.configMessageJSON(apiKey: apiKey)))
-            // Send end-of-audio immediately so the server finalizes quickly.
-            try await ws.send(.data(Data()))
+            // Send end-of-audio immediately so the server finalizes quickly. Use
+            // an empty TEXT frame: URLSession drops zero-length BINARY frames.
+            try await ws.send(.string(""))
         } catch {
             return .failure(error.localizedDescription)
         }
