@@ -12,10 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
 
-    private var speech: SpeechBackend = SpeechBackendFactory.make(
-        engine: Preferences.shared.engine,
-        language: Preferences.shared.language
-    )
+    // Rebuilt from preferences at the start of each recording (see handleStart),
+    // so engine selection / multi-engine active set / routing slots / Soniox key
+    // / language always reflect current settings.
+    private var speech: SpeechBackend = MultiEngineBackend.fromPreferences(Preferences.shared)
     private let injector = TextInjector()
     // Settings "test connection" button still uses LLMRefiner (see SettingsWindow).
     // The dictation inject path uses TextRefiner instead (see refineAndInject).
@@ -46,10 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var nextStartAllowedAt: Date?
     private static let cancelTeardownGuard: TimeInterval = 0.25
     private let focusTracker = AppFocusTracker(selfBundleId: "com.dousha.app")
-    /// Set when a Soniox API-key change arrives while a session is live, so the
-    /// stale-key rebuild can't run immediately. Consumed at the next start so
-    /// the next recording always uses a backend built from the current key.
-    private var sonioxBackendDirty = false
 
     private var status: RecordingStatus = .idle {
         didSet {
@@ -124,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        if prefs.engine == .doubao {
+        if prefs.activeEngines.contains(.doubao) {
             DoubaoCredentialStore.shared.warmup()
         }
     }
@@ -273,10 +269,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let raw = sender.representedObject as? String,
               let e = Engine(rawValue: raw),
               e != prefs.engine else { return }
+        // Menu engine pick = single-engine quick switch (collapses the routing
+        // slots + active set to this one engine). Multi-engine routing is set up
+        // in Settings. The backend itself is rebuilt at the next handleStart.
         prefs.engine = e
-        speech = SpeechBackendFactory.make(engine: e, language: prefs.language)
-        sonioxBackendDirty = false
-        if e == .doubao { DoubaoCredentialStore.shared.warmup() }
+        if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
         rebuildMenu()
     }
 
@@ -290,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task { @MainActor in
             await DoubaoCredentialStore.shared.reset()
-            if prefs.engine == .doubao { DoubaoCredentialStore.shared.warmup() }
+            if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
         }
     }
 
@@ -391,18 +388,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func handleSonioxConfigChanged() {
-        // Rebuild the backend so a changed API key takes effect; only matters
-        // while Soniox is the active engine (the factory reads the key at
-        // construction).
-        guard prefs.engine == .soniox else { return }
-        // A session is live — can't stomp it. Defer the rebuild to the next
-        // start so the next recording doesn't reuse the stale-key backend.
-        guard status == .idle || isErrorStatus(status) else {
-            sonioxBackendDirty = true
-            return
-        }
-        speech = SpeechBackendFactory.make(engine: .soniox, language: prefs.language)
-        sonioxBackendDirty = false
+        // The backend is rebuilt from preferences at the start of each recording,
+        // so a changed Soniox API key is picked up automatically next time.
         rebuildMenu()
     }
 
@@ -477,12 +464,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         nextStartAllowedAt = nil
-        // A Soniox key change arrived mid-session and the rebuild was deferred;
-        // apply it now so this recording uses the current key.
-        if sonioxBackendDirty, prefs.engine == .soniox {
-            speech = SpeechBackendFactory.make(engine: .soniox, language: prefs.language)
-            sonioxBackendDirty = false
-        }
+        // Rebuild from current preferences so engine selection, the multi-engine
+        // active set / routing slots, the Soniox API key, and the language all
+        // reflect the latest settings for this recording. Backends are cheap to
+        // construct (no mic/WS opens until start()).
+        speech = MultiEngineBackend.fromPreferences(prefs)
         status = .recording
         doushaLog("[Dousha] AppDelegate.handleStart: engine=\(prefs.engine.rawValue) language=\(prefs.language)")
         speech.setLanguage(prefs.language)
