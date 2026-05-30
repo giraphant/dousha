@@ -15,10 +15,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
 
-    // Rebuilt from preferences at the start of each recording (see handleStart),
-    // so engine selection / multi-engine active set / routing slots / Soniox key
-    // / language always reflect current settings.
-    private var speech: SpeechBackend = MultiEngineBackend.fromPreferences(Preferences.shared)
     private let injector = TextInjector()
     private let prefs = Preferences.shared
     private let launchAtLogin: LaunchAtLoginManaging = LaunchAtLoginController()
@@ -28,64 +24,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hotkey: HotkeyMonitor?
     private var cancelKey: CancelKeyMonitor?
-    /// Mirror of `status == .recording` shared with `CancelKeyMonitor` so its
-    /// CGEvent-tap thread can decide whether to swallow Esc without bouncing
-    /// to main. Updated from `status.didSet` below.
-    private let isRecordingFlag = Lock<Bool>(false)
-    /// Monotonic counter bumped whenever a session is terminated (canceled,
-    /// completed, errored). `handleStop`'s completion captures the value at
-    /// stop-time and refuses to run if the counter has since advanced — that
-    /// is what makes "user pressed cancel between stop and the inject" safe.
-    private var sessionToken: UInt64 = 0
-    /// Earliest wall-clock at which the next `handleStart` is allowed to call
-    /// into the backend after a cancel. Backend cancel paths are async (the
-    /// Doubao actor enqueues `_cancel` via `Task { … }`), so a press-Esc-then-
-    /// immediately-press-hotkey sequence can race with the still-running
-    /// teardown — `_start` would see `isRunning == true` and silently no-op.
-    /// 250ms is wide enough to cover both backends' teardown in local testing.
-    private var nextStartAllowedAt: Date?
-    private static let cancelTeardownGuard: TimeInterval = 0.25
     private let focusTracker = AppFocusTracker(selfBundleId: "com.dousha.app")
 
-    private var status: RecordingStatus = .idle {
-        didSet {
-            // CRITICAL: update the recording-state mirror BEFORE any UI/state
-            // side effects. The CancelKeyMonitor's CGEvent-tap thread reads this
-            // flag on every keyDown to decide whether to swallow Esc. If we
-            // updated `hudModel.status` first and the tap thread polled in
-            // between, it would see the stale flag, swallow the Esc, and the
-            // queued handleCancel would then reject (status no longer .recording).
-            // The user's keypress gets silently eaten.
-            isRecordingFlag.setValue(status == .recording)
-            hudModel.status = status
-            // Whenever the AppDelegate returns to .idle, force the dispatcher
-            // to match — otherwise a key press silently rejected during
-            // .transcribing leaves dispatcher.isActive=true, and the user
-            // then needs 2-3 presses to actually start a new recording.
-            if status == .idle && oldValue != .idle {
-                hotkey?.forceDispatcherIdle()
-            }
-            // Only show/hide on visibility transitions, not on every state
-            // change — otherwise .recording → .transcribing → .injecting
-            // would re-fade the HUD on each step (strobe effect).
-            guard oldValue.isVisible != status.isVisible else { return }
-            if status.isVisible {
-                floatingWindow?.show()
-            } else {
-                floatingWindow?.hide()
-            }
-        }
-    }
+    private var recording: RecordingController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyDockIconVisibility()
         installMainMenu()
         setupMenuBar()
         floatingWindow = FloatingWindow(model: hudModel)
+        recording = RecordingController(environment: RecordingEnvironment(
+            makeBackend: { [prefs] in MultiEngineBackend.fromPreferences(prefs) },
+            applyStatusToHUD: { [hudModel] status in hudModel.status = status },
+            setHUDVisible: { [weak self] visible in
+                if visible { self?.floatingWindow?.show() } else { self?.floatingWindow?.hide() }
+            },
+            forceDispatcherIdle: { [weak self] in self?.hotkey?.forceDispatcherIdle() },
+            resetHUDLevels: { [hudModel] in hudModel.resetLevels() },
+            resetHUDTranscript: { [hudModel] in hudModel.resetTranscript() },
+            updateHUDTranscript: { [hudModel] partial in hudModel.updateTranscript(partial) },
+            pushHUDLevel: { [hudModel] level in hudModel.pushLevel(level) },
+            setFinalTranscript: { [hudModel] text in hudModel.setFinalTranscript(text) },
+            inject: { [injector] text in injector.inject(text) },
+            isRefineEnabled: { [prefs] in
+                prefs.llmEnabled && TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
+                                                model: prefs.llmModel).isConfigured
+            },
+            refineMode: { [prefs] in prefs.refineMode },
+            refineImmediate: { [prefs] text, done in
+                let refiner = TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
+                                          model: prefs.llmModel)
+                Task { let refined = await refiner.refine(text); done(refined) }
+            },
+            refineLater: { [prefs] text in
+                let refiner = TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
+                                          model: prefs.llmModel)
+                _ = refiner.refineLater(text) { refined in
+                    let pb = NSPasteboard.general
+                    pb.clearContents(); pb.setString(refined, forType: .string)
+                    doushaLog("[Dousha] deferred refine wrote refined text to clipboard (len=\(refined.count))")
+                }
+            },
+            language: { [prefs] in prefs.language },
+            now: { Date() },
+            scheduleAfter: { delay, work in
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    MainActor.assumeIsolated { work() }
+                }
+            }
+        ))
         // Wire HUD button actions. Captured weakly to avoid retain cycles via
         // the FloatingHUDModel that this AppDelegate owns transitively.
-        hudModel.onFinish = { [weak self] in self?.handleStop() }
-        hudModel.onCancel = { [weak self] in self?.handleCancel() }
+        hudModel.onFinish = { [weak self] in self?.recording.stop() }
+        hudModel.onCancel = { [weak self] in self?.recording.cancel() }
         requestSpeechAndMicPermissions()
 
         focusTracker.onChange = { [weak self] focus in
@@ -297,7 +288,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let raw = sender.representedObject as? String,
               raw != LanguageMenu.autoIdentifier else { return }
         prefs.language = raw
-        speech.setLanguage(raw)
         rebuildMenu()
     }
 
@@ -311,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // primary slot) wrongly blocked the collapse whenever `e` happened to be
         // the current primary while a secondary engine was still active.
         // Multi-engine routing is set up in Settings. The backend itself is
-        // rebuilt at the next handleStart.
+        // rebuilt at the next recording.start().
         prefs.engine = e
         if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
         rebuildMenu()
@@ -402,8 +392,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         doushaLog("[Dousha] AppDelegate.startHotkeyMonitor: keyCode=\(prefs.hotkey.keyCode) mode=\(prefs.hotkey.mode.rawValue)")
         let monitor = HotkeyMonitor(
             config: prefs.hotkey,
-            onStart: { [weak self] in self?.handleStart() },
-            onStop:  { [weak self] in self?.handleStop() }
+            onStart: { [weak self] in self?.recording.start() },
+            onStop:  { [weak self] in self?.recording.stop() }
         )
         if !monitor.start() {
             doushaLog("[Dousha] AppDelegate.startHotkeyMonitor: monitor.start() returned false — will retry in 3s")
@@ -448,11 +438,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // every keyDown to decide whether to swallow the event. We could read
         // self.status directly with main-thread sync, but blocking the event
         // tap is a great way to drop other system events.
-        let flag = isRecordingFlag
+        let flag = recording.recordingFlag
         let monitor = CancelKeyMonitor(
             keyCode: kc,
             shouldFire: { flag.value() },
-            onFire: { [weak self] in self?.handleCancel() }
+            onFire: { [weak self] in self?.recording.cancel() }
         )
         if !monitor.start() {
             doushaLog("[Dousha] CancelKeyMonitor: start() failed — retrying in 3s")
@@ -465,219 +455,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         doushaLog("[Dousha] CancelKeyMonitor installed for kc=\(kc)")
     }
 
-    private func handleCancel() {
-        doushaLog("[Dousha] handleCancel current status=\(status)")
-        // Cancel only meaningful during .recording. Past that point either the
-        // packet is already in flight (transcribing) or text is already pasted
-        // (injecting), and there's nothing left to discard. Pressing cancel
-        // during those states is a deliberate no-op so the user's Esc still
-        // passes through to whatever else might respond to it.
-        guard status == .recording else {
-            doushaLog("[Dousha] handleCancel REJECTED (status=\(status))")
-            return
-        }
-        // Bump BEFORE calling cancel() so any in-flight completion that races
-        // sees the new token and short-circuits. Backend cancel paths are
-        // best-effort about not firing callbacks, but the token is the
-        // belt-and-braces guard at the AppDelegate boundary.
-        sessionToken &+= 1
-        speech.cancel()
-        // Backend cancel returns immediately but the actual teardown runs
-        // asynchronously (DoubaoASR enqueues a Task). Refuse the next start
-        // for a short window so we don't race a fresh `start()` against the
-        // still-draining cancel — DoubaoASR.prepareSession would observe
-        // isRunning=true and silently no-op, leaving the UI in .recording but the
-        // backend dead.
-        nextStartAllowedAt = Date(timeIntervalSinceNow: Self.cancelTeardownGuard)
-        status = .idle
-    }
-
-    private func handleStart() {
-        doushaLog("[Dousha] AppDelegate.handleStart: current status=\(status)")
-        guard status == .idle || isErrorStatus(status) else {
-            doushaLog("[Dousha] AppDelegate.handleStart: REJECTED (status=\(status))")
-            return
-        }
-        // Defer if a recent cancel hasn't finished tearing down. Without this,
-        // a fast Esc-then-hotkey sequence would race the backend's async
-        // cancel and start would silently no-op.
-        if let allowedAt = nextStartAllowedAt, allowedAt > Date() {
-            let delay = allowedAt.timeIntervalSinceNow
-            doushaLog("[Dousha] handleStart deferred \(Int(delay * 1000))ms for cancel teardown")
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                MainActor.assumeIsolated { self?.handleStart() }
-            }
-            return
-        }
-        nextStartAllowedAt = nil
-        // Rebuild from current preferences so engine selection, the multi-engine
-        // active set / routing slots, the Soniox API key, and the language all
-        // reflect the latest settings for this recording. Backends are cheap to
-        // construct (no mic/WS opens until start()).
-        speech = MultiEngineBackend.fromPreferences(prefs)
-        status = .recording
-        doushaLog("[Dousha] AppDelegate.handleStart: engine=\(prefs.engine.rawValue) language=\(prefs.language)")
-        speech.setLanguage(prefs.language)
-        hudModel.resetLevels()
-        hudModel.resetTranscript()
-
-        let myToken = sessionToken
-        // The backend invokes these @Sendable thunks from its own actor/threads;
-        // each hops to DispatchQueue.main (the existing scheduling, unchanged) and
-        // assumes main-actor isolation to reach this @MainActor controller.
-        speech.start(
-            onPartial: { [weak self] partial in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self = self, self.sessionToken == myToken else { return }
-                        // Drop late partials once we've left .recording. sessionToken
-                        // is bumped only on cancel, not normal stop, so a batch the
-                        // backend dispatched just before stop() can land here AFTER
-                        // setFinalTranscript — this gate stops it clobbering the final.
-                        guard self.status == .recording else { return }
-                        self.hudModel.updateTranscript(partial)
-                    }
-                }
-            },
-            onAudioLevel: { [weak self] level in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self = self, self.sessionToken == myToken else { return }
-                        self.hudModel.pushLevel(level)
-                    }
-                }
-            },
-            onError: { [weak self] error in
-                doushaLog("[Dousha] recognition error: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self = self else { return }
-                        // Drop stale errors from a canceled or already-finished
-                        // session — otherwise a late TaskFailed from the server
-                        // would flash the HUD red after the user explicitly
-                        // canceled. The Doubao/Apple backends both *attempt* to
-                        // suppress these at the source (Apple via sessionGen,
-                        // Doubao by nil-ing onError in _cancel), so this is a
-                        // belt-and-braces guard for paths that escape both layers
-                        // (e.g., events queued onto main before cancel ran).
-                        guard self.sessionToken == myToken else {
-                            doushaLog("[Dousha] dropping stale error from superseded session")
-                            return
-                        }
-                        self.transitionToError(error.localizedDescription)
-                    }
-                }
-            }
-        )
-    }
-
-    private func handleStop() {
-        doushaLog("[Dousha] AppDelegate.handleStop: current status=\(status)")
-        guard status == .recording else {
-            doushaLog("[Dousha] AppDelegate.handleStop: REJECTED (status=\(status))")
-            return
-        }
-        status = .transcribing
-        let myToken = sessionToken
-        speech.stop { [weak self] result in
-            doushaLog("[Dousha] AppDelegate: speech.stop completion fired (text.len=\(result.text.count) dur=\(String(format: "%.1f", result.audioDuration))s lastTranscriptAge=\(result.lastTranscriptAge.map { String(format: "%.1f", $0) } ?? "nil") lastRespAge=\(result.lastResponseAge.map { String(format: "%.1f", $0) } ?? "nil"))")
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self = self else { return }
-                    // If the user (or HUD button) canceled while we were waiting
-                    // for the backend to finish, the token has advanced. Drop the
-                    // completion without injecting.
-                    guard self.sessionToken == myToken else {
-                        doushaLog("[Dousha] stop completion superseded by cancel — dropping")
-                        return
-                    }
-                    let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !text.isEmpty else {
-                        self.status = .idle
-                        return
-                    }
-                    self.hudModel.setFinalTranscript(text)
-                    self.refineAndInject(text)
-                }
-            }
-        }
-    }
-
-    private func refineAndInject(_ text: String) {
-        let refiner = TextRefiner(baseURL: prefs.llmBaseURL,
-                                  apiKey: prefs.llmAPIKey,
-                                  model: prefs.llmModel)
-
-        // Off: LLM disabled or unconfigured — paste raw, done.
-        guard prefs.llmEnabled, refiner.isConfigured else {
-            injectAndFinish(text)
-            return
-        }
-
-        switch prefs.refineMode {
-        case .immediate:
-            // Wait for the polished text, then paste it (fall back to raw on failure).
-            // This Task is created in a @MainActor context, so it resumes on the
-            // main actor after the await — no extra main hop needed to inject.
-            Task {
-                let refined = await refiner.refine(text)
-                self.injectAndFinish(refined ?? text)
-            }
-
-        case .deferred:
-            // Paste raw immediately; quietly replace the clipboard with the
-            // polished text when it arrives. injectAndFinish already left raw on
-            // the clipboard, so the user can re-paste to pick up the refined copy.
-            injectAndFinish(text)
-            refiner.refineLater(text) { refined in
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(refined, forType: .string)
-                doushaLog("[Dousha] deferred refine wrote refined text to clipboard (len=\(refined.count))")
-            }
-        }
-    }
-
-    private func injectAndFinish(_ text: String) {
-        doushaLog("[Dousha] AppDelegate.injectAndFinish: text=\"\(text.prefix(60))\"")
-        status = .injecting
-        injector.inject(text)
-        // Brief green flash then back to idle.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            MainActor.assumeIsolated { self?.status = .idle }
-        }
-    }
-
-    private func transitionToError(_ message: String) {
-        // Don't keep replacing the error on every cascading event — the
-        // upstream DoubaoASR can emit a flood of "expected seq=1" responses
-        // after a single session goes bad, and each one would re-defer the
-        // idle reset.
-        if case .error = status { return }
-
-        status = .error(message)
-        // Clear any lingering interim so the error state falls back to the logo
-        // placeholder + yellow glow rather than showing stale, unusable text.
-        hudModel.resetTranscript()
-
-        // Critical: release the mic / WebSocket. Without this, the speech
-        // backend keeps holding the audio device, and the next handleStart
-        // would call speech.start on top of an already-live session — the
-        // user sees "press key, nothing happens".
-        speech.stop { _ in }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self = self else { return }
-                if self.isErrorStatus(self.status) {
-                    self.status = .idle
-                }
-            }
-        }
-    }
-
-    private func isErrorStatus(_ s: RecordingStatus) -> Bool {
-        if case .error = s { return true }
-        return false
-    }
 }
