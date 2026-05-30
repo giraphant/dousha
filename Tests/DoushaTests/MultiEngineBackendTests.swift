@@ -8,14 +8,16 @@ final class MultiEngineBackendTests: XCTestCase {
     private final class MockBackend: SpeechBackend, @unchecked Sendable {
         let result: TranscriptionResult
         let errorOnStart: Error?
+        let stopDelay: TimeInterval
         private(set) var startCalled = false
         private(set) var cancelCalled = false
 
-        init(text: String, errorOnStart: Error? = nil) {
+        init(text: String, errorOnStart: Error? = nil, stopDelay: TimeInterval = 0) {
             self.result = TranscriptionResult(text: text, audioDuration: 1,
                                               lastResponseAge: nil, lastTranscriptAge: nil,
                                               savedAudioURL: nil)
             self.errorOnStart = errorOnStart
+            self.stopDelay = stopDelay
         }
         func setLanguage(_ identifier: String) {}
         func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
@@ -25,7 +27,12 @@ final class MultiEngineBackendTests: XCTestCase {
             if let e = errorOnStart { onError(e) }
         }
         func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
-            completion(result)
+            if stopDelay > 0 {
+                let r = result
+                DispatchQueue.global().asyncAfter(deadline: .now() + stopDelay) { completion(r) }
+            } else {
+                completion(result)
+            }
         }
         func cancel() { cancelCalled = true }
     }
@@ -105,6 +112,42 @@ final class MultiEngineBackendTests: XCTestCase {
         let box = ErrorBox()
         multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { box.error = $0 })
         XCTAssertNotNil(box.error, "the primary engine's error must be forwarded as fatal")
+    }
+
+    func testStop_englishEarlyExit_doesNotWaitForSlowChineseEngine() {
+        // 豆包 is slow (1s); Soniox (classifier) returns English instantly. The
+        // result must come back via Soniox WITHOUT waiting the full second.
+        let doubao = MockBackend(text: "普莱斯", stopDelay: 1.0)
+        let soniox = MockBackend(text: "price please now")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        let exp = expectation(description: "stop")
+        let t0 = Date()
+        multi.stop { result in
+            let elapsed = Date().timeIntervalSince(t0)
+            XCTAssertEqual(result.text, "price please now")
+            XCTAssertLessThan(elapsed, 0.5, "English should early-exit via Soniox, not wait for the 1s 豆包")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+    }
+
+    func testStop_chineseWaitsForChineseEngine_evenIfSlow() {
+        // Soniox (classifier) returns Chinese (Han) instantly → route to 豆包, which
+        // is slow (0.4s). Must WAIT for 豆包 and return its cleaner transcript.
+        let doubao = MockBackend(text: "今天天气很好啊", stopDelay: 0.4)
+        let soniox = MockBackend(text: "今天天气很好")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        let exp = expectation(description: "stop")
+        let t0 = Date()
+        multi.stop { result in
+            let elapsed = Date().timeIntervalSince(t0)
+            XCTAssertEqual(result.text, "今天天气很好啊")
+            XCTAssertGreaterThan(elapsed, 0.3, "Chinese must wait for 豆包")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
     }
 
     func testCancel_cancelsAllEngines() {
