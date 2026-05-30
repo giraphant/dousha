@@ -5,26 +5,30 @@ import DoubaoASR
 import ASRSupport
 import TalkerCommonSync
 
-final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
-    private let audioEngine = AVAudioEngine()
+/// Apple on-device speech recognition, driven as a push sink of the shared
+/// `AudioTapHub` (spec §1). It no longer owns an `AVAudioEngine`: native mic
+/// buffers arrive via `ingest(_:)` and are fed straight to the
+/// `SFSpeechAudioBufferRecognitionRequest` — exactly the buffers it used to get
+/// from its own tap, so behavior is unchanged.
+final class AppleSpeechBackend: SpeechBackend, BufferCaptureEngine, @unchecked Sendable {
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var isRunning = false
     private var lastText: String = ""
 
-    /// Monotonic session counter. `cancel()` (and any future hard reset) bumps
-    /// this so callbacks from a torn-down `SFSpeechRecognitionTask` — which can
-    /// still fire briefly after `task.cancel()` — and the delayed stop()
+    /// Monotonic session counter. `cancelSession()` (and any future hard reset)
+    /// bumps this so callbacks from a torn-down `SFSpeechRecognitionTask` — which
+    /// can still fire briefly after `task.cancel()` — and the delayed finish()
     /// completion both short-circuit instead of leaking into the caller's
     /// error/inject paths.
     ///
-    /// Three threads touch this value: main (start/stop/cancel), the audio
-    /// engine's render thread (the tap closure), and the Speech framework's
-    /// internal queue (the recognitionTask closure). An unsynchronized UInt64
-    /// would tear under contention on 32-bit platforms and risks stale reads
-    /// on 64-bit when paired with the unsynchronized write in cancel(). Lock<>
-    /// is the cheapest correct primitive available in this target.
+    /// Three threads touch this value: main (begin/finish/cancel), the
+    /// AudioTapHub's render-thread `ingest`, and the Speech framework's internal
+    /// queue (the recognitionTask closure). An unsynchronized UInt64 would tear
+    /// under contention on 32-bit platforms and risks stale reads on 64-bit when
+    /// paired with the unsynchronized write in cancel(). Lock<> is the cheapest
+    /// correct primitive available in this target.
     private let sessionGen = Lock<UInt64>(0)
 
     init(language: String) {
@@ -35,11 +39,34 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier))
     }
 
+    // MARK: - SpeechBackend (used only on the hub-less test/degenerate path)
+
     func start(
         onPartial: @escaping @Sendable (PartialTranscript) -> Void,
         onAudioLevel: @escaping @Sendable (Float) -> Void,
         onError: @escaping @Sendable (Error) -> Void
     ) {
+        // Audio level is owned by the AudioTapHub now; onAudioLevel is ignored.
+        Task { @MainActor in
+            await self.beginSession(onPartial: onPartial, onError: onError)
+            self.openStream()
+        }
+    }
+
+    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
+        finish(completion: completion)
+    }
+
+    func cancel() { cancelSession() }
+
+    // MARK: - PushCaptureEngine
+
+    /// Phase 1 — create the recognition request + task and arm the session so
+    /// `ingest` is accepted. No audio source here; the hub pushes buffers.
+    func beginSession(
+        onPartial: @escaping @Sendable (PartialTranscript) -> Void,
+        onError: @escaping @Sendable (Error) -> Void
+    ) async {
         guard !isRunning else { return }
         guard let recognizer = recognizer else {
             onError(NSError(domain: "Dousha", code: -1,
@@ -72,29 +99,6 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
             return gen
         }
 
-        let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self = self else { return }
-            // Drop audio buffers belonging to a previous (canceled) session.
-            // self.request is nil-ed out by stop()/cancel(), so the append
-            // would be a no-op anyway, but the gen check makes the intent
-            // explicit and survives any future tap-retention changes.
-            guard self.sessionGen.value() == myGen else { return }
-            self.request?.append(buffer)
-            let level = AppleSpeechBackend.computeRMS(buffer)
-            DispatchQueue.main.async { onAudioLevel(level) }
-        }
-
-        audioEngine.prepare()
-        do {
-            try audioEngine.start()
-        } catch {
-            onError(error)
-            return
-        }
-
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self = self else { return }
             // Drop callbacks from canceled generations. Without this, a server
@@ -106,7 +110,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
                 let text = result.bestTranscription.formattedString
                 self.lastText = text
                 // Apple gives one cumulative best transcript with no finalization
-                // boundary, so it is all interim until stop() returns the final.
+                // boundary, so it is all interim until finish() returns the final.
                 let partial = PartialTranscript(finalText: "", interimText: text)
                 DispatchQueue.main.async { onPartial(partial) }
             }
@@ -123,8 +127,21 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         isRunning = true
     }
 
-    /// Stops capture and waits briefly for the final transcription before completing.
-    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
+    /// Phase 2 — Apple has no separate stream to open; the recognition task is
+    /// already live from `beginSession`.
+    func openStream() {}
+
+    /// Feed one native mic buffer (pushed from the AudioTapHub) to the recognizer.
+    func ingest(_ buffer: AVAudioPCMBuffer) {
+        // After finish()/cancelSession() isRunning is false and request is nil, so
+        // a late buffer from the hub's drain window is dropped rather than fed to
+        // a torn-down session.
+        guard isRunning, let request else { return }
+        request.append(buffer)
+    }
+
+    /// Stops the session and waits briefly for the final transcription.
+    func finish(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
         guard isRunning else {
             completion(TranscriptionResult(
                 text: lastText,
@@ -143,8 +160,6 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         // whatever lastText held at the moment the user hit cancel.
         let myGen = sessionGen.value()
 
-        audioEngine.inputNode.removeTap(onBus: 0)
-        audioEngine.stop()
         request?.endAudio()
 
         // Give the recognizer a brief window to emit the final result.
@@ -168,7 +183,7 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         }
     }
 
-    func cancel() {
+    func cancelSession() {
         guard isRunning else { return }
         isRunning = false
 
@@ -176,27 +191,10 @@ final class AppleSpeechBackend: SpeechBackend, @unchecked Sendable {
         // synchronously off task.cancel() / endAudio is already orphaned.
         sessionGen.withLock { $0 &+= 1 }
 
-        audioEngine.inputNode.removeTap(onBus: 0)
-        audioEngine.stop()
         request?.endAudio()
         task?.cancel()
         task = nil
         request = nil
         lastText = ""
-    }
-
-    static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
-        guard let channelData = buffer.floatChannelData?[0] else { return 0 }
-        let frameLength = Int(buffer.frameLength)
-        guard frameLength > 0 else { return 0 }
-        var sum: Float = 0
-        for i in 0..<frameLength {
-            let v = channelData[i]
-            sum += v * v
-        }
-        let rms = sqrt(sum / Float(frameLength))
-        // RMS for normal speech sits around 0.02-0.15; boost so the bars react well.
-        let boosted = rms * 6.0
-        return min(1.0, max(0.0, boosted))
     }
 }

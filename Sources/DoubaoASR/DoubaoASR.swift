@@ -12,9 +12,6 @@ import ASRSupport
 /// Doubao's per-device concurrent quota to fill up after a few fast
 /// sessions; the ~600ms TLS+StartTask cost per call is the price.
 public actor DoubaoASR {
-    private let audioEngine = AVAudioEngine()
-    private var pcmConverter: AVAudioConverter?
-    private var pcmTargetFormat: AVAudioFormat?
     private var opusEncoder: OpusEncoder?
 
     private var session: URLSession?
@@ -79,20 +76,17 @@ public actor DoubaoASR {
     /// "getting cut off" before the user finishes.
     private var pingTask: Task<Void, Never>?
 
-    // Callbacks (assigned in start)
+    // Callbacks (assigned in prepareSession). Audio level is owned by the
+    // AudioTapHub now, so the engine no longer forwards it.
     private var onPartial: (@Sendable (PartialTranscript) -> Void)?
-    private var onAudioLevel: (@Sendable (Float) -> Void)?
     private var onError: (@Sendable (Error) -> Void)?
 
     private var framesSentCount = 0
     private var totalPcmBytesOut: Int = 0
 
-    // WAV side-recording for fallback re-transcription on WS drops.
-    // The writer is held as a const-after-init local in startMicTap so the audio
-    // tap closure (which is non-isolated and runs on the audio thread) can call
-    // .append() directly without hopping into the actor. The actor's reference
-    // is just for close() during _stop().
-    private var wavWriter: WavFileWriter?
+    /// When audio capture began for this session. Set in `prepareSession`
+    /// (capture itself is now owned by the shared `AudioTapHub`); drives the
+    /// trace clock and the reported `audioDuration`.
     private(set) var audioStartedAt: Date?
 
     /// Wall-clock timestamps of every VAD-finalized segment commit during this
@@ -111,53 +105,34 @@ public actor DoubaoASR {
     /// user released?".
     private(set) var lastTranscriptAt: Date?
 
-    /// Path where the rolling per-session WAV gets written.
-    public static var savedAudioURL: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Dousha", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("last_recording.wav")
-    }
-
     /// Creates an idle recognizer. No mic access, network, or registration
-    /// happens until `start()` is called.
+    /// happens until `prepareSession()` / `openStream()` are called.
     public init() {}
 
     // MARK: - Lifecycle
 
-    /// Begins capturing the microphone and streaming audio to Doubao.
+    /// Phase 1 — reset session state and mark the engine ready to accept pushed
+    /// PCM, without touching the network. `onPartial` is called on the main
+    /// queue with the evolving cumulative transcript; `onError` on the main queue
+    /// if the WebSocket handshake or ASR session fails (after which you should
+    /// still call `stop()` to clean up).
     ///
-    /// - Parameters:
-    ///   - onPartial: Called on the main queue with the live transcript as it
-    ///     evolves. Includes both VAD-finalized segments and the in-progress
-    ///     interim text. May be called many times per second; updates are
-    ///     cumulative (not deltas).
-    ///   - onAudioLevel: Called on the main queue with a 0...1 RMS level
-    ///     suitable for driving a waveform UI.
-    ///   - onError: Called on the main queue if registration, the WebSocket
-    ///     handshake, or the ASR session fails. After an error you should
-    ///     still call `stop()` to clean up.
+    /// `MultiEngineBackend` awaits this for
+    /// every engine BEFORE starting the shared `AudioTapHub`, so a buffer pushed
+    /// the instant the mic goes live can't arrive before `isRunning` flips (which
+    /// would drop the opening words). Mic capture + the rolling WAV are now owned
+    /// by the hub; audio arrives via `ingest(_:)`.
     ///
-    /// Calling `start()` while already running is a no-op.
     /// - Parameter contextHint: Recognition context (e.g. a glossary of domain
     ///   terms joined into a string) sent in StartSession `extra.context`. Pass
     ///   `""` for none. Snapshotted for the duration of this recording.
-    public nonisolated func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-                                  onAudioLevel: @escaping @Sendable (Float) -> Void,
-                                  onError: @escaping @Sendable (Error) -> Void,
-                                  contextHint: String = "") {
-        Task { await self._start(onPartial: onPartial, onAudioLevel: onAudioLevel, onError: onError, contextHint: contextHint) }
-    }
-
-    private func _start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-                        onAudioLevel: @escaping @Sendable (Float) -> Void,
-                        onError: @escaping @Sendable (Error) -> Void,
-                        contextHint: String) async {
+    public func prepareSession(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
+                               onError: @escaping @Sendable (Error) -> Void,
+                               contextHint: String = "") {
         guard !isRunning else { return }
         isRunning = true
         self.contextHint = contextHint
         self.onPartial = onPartial
-        self.onAudioLevel = onAudioLevel
         self.onError = onError
         self.committedSegments = []
         self.currentInterim = ""
@@ -170,41 +145,25 @@ public actor DoubaoASR {
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
         self.finishedChannel = OneShotChannel<Void>()
-        self.audioStartedAt = nil
+        self.audioStartedAt = Date()
         self.lastResponseAt = nil
         self.lastTranscriptAt = nil
-        self.wavWriter = nil
+        doushaLog("[DoubaoASR] traceId=\(requestId) prepareSession (capture owned by AudioTapHub)")
+    }
 
-        doushaLog("[DoubaoASR] traceId=\(requestId) start")
+    /// Phase 2 — open the WebSocket and run StartTask/StartSession, then flush
+    /// whatever PCM buffered during setup. Fire-and-forget: returns immediately
+    /// so the hub's capture (already live) overlaps the ~600ms WS handshake,
+    /// with frames accumulating in `pcmBuffer` (`canSendAudio` stays false) until
+    /// the session is ready — same "no swallowed opening words" guarantee as the
+    /// old mic-first ordering, just with the mic upstream in the hub.
+    public nonisolated func openStream() {
+        Task { await self._openStream() }
+    }
 
+    private func _openStream() async {
+        guard isRunning else { return }
         do {
-            // Open the rolling WAV and start the mic tap BEFORE anything that can
-            // block (credential refresh, opus init, the WS handshake). The tap
-            // only needs the WAV writer + the audio converter — not creds, not
-            // opus (encoding happens later in the flush path), not the socket
-            // (canSendAudio stays false until StartSession succeeds, so frames
-            // just accumulate in pcmBuffer). Starting capture first means a JWT
-            // refresh round-trip or the ~600ms WS setup can no longer swallow the
-            // opening words: that latency now overlaps with buffering instead of
-            // delaying the moment the mic goes live.
-            do {
-                // Remove any prior file so AVAudioFile's "no overwrite" semantics don't bite us.
-                try? FileManager.default.removeItem(at: Self.savedAudioURL)
-                self.wavWriter = try WavFileWriter(
-                    url: Self.savedAudioURL,
-                    sampleRate: DoubaoConstants.sampleRate,
-                    channels: DoubaoConstants.channels
-                )
-                self.audioStartedAt = Date()
-                doushaLog("[DoubaoASR] WAV side-recording opened at \(Self.savedAudioURL.path)")
-            } catch {
-                doushaLog("[DoubaoASR] WAV writer failed to open: \(error.localizedDescription) — continuing without side recording")
-                self.wavWriter = nil
-            }
-
-            try startMicTap()
-            doushaLog("[DoubaoASR] mic tap started (pre-creds, pre-WS)")
-
             let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
             self.token = creds.token
             self.deviceId = creds.deviceId
@@ -226,17 +185,19 @@ public actor DoubaoASR {
             self.canSendAudio = true
             try await flushPendingFrames()
         } catch {
-            doushaLog("[DoubaoASR] start() failed: \(error.localizedDescription)")
+            doushaLog("[DoubaoASR] openStream() failed: \(error.localizedDescription)")
             deliverError(error)
             await closeWebSocket()
-            teardownAudio()
-            if let writer = self.wavWriter {
-                try? writer.close()
-                self.wavWriter = nil
-            }
             isRunning = false
             signalFinished()
         }
+    }
+
+    /// Push one chunk of int16 16 kHz mono PCM from the shared `AudioTapHub`.
+    /// Replaces the old internal mic-tap callback; buffers until `canSendAudio`,
+    /// then streams in Opus frames.
+    public nonisolated func ingest(_ pcm: Data) {
+        Task { await self.appendAndDrainPCM(pcm) }
     }
 
     /// Aborts the current recording without sending `FinishSession`, discarding
@@ -262,21 +223,10 @@ public actor DoubaoASR {
         // Quarantine callbacks FIRST so the close handshake can't deliver a
         // stale error/partial up the stack.
         self.onPartial = nil
-        self.onAudioLevel = nil
         self.onError = nil
 
-        teardownAudio()
-
-        // Close & delete the WAV. close() is a barrier on the writer's serial
-        // queue; calling it ensures any in-flight append from the mic tap is
-        // flushed before we remove the file. Without this you can race with the
-        // tap's dispatched-async append and end up with a partially-written
-        // file resurfacing on disk after the unlink.
-        if let writer = self.wavWriter {
-            try? writer.close()
-            self.wavWriter = nil
-        }
-        try? FileManager.default.removeItem(at: Self.savedAudioURL)
+        // Mic capture + the shared WAV are owned by the AudioTapHub, which the
+        // coordinator cancels separately — nothing to tear down here.
 
         // Graceful WS close — sends Normal Closure (1000) and waits for the
         // server's ack so Doubao's concurrent-session counter clears promptly.
@@ -317,42 +267,27 @@ public actor DoubaoASR {
                 traceId: requestId
             )
         }
-        // Stop the mic tap first so no new audio is captured, but keep
-        // isRunning=true through the drain below. The tap dispatches each
-        // captured buffer to the actor as its own Task (appendAndDrainPCM), and
-        // the last buffers the user spoke may still be queued when stop() runs.
-        // Flipping isRunning=false here would make appendAndDrainPCM's guard
-        // silently drop them, truncating the final word no matter how much
-        // trailing silence we pad. Draining first is what actually preserves the
-        // tail; the padding never did.
-        teardownAudio()
-        await drainInFlightAudio()
+        // The shared AudioTapHub has already removed the mic tap and held its own
+        // drain window before calling us, so no new audio is arriving. But the
+        // tap dispatched the last buffers the user spoke as separate Tasks into
+        // this actor (ingest → appendAndDrainPCM); some may still be queued ahead
+        // of nothing — yield a few times so they land in pcmBuffer before we flip
+        // isRunning=false (which would otherwise drop them via the ingest guard,
+        // truncating the final word). Draining is what preserves the tail.
+        for _ in 0..<4 { await Task.yield() }
         isRunning = false
 
-        // Trailing silence into both the WAV and the outbound PCM buffer so the
-        // server's VAD finalizes the last utterance. The explicit
-        // `finish_audio: true` on the last frame should make this unnecessary;
-        // gated on a tunable (see DoubaoConstants.trailingSilencePadMs) so the
-        // amount can be dialed in against real-device tail-truncation tests.
+        // Trailing silence into the outbound PCM buffer so the server's VAD
+        // finalizes the last utterance. The explicit `finish_audio: true` on the
+        // last frame should make this unnecessary; gated on a tunable (see
+        // DoubaoConstants.trailingSilencePadMs) so the amount can be dialed in
+        // against real-device tail-truncation tests. (The shared WAV is owned by
+        // the hub; padding it is unnecessary and pad is 0 by default anyway.)
         let padSamples = DoubaoConstants.trailingSilencePadSamples
         if padSamples > 0 {
             let padBytes = padSamples * MemoryLayout<Int16>.size
             self.pcmBuffer.append(Data(count: padBytes))
             self.totalPcmBytesOut += padBytes
-            if let writer = self.wavWriter {
-                let zeros = [Int16](repeating: 0, count: padSamples)
-                zeros.withUnsafeBufferPointer { buf in
-                    writer.append(int16Samples: buf.baseAddress!, count: buf.count)
-                }
-            }
-        }
-
-        if let writer = self.wavWriter {
-            // close() blocks until all queued writes have flushed — this is what
-            // makes it safe for the retranscribe path to read the file immediately
-            // after stop() returns.
-            try? writer.close()
-            self.wavWriter = nil
         }
 
         // Drain ALL pending frames (whatever audio is still buffered, plus any
@@ -393,7 +328,7 @@ public actor DoubaoASR {
         let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
         let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
-        let savedURL: URL? = FileManager.default.fileExists(atPath: Self.savedAudioURL.path) ? Self.savedAudioURL : nil
+        let savedURL: URL? = FileManager.default.fileExists(atPath: AudioCapturePaths.sharedWAV.path) ? AudioCapturePaths.sharedWAV : nil
 
         let maxSegmentGap: TimeInterval? = {
             // Only meaningful with 2+ commits — the lead gap from audioStartedAt
@@ -463,27 +398,6 @@ public actor DoubaoASR {
             self.wsCloseChannels.remove(closingGeneration)
             closingSession?.invalidateAndCancel()
         }
-    }
-
-    private func teardownAudio() {
-        if audioEngine.isRunning {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            audioEngine.stop()
-        }
-    }
-
-    /// Lets the mic tap's already-dispatched appendAndDrainPCM tasks — the tail
-    /// the user spoke microseconds before releasing — run and append to
-    /// pcmBuffer before _stop() flushes and sends FinishSession. Must be called
-    /// while isRunning is still true (so the guard in appendAndDrainPCM lets the
-    /// appends through) and after teardownAudio() (so no new buffers arrive).
-    private func drainInFlightAudio() async {
-        // A few yields drain whatever is already queued on the actor; the short
-        // sleep covers a tap callback that was mid-flight on the audio thread
-        // when teardownAudio() removed the tap and dispatched one last buffer.
-        for _ in 0..<4 { await Task.yield() }
-        let ns = UInt64(DoubaoConstants.stopDrainWindowMs) * 1_000_000
-        if ns > 0 { try? await Task.sleep(nanoseconds: ns) }
     }
 
     private func closeWebSocket() async {
@@ -830,77 +744,7 @@ public actor DoubaoASR {
         finishedChannel?.finish(())
     }
 
-    // MARK: - Mic capture
-
-    private func startMicTap() throws {
-        let inputNode = audioEngine.inputNode
-        let inFormat = inputNode.outputFormat(forBus: 0)
-
-        guard let target = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: Double(DoubaoConstants.sampleRate),
-            channels: AVAudioChannelCount(DoubaoConstants.channels),
-            interleaved: true
-        ) else {
-            throw OpusEncoder.OpusError.formatBuildFailed
-        }
-        self.pcmTargetFormat = target
-
-        guard let converter = AVAudioConverter(from: inFormat, to: target) else {
-            throw OpusEncoder.OpusError.converterInitFailed
-        }
-        self.pcmConverter = converter
-
-        // Snapshot for the audio-thread closure so it doesn't reach into actor state.
-        let audioLevelCallback = self.onAudioLevel
-        let capturedConverter = UncheckedSendable(converter)
-        let capturedTarget = UncheckedSendable(target)
-        let capturedWavWriter = self.wavWriter   // may be nil — that's fine
-
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { [weak self] buffer, _ in
-            // Audio thread — must not block.
-            let level = AudioLevel.computeRMS(buffer)
-            DispatchQueue.main.async { audioLevelCallback?(level) }
-
-            let converter = capturedConverter.value
-            let target = capturedTarget.value
-
-            let ratio = target.sampleRate / buffer.format.sampleRate
-            let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 1024)
-            guard let outBuf = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
-
-            var fed = false
-            var convError: NSError?
-            _ = converter.convert(to: outBuf, error: &convError) { _, outStatus in
-                if fed {
-                    outStatus.pointee = .noDataNow
-                    return nil
-                }
-                fed = true
-                outStatus.pointee = .haveData
-                return buffer
-            }
-            if let e = convError {
-                doushaLog("[DoubaoASR] mic convert error: \(e)")
-                return
-            }
-            let n = Int(outBuf.frameLength)
-            guard n > 0, let src = outBuf.int16ChannelData?[0] else { return }
-
-            if let writer = capturedWavWriter {
-                writer.append(int16Samples: src, count: n)
-            }
-
-            let byteCount = n * MemoryLayout<Int16>.size
-            let chunk = Data(bytes: src, count: byteCount)
-
-            Task { await self?.appendAndDrainPCM(chunk) }
-        }
-
-        audioEngine.prepare()
-        try audioEngine.start()
-    }
+    // MARK: - PCM ingest (audio pushed from the shared AudioTapHub)
 
     private func appendAndDrainPCM(_ data: Data) async {
         guard isRunning else { return }
@@ -973,152 +817,6 @@ public actor DoubaoASR {
     private func deliverError(_ error: Error) {
         let cb = onError
         DispatchQueue.main.async { cb?(error) }
-    }
-
-    // MARK: - Retranscribe
-
-    /// Open a fresh session and stream the given WAV file's audio through Doubao,
-    /// returning the final transcript. Does NOT touch the mic or HUD. The caller
-    /// (DoubaoBackend) is responsible for showing whatever UI it wants.
-    ///
-    /// On any error, returns whatever partial text was assembled (possibly empty).
-    public func retranscribe(wavURL: URL, parentTraceId: String? = nil) async -> String {
-
-        // Don't let a retranscribe stomp on a live recording session.
-        guard !isRunning else {
-            doushaLog("[DoubaoASR] retranscribe rejected — session already running")
-            return ""
-        }
-
-        // Quarantine the live-session callbacks so a server error during retranscribe
-        // doesn't bleed into AppDelegate's recording-error handler. Restored on exit.
-        let savedOnPartial = self.onPartial
-        let savedOnAudioLevel = self.onAudioLevel
-        let savedOnError = self.onError
-        defer {
-            self.onPartial = savedOnPartial
-            self.onAudioLevel = savedOnAudioLevel
-            self.onError = savedOnError
-        }
-        self.onPartial = { _ in }
-        self.onAudioLevel = { _ in }
-        self.onError = { _ in }
-
-        // Reset session state (mirrors what start() does, minus the mic tap).
-        self.committedSegments = []
-        self.currentInterim = ""
-        self.pcmBuffer = Data()
-        self.didSendFirstFrame = false
-        self.canSendAudio = false
-        self.didReceiveFinal = false
-        self.framesSentCount = 0
-        self.totalPcmBytesOut = 0
-        self.requestId = UUID().uuidString.lowercased()
-        let parentTraceField = parentTraceId.map { " parent_traceId=\($0)" } ?? ""
-        doushaLog("[DoubaoASR] traceId=\(requestId)\(parentTraceField) retranscribe \(wavURL.lastPathComponent) starting")
-        self.finishedChannel = OneShotChannel<Void>()
-        self.lastResponseAt = nil
-        self.lastTranscriptAt = nil
-        self.audioStartedAt = Date()
-        self.isRunning = true
-        defer { self.isRunning = false }
-
-        do {
-            let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
-            self.token = creds.token
-            self.deviceId = creds.deviceId
-
-            self.opusEncoder = try OpusEncoder()
-
-            // Always force a fresh WebSocket + task for retranscribe — Doubao binds
-            // tasks to connections, and reusing a half-closed WS would silently skip
-            // StartTask via sendInitialMessages and run on stale task state.
-            await closeWebSocket()
-            self.taskStarted = false
-            try openWebSocket()
-            try await sendInitialMessages(deviceId: self.deviceId)
-            self.canSendAudio = true
-
-            try await streamWavFile(at: wavURL)
-
-            try await sendFinishSession()
-
-            // Match the main session's 10s wait — retranscribe burst-sends the
-            // whole WAV in one shot, so the server's post-finish processing
-            // backlog can be substantial. 5s was observed to cut the server off
-            // mid-decode on long recordings (jsonLen still growing when we hung up).
-            if let channel = finishedChannel {
-                _ = await waitWithTimeout(channel: channel, timeout: 10.0)
-            }
-        } catch {
-            doushaLog("[DoubaoASR] traceId=\(requestId)\(parentTraceField) t=\(traceElapsedMs())ms retranscribe error=\(error.localizedDescription)")
-        }
-
-        await closeWebSocket()
-
-        let final = assembledText()
-        doushaLog("[DoubaoASR] traceId=\(requestId)\(parentTraceField) t=\(traceElapsedMs())ms retranscribe done text.len=\(final.count)")
-        return final
-    }
-
-    /// Read a WAV file and push its int16 PCM through the existing send pipeline
-    /// in 20ms frames at ~realtime pace. We pace because Doubao's streaming ASR is
-    /// designed around mic-rate input, and feeding 30s of audio in a single burst
-    /// risks: (a) the server rejecting/throttling the connection, (b) the server's
-    /// VAD/partial-result loop collapsing into one giant utterance that returns
-    /// less granular text. Realtime pacing makes the replay indistinguishable from
-    /// a live mic session from the server's perspective.
-    private func streamWavFile(at url: URL) async throws {
-        let file = try AVAudioFile(forReading: url)
-        let frameCount = AVAudioFrameCount(file.length)
-        guard let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
-            throw NSError(domain: "DoubaoASR", code: -1, userInfo: [NSLocalizedDescriptionKey: "WAV buffer alloc failed"])
-        }
-        try file.read(into: buf)
-
-        // Convert to our send format (int16 16kHz mono interleaved) if needed.
-        let target = pcmTargetFormat ?? AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: Double(DoubaoConstants.sampleRate),
-            channels: AVAudioChannelCount(DoubaoConstants.channels),
-            interleaved: true
-        )!
-        let outBuf: AVAudioPCMBuffer
-        if buf.format == target {
-            outBuf = buf
-        } else {
-            guard let converter = AVAudioConverter(from: buf.format, to: target),
-                  let conv = AVAudioPCMBuffer(pcmFormat: target,
-                                              frameCapacity: AVAudioFrameCount(Double(buf.frameLength) * target.sampleRate / buf.format.sampleRate + 1024)) else {
-                throw NSError(domain: "DoubaoASR", code: -2, userInfo: [NSLocalizedDescriptionKey: "WAV converter init failed"])
-            }
-            var error: NSError?
-            var fed = false
-            converter.convert(to: conv, error: &error) { _, status in
-                if fed { status.pointee = .endOfStream; return nil }
-                fed = true
-                status.pointee = .haveData
-                return buf
-            }
-            if let e = error { throw e }
-            outBuf = conv
-        }
-
-        // Burst the entire WAV through the existing send pipeline. We previously
-        // paced each 20ms frame with a 20ms sleep "to match mic rate" out of
-        // caution about Doubao throttling, but the resulting ~realtime latency
-        // (30s replay for a 30s recording) was the dominant UX problem when the
-        // heuristic-retry kicks in. Burst-sending should be fine — Doubao's WS
-        // protocol doesn't advertise a rate limit, and any backpressure would
-        // surface as a WS error we can react to. Re-add pacing if that happens.
-        guard let i16 = outBuf.int16ChannelData?[0] else { return }
-        let totalSamples = Int(outBuf.frameLength)
-        let totalBytes = totalSamples * MemoryLayout<Int16>.size
-        let allData = Data(bytes: UnsafeRawPointer(i16), count: totalBytes)
-        self.pcmBuffer.append(allData)
-        self.totalPcmBytesOut += totalBytes
-        try await flushPendingFrames()
-        try await flushAndSendLastFrame()
     }
 
     private enum WaitOutcome<T: Sendable>: Sendable {
