@@ -1,5 +1,6 @@
 import Foundation
 import ASRSupport
+import SonioxASR
 import TalkerCommonSync
 
 /// Runs several engines in parallel during one recording and routes the final
@@ -102,8 +103,10 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                                     mixedEngine: prefs.mixedEngine)
 
         // One tap, fanned out to each engine's sink: int16 PCM for Doubao/Soniox,
-        // native buffers for Apple. The shared WAV is written whenever a PCM
-        // engine is active (it's the Soniox-async upload payload).
+        // native buffers for Apple. The shared WAV is the Soniox-async upload
+        // payload and nothing else reads it (retranscribe was removed), so write
+        // it only when Soniox async is actually active — Doubao-only and
+        // Soniox-realtime sessions skip the per-buffer disk I/O.
         var pcmSinks: [AudioTapHub.PCMSink] = []
         var bufferSinks: [AudioTapHub.BufferSink] = []
         for entry in entries {
@@ -119,7 +122,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                 doushaLog("[MultiEngine] \(entry.engine.rawValue) has no audio sink — check its capture protocol conformance")
             }
         }
-        let wantsWAV = entries.contains { $0.engine == .doubao || $0.engine == .soniox }
+        let wantsWAV = prefs.sonioxMode == .async && entries.contains { $0.engine == .soniox }
         let hub = AudioTapHub(pcmSinks: pcmSinks, bufferSinks: bufferSinks, wantsWAV: wantsWAV)
 
         return MultiEngineBackend(entries: entries, primary: primary, router: router, hub: hub)
@@ -340,8 +343,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                 text: "", audioDuration: 0, lastResponseAge: nil,
                 lastTranscriptAge: nil)
             let onlineTag = onlineChosen.map { "online=\($0.rawValue)" } ?? "online=none"
-            qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | \(onlineTag) | picked=\(engine.rawValue)")
-            doushaLog("[MultiEngine] picked \(engine.rawValue) len=\(result.text.count)")
+            doushaLog("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | \(onlineTag) | picked=\(engine.rawValue) len=\(result.text.count)")
             // Yielding to the AsyncStream is thread-safe from any thread; the
             // .final crosses to the main actor via the controller's `for await`,
             // so the explicit main-hop here is redundant.

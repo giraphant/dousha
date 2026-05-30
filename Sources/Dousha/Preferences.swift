@@ -70,7 +70,6 @@ final class Preferences: @unchecked Sendable {
         // turned cancel off and the app restarted.
         static let cancelHotkeyKeyCode       = "cancelHotkey.keyCode"
         static let refineMode                = "refineMode"
-        static let launchAtLogin             = "launchAtLogin"
         static let showDockIcon              = "showDockIcon"
         static let showMenuBarIcon           = "showMenuBarIcon"
     }
@@ -97,17 +96,9 @@ final class Preferences: @unchecked Sendable {
             Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode),
             Keys.refineMode:               RefineMode.immediate.rawValue,
             // Menu-bar accessory app by default: no Dock icon, status item shown.
-            // `launchAtLogin` here is only a UI mirror; SMAppService is the
-            // source of truth and is consulted directly when the window opens.
-            Keys.launchAtLogin:            false,
             Keys.showDockIcon:             false,
             Keys.showMenuBarIcon:          true
         ])
-    }
-
-    var launchAtLogin: Bool {
-        get { defaults.bool(forKey: Keys.launchAtLogin) }
-        set { defaults.set(newValue, forKey: Keys.launchAtLogin) }
     }
 
     var showDockIcon: Bool {
