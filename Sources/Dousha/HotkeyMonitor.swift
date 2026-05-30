@@ -3,13 +3,18 @@ import CoreGraphics
 import TalkerCommonSync
 
 /// Pure mode-aware dispatcher — extracted so it's testable without a real CGEvent tap.
+///
+/// `@MainActor`: it's only ever driven on the main actor (its press/release calls
+/// are hopped to `DispatchQueue.main` by `HotkeyMonitor`, and `forceIdle` is called
+/// from `AppDelegate`), and its `onStart`/`onStop` run main-actor work.
+@MainActor
 final class HotkeyEventDispatcher {
     private let mode: HotkeyMode
-    private let onStart: () -> Void
-    private let onStop:  () -> Void
+    private let onStart: @MainActor () -> Void
+    private let onStop:  @MainActor () -> Void
     private var isActive: Bool = false
 
-    init(mode: HotkeyMode, onStart: @escaping () -> Void, onStop: @escaping () -> Void) {
+    init(mode: HotkeyMode, onStart: @escaping @MainActor () -> Void, onStop: @escaping @MainActor () -> Void) {
         self.mode = mode
         self.onStart = onStart
         self.onStop = onStop
@@ -51,7 +56,12 @@ final class HotkeyEventDispatcher {
 /// CGEvent-tap-driven monitor for a single user-configured modifier key.
 /// Replaces FnKeyMonitor; supports any whitelisted modifier keycode and both
 /// push-to-talk and toggle trigger modes.
-final class HotkeyMonitor {
+/// `@unchecked Sendable`: the CGEvent tap is installed on the **main** run loop
+/// (`start()` is always called from the main actor), so the tap callback, the
+/// mutable tap/`isHeld` state, and the deferred dispatcher hops all execute on the
+/// main thread. The annotation lets the event-tap callback capture `self` into the
+/// `@Sendable` `DispatchQueue.main.async` thunk without a spurious data-race error.
+final class HotkeyMonitor: @unchecked Sendable {
     private let config: HotkeyConfig
     private let dispatcher: HotkeyEventDispatcher
 
@@ -59,9 +69,10 @@ final class HotkeyMonitor {
     private var runLoopSource: CFRunLoopSource?
     private var isHeld: Bool = false
 
+    @MainActor
     init(config: HotkeyConfig,
-         onStart: @escaping () -> Void,
-         onStop:  @escaping () -> Void) {
+         onStart: @escaping @MainActor () -> Void,
+         onStop:  @escaping @MainActor () -> Void) {
         self.config = config
         self.dispatcher = HotkeyEventDispatcher(mode: config.mode, onStart: onStart, onStop: onStop)
     }
@@ -154,6 +165,7 @@ final class HotkeyMonitor {
     /// Forwards to the internal dispatcher's forceIdle. Called by AppDelegate
     /// whenever its own status returns to .idle so dispatcher state stays in
     /// sync with the truth.
+    @MainActor
     func forceDispatcherIdle() {
         dispatcher.forceIdle()
     }
@@ -181,13 +193,13 @@ final class HotkeyMonitor {
             isHeld = true
             DispatchQueue.main.async { [weak self] in
                 doushaLog("[Dousha] HotkeyMonitor → dispatcher.handlePress")
-                self?.dispatcher.handlePress()
+                MainActor.assumeIsolated { self?.dispatcher.handlePress() }
             }
         } else if !nowHeld && isHeld {
             isHeld = false
             DispatchQueue.main.async { [weak self] in
                 doushaLog("[Dousha] HotkeyMonitor → dispatcher.handleRelease")
-                self?.dispatcher.handleRelease()
+                MainActor.assumeIsolated { self?.dispatcher.handleRelease() }
             }
         }
 

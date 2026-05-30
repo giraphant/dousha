@@ -2,6 +2,8 @@ import XCTest
 import AppKit
 @testable import Dousha
 
+// @MainActor: AppFocusTracker is @MainActor; these tests drive it synchronously.
+@MainActor
 final class AppFocusTrackerTests: XCTestCase {
     func testIgnore_returnsTrueForSelfBundleId() {
         let tracker = AppFocusTracker(selfBundleId: "com.dousha.app")

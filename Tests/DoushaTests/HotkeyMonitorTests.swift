@@ -2,6 +2,9 @@ import XCTest
 import CoreGraphics
 @testable import Dousha
 
+// @MainActor: the dispatch tests drive HotkeyEventDispatcher, which is @MainActor.
+// The pure modifier-mask / whitelist tests are static and run fine on the main actor.
+@MainActor
 final class HotkeyMonitorTests: XCTestCase {
 
     // MARK: - keyCode → modifier-bit mapping

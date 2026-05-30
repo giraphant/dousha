@@ -8,22 +8,25 @@ import Foundation
 /// Routine settings (hotkey, Soniox, LLM text fields) keep talking to
 /// `Preferences.shared` + `NotificationCenter` directly; only the genuinely
 /// system-touching toggles go through here.
+/// The closures are `@MainActor`: they're built by `AppDelegate` (main actor),
+/// reach main-actor state (activation policy, the status item, Doubao reset), and
+/// are invoked from the SwiftUI settings panes, which run on the main actor.
 struct SettingsActions {
     /// Current login-item state (read from the system, not the prefs mirror).
-    var isLaunchAtLoginEnabled: () -> Bool
+    var isLaunchAtLoginEnabled: @MainActor () -> Bool
     /// Enable/disable launch at login; throws so the UI can surface failures.
-    var setLaunchAtLogin: (Bool) throws -> Void
+    var setLaunchAtLogin: @MainActor (Bool) throws -> Void
 
     /// Current Dock-icon visibility (activation policy).
-    var isDockIconVisible: () -> Bool
+    var isDockIconVisible: @MainActor () -> Bool
     /// Show/hide the Dock icon, applied immediately.
-    var setDockIconVisible: (Bool) -> Void
+    var setDockIconVisible: @MainActor (Bool) -> Void
 
     /// Current menu-bar status-item visibility.
-    var isMenuBarIconVisible: () -> Bool
+    var isMenuBarIconVisible: @MainActor () -> Bool
     /// Show/hide the menu-bar status item, applied immediately.
-    var setMenuBarIconVisible: (Bool) -> Void
+    var setMenuBarIconVisible: @MainActor (Bool) -> Void
 
     /// Reset cached Doubao credentials (shows its own confirmation alert).
-    var resetDoubaoCredentials: () -> Void
+    var resetDoubaoCredentials: @MainActor () -> Void
 }

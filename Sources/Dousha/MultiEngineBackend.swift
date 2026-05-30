@@ -226,30 +226,105 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     /// All engines' finish() are still called (to release WS/recognizer); we just
     /// don't *wait* on results we won't use. `completion` fires exactly once.
     private func routeFinalResult(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
-        let lock = NSLock()
-        var results: [Engine: TranscriptionResult] = [:]
-        var timings: [Engine: TimeInterval] = [:]
-        var finished = false
-        var remaining = entries.count
-        let t0 = Date()
-
-        let primary = self.primary
-        let router = self.router
-        let classifier = router.classifierEngine
-        let orderedEngines = entries.map(\.engine)
-
         // QUA-153: language decided online (from recording-time partials), if any.
         let onlineChosen: Engine? = onlineSignal.text.map { router.slot(forScoreText: $0) }
+        let collector = FinalResultCollector(
+            primary: primary,
+            router: router,
+            orderedEngines: entries.map(\.engine),
+            onlineChosen: onlineChosen,
+            remaining: entries.count,
+            completion: completion
+        )
+        for entry in entries {
+            let engine = entry.engine
+            entry.backend.finish { result in
+                collector.record(engine: engine, result: result)
+            }
+        }
+    }
 
-        // All reads/writes below happen under `lock`.
-        func textOf(_ e: Engine) -> String? {
+    /// Collects each engine's final transcript (from arbitrary backend threads),
+    /// applies the QUA-153 online / classifier routing the instant enough results
+    /// are in, and fires `completion` exactly once. All mutable state is guarded by
+    /// `lock`; the engine `finish` completions are `@Sendable` and capture this
+    /// reference (a `Sendable` class) rather than the raw vars — which is what the
+    /// old `.v5`-mode nested-function + captured-var form did implicitly.
+    private final class FinalResultCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var results: [Engine: TranscriptionResult] = [:]
+        private var timings: [Engine: TimeInterval] = [:]
+        private var finished = false
+        private var remaining: Int
+        private let t0 = Date()
+
+        private let primary: Engine
+        private let router: LanguageRouter
+        private let classifier: Engine
+        private let orderedEngines: [Engine]
+        private let onlineChosen: Engine?
+        private let completion: @Sendable (TranscriptionResult) -> Void
+
+        init(primary: Engine,
+             router: LanguageRouter,
+             orderedEngines: [Engine],
+             onlineChosen: Engine?,
+             remaining: Int,
+             completion: @escaping @Sendable (TranscriptionResult) -> Void) {
+            self.primary = primary
+            self.router = router
+            self.classifier = router.classifierEngine
+            self.orderedEngines = orderedEngines
+            self.onlineChosen = onlineChosen
+            self.remaining = remaining
+            self.completion = completion
+        }
+
+        /// One engine's final transcript arrived. Routes + fires `completion` once.
+        func record(engine: Engine, result: TranscriptionResult) {
+            lock.lock()
+            defer { lock.unlock() }
+            results[engine] = result
+            timings[engine] = Date().timeIntervalSince(t0)
+            remaining -= 1
+            let allDone = remaining == 0
+            guard !finished else { return }
+
+            if let chosen = onlineChosen {
+                // Language already known from online partials — wait only for
+                // the chosen engine; ignore the classifier's final entirely.
+                if textOf(chosen) != nil {
+                    finish(chosen)
+                } else if allDone {
+                    finish(firstNonEmpty([primary] + orderedEngines) ?? primary)  // chosen empty/failed
+                }
+                // else: chosen engine still pending — wait for it.
+            } else if let cText = textOf(classifier) {
+                // We can route: classify the faithful engine's transcript.
+                let chosen = router.slot(forScoreText: cText)
+                if textOf(chosen) != nil {
+                    finish(chosen)                                  // routed engine's result is in
+                } else if allDone {
+                    finish(firstNonEmpty([primary] + orderedEngines) ?? primary)  // routed engine empty/failed
+                }
+                // else: routed (Chinese) engine still pending — wait for it.
+            } else if allDone {
+                // Classifier produced nothing — fall back over whatever we have.
+                finish(firstNonEmpty([primary] + orderedEngines) ?? primary)
+            }
+            // else: classifier still pending — wait for it.
+        }
+
+        // The helpers below assume `lock` is already held (only `record` calls them).
+        private func textOf(_ e: Engine) -> String? {
             guard let t = results[e]?.text.trimmingCharacters(in: .whitespacesAndNewlines),
                   !t.isEmpty else { return nil }
             return t
         }
-        func firstNonEmpty(_ order: [Engine]) -> Engine? { order.first { textOf($0) != nil } }
 
-        func finish(_ engine: Engine) {
+        private func firstNonEmpty(_ order: [Engine]) -> Engine? { order.first { textOf($0) != nil } }
+
+        private func finish(_ engine: Engine) {
             finished = true
             let elapsed = Date().timeIntervalSince(t0)
             let perEngine = orderedEngines.map { e -> String in
@@ -263,44 +338,8 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             let onlineTag = onlineChosen.map { "online=\($0.rawValue)" } ?? "online=none"
             qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | \(onlineTag) | picked=\(engine.rawValue)")
             doushaLog("[MultiEngine] picked \(engine.rawValue) len=\(result.text.count)")
+            let completion = self.completion
             DispatchQueue.main.async { completion(result) }
-        }
-
-        for entry in entries {
-            let engine = entry.engine
-            entry.backend.finish { result in
-                lock.lock()
-                defer { lock.unlock() }
-                results[engine] = result
-                timings[engine] = Date().timeIntervalSince(t0)
-                remaining -= 1
-                let allDone = remaining == 0
-                guard !finished else { return }
-
-                if let chosen = onlineChosen {
-                    // Language already known from online partials — wait only for
-                    // the chosen engine; ignore the classifier's final entirely.
-                    if textOf(chosen) != nil {
-                        finish(chosen)
-                    } else if allDone {
-                        finish(firstNonEmpty([primary] + orderedEngines) ?? primary)  // chosen empty/failed
-                    }
-                    // else: chosen engine still pending — wait for it.
-                } else if let cText = textOf(classifier) {
-                    // We can route: classify the faithful engine's transcript.
-                    let chosen = router.slot(forScoreText: cText)
-                    if textOf(chosen) != nil {
-                        finish(chosen)                                  // routed engine's result is in
-                    } else if allDone {
-                        finish(firstNonEmpty([primary] + orderedEngines) ?? primary)  // routed engine empty/failed
-                    }
-                    // else: routed (Chinese) engine still pending — wait for it.
-                } else if allDone {
-                    // Classifier produced nothing — fall back over whatever we have.
-                    finish(firstNonEmpty([primary] + orderedEngines) ?? primary)
-                }
-                // else: classifier still pending — wait for it.
-            }
         }
     }
 

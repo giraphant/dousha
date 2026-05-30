@@ -5,6 +5,7 @@ import TalkerCommonSync
 import SonioxASR
 
 enum SettingsWindowFactory {
+    @MainActor
     static func create(actions: SettingsActions) -> NSWindow {
         let view = SettingsView(actions: actions)
         let host = NSHostingController(rootView: view)
@@ -553,12 +554,12 @@ struct SettingsView: View {
 
 /// One-shot CGEvent tap that captures the next whitelisted modifier press,
 /// then automatically tears down. Used by the Settings "Record" button.
-final class HotkeyRecorder {
+final class HotkeyRecorder: @unchecked Sendable {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var onCaptured: ((UInt16) -> Void)?
+    private var onCaptured: (@MainActor (UInt16) -> Void)?
 
-    func start(onCaptured: @escaping (UInt16) -> Void) {
+    func start(onCaptured: @escaping @MainActor (UInt16) -> Void) {
         guard eventTap == nil else { return }
         self.onCaptured = onCaptured
 
@@ -601,8 +602,10 @@ final class HotkeyRecorder {
         }
         let captured = keyCode
         DispatchQueue.main.async { [weak self] in
-            self?.onCaptured?(captured)
-            self?.teardown()
+            MainActor.assumeIsolated {
+                self?.onCaptured?(captured)
+                self?.teardown()
+            }
         }
         return nil
     }

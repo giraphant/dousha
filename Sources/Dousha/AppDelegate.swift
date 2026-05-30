@@ -2,12 +2,15 @@ import Cocoa
 import SwiftUI
 import Speech
 import AVFoundation
-import ApplicationServices
+// @preconcurrency: kAXTrustedCheckOptionPrompt is an imported global the SDK
+// hasn't audited for Sendable; treat the access as a warning, not an error.
+@preconcurrency import ApplicationServices
 import DoubaoASR
 import SonioxASR
 import ASRSupport
 import TalkerCommonSync
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
@@ -382,7 +385,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Permissions
 
-    private func requestSpeechAndMicPermissions() {
+    // nonisolated: TCC delivers these authorization completions on a background
+    // queue. If the method were @MainActor, the empty closures would be inferred
+    // main-actor-isolated and Swift's executor check would trap when TCC calls
+    // them off-main (dispatch_assert_queue_fail). The body touches no actor state.
+    nonisolated private func requestSpeechAndMicPermissions() {
         SFSpeechRecognizer.requestAuthorization { _ in }
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
         let opts: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
@@ -403,7 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Most likely Accessibility permission isn't granted yet. Retry so
             // the user can grant it without restarting the app.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                self?.startHotkeyMonitor()
+                MainActor.assumeIsolated { self?.startHotkeyMonitor() }
             }
             return
         }
@@ -450,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !monitor.start() {
             doushaLog("[Dousha] CancelKeyMonitor: start() failed — retrying in 3s")
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                self?.startCancelKeyMonitor()
+                MainActor.assumeIsolated { self?.startCancelKeyMonitor() }
             }
             return
         }
@@ -498,7 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let delay = allowedAt.timeIntervalSinceNow
             doushaLog("[Dousha] handleStart deferred \(Int(delay * 1000))ms for cancel teardown")
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.handleStart()
+                MainActor.assumeIsolated { self?.handleStart() }
             }
             return
         }
@@ -515,41 +522,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hudModel.resetTranscript()
 
         let myToken = sessionToken
+        // The backend invokes these @Sendable thunks from its own actor/threads;
+        // each hops to DispatchQueue.main (the existing scheduling, unchanged) and
+        // assumes main-actor isolation to reach this @MainActor controller.
         speech.start(
             onPartial: { [weak self] partial in
                 DispatchQueue.main.async {
-                    guard let self = self, self.sessionToken == myToken else { return }
-                    // Drop late partials once we've left .recording. sessionToken
-                    // is bumped only on cancel, not normal stop, so a batch the
-                    // backend dispatched just before stop() can land here AFTER
-                    // setFinalTranscript — this gate stops it clobbering the final.
-                    guard self.status == .recording else { return }
-                    self.hudModel.updateTranscript(partial)
+                    MainActor.assumeIsolated {
+                        guard let self = self, self.sessionToken == myToken else { return }
+                        // Drop late partials once we've left .recording. sessionToken
+                        // is bumped only on cancel, not normal stop, so a batch the
+                        // backend dispatched just before stop() can land here AFTER
+                        // setFinalTranscript — this gate stops it clobbering the final.
+                        guard self.status == .recording else { return }
+                        self.hudModel.updateTranscript(partial)
+                    }
                 }
             },
             onAudioLevel: { [weak self] level in
                 DispatchQueue.main.async {
-                    guard let self = self, self.sessionToken == myToken else { return }
-                    self.hudModel.pushLevel(level)
+                    MainActor.assumeIsolated {
+                        guard let self = self, self.sessionToken == myToken else { return }
+                        self.hudModel.pushLevel(level)
+                    }
                 }
             },
             onError: { [weak self] error in
                 doushaLog("[Dousha] recognition error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    // Drop stale errors from a canceled or already-finished
-                    // session — otherwise a late TaskFailed from the server
-                    // would flash the HUD red after the user explicitly
-                    // canceled. The Doubao/Apple backends both *attempt* to
-                    // suppress these at the source (Apple via sessionGen,
-                    // Doubao by nil-ing onError in _cancel), so this is a
-                    // belt-and-braces guard for paths that escape both layers
-                    // (e.g., events queued onto main before cancel ran).
-                    guard self.sessionToken == myToken else {
-                        doushaLog("[Dousha] dropping stale error from superseded session")
-                        return
+                    MainActor.assumeIsolated {
+                        guard let self = self else { return }
+                        // Drop stale errors from a canceled or already-finished
+                        // session — otherwise a late TaskFailed from the server
+                        // would flash the HUD red after the user explicitly
+                        // canceled. The Doubao/Apple backends both *attempt* to
+                        // suppress these at the source (Apple via sessionGen,
+                        // Doubao by nil-ing onError in _cancel), so this is a
+                        // belt-and-braces guard for paths that escape both layers
+                        // (e.g., events queued onto main before cancel ran).
+                        guard self.sessionToken == myToken else {
+                            doushaLog("[Dousha] dropping stale error from superseded session")
+                            return
+                        }
+                        self.transitionToError(error.localizedDescription)
                     }
-                    self.transitionToError(error.localizedDescription)
                 }
             }
         )
@@ -566,21 +582,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speech.stop { [weak self] result in
             doushaLog("[Dousha] AppDelegate: speech.stop completion fired (text.len=\(result.text.count) dur=\(String(format: "%.1f", result.audioDuration))s lastTranscriptAge=\(result.lastTranscriptAge.map { String(format: "%.1f", $0) } ?? "nil") lastRespAge=\(result.lastResponseAge.map { String(format: "%.1f", $0) } ?? "nil"))")
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                // If the user (or HUD button) canceled while we were waiting
-                // for the backend to finish, the token has advanced. Drop the
-                // completion without injecting.
-                guard self.sessionToken == myToken else {
-                    doushaLog("[Dousha] stop completion superseded by cancel — dropping")
-                    return
+                MainActor.assumeIsolated {
+                    guard let self = self else { return }
+                    // If the user (or HUD button) canceled while we were waiting
+                    // for the backend to finish, the token has advanced. Drop the
+                    // completion without injecting.
+                    guard self.sessionToken == myToken else {
+                        doushaLog("[Dousha] stop completion superseded by cancel — dropping")
+                        return
+                    }
+                    let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else {
+                        self.status = .idle
+                        return
+                    }
+                    self.hudModel.setFinalTranscript(text)
+                    self.refineAndInject(text)
                 }
-                let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else {
-                    self.status = .idle
-                    return
-                }
-                self.hudModel.setFinalTranscript(text)
-                self.refineAndInject(text)
             }
         }
     }
@@ -599,11 +617,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch prefs.refineMode {
         case .immediate:
             // Wait for the polished text, then paste it (fall back to raw on failure).
+            // This Task is created in a @MainActor context, so it resumes on the
+            // main actor after the await — no extra main hop needed to inject.
             Task {
                 let refined = await refiner.refine(text)
-                DispatchQueue.main.async {
-                    self.injectAndFinish(refined ?? text)
-                }
+                self.injectAndFinish(refined ?? text)
             }
 
         case .deferred:
@@ -626,7 +644,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         injector.inject(text)
         // Brief green flash then back to idle.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.status = .idle
+            MainActor.assumeIsolated { self?.status = .idle }
         }
     }
 
@@ -649,9 +667,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speech.stop { _ in }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self = self else { return }
-            if self.isErrorStatus(self.status) {
-                self.status = .idle
+            MainActor.assumeIsolated {
+                guard let self = self else { return }
+                if self.isErrorStatus(self.status) {
+                    self.status = .idle
+                }
             }
         }
     }
