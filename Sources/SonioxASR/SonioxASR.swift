@@ -31,7 +31,7 @@ public actor SonioxASR {
     /// the current socket — so a stray in-flight message from a socket closed
     /// during a reconnect can't mutate fresh-session state. Mirrors
     /// the JS reference's `_isOld` old-socket guard.
-    private var wsGeneration = 0
+    private var wsGen = SessionGeneration()
 
     // State
     private var requestId: String = UUID().uuidString.lowercased()
@@ -258,10 +258,10 @@ public actor SonioxASR {
         // The socket's receive loop runs under the current generation; register
         // the close channel under it BEFORE the bump so the socket's own failure
         // callback (which fires with that generation) wakes this waiter.
-        let closingGeneration = wsGeneration
+        let closingGeneration = wsGen.live
         self.ws = nil
         self.session = nil
-        wsGeneration += 1
+        _ = wsGen.bump()
 
         let channel = wsCloseChannels.register(closingGeneration)
         closing.cancel(with: .normalClosure, reason: nil)
@@ -327,13 +327,13 @@ public actor SonioxASR {
         self.ws = nil
         // Register the close channel under the socket's current generation
         // BEFORE the bump so its own failure callback wakes this waiter.
-        let closingGeneration = wsGeneration
+        let closingGeneration = wsGen.live
         // Invalidate the old socket's receive callbacks NOW (before awaiting the
         // close handshake) so a trailing message during the close/reopen gap
         // can't mutate freshly-reset session state. The
         // failure callback still signals this generation's channel below — see
         // handleReceiveResult — so the handshake completes promptly.
-        wsGeneration += 1
+        _ = wsGen.bump()
 
         let channel = wsCloseChannels.register(closingGeneration)
         ws.cancel(with: .normalClosure, reason: nil)
@@ -363,8 +363,7 @@ public actor SonioxASR {
         self.session = sess
         self.ws = sess.webSocketTask(with: url)
         self.ws?.resume()
-        wsGeneration += 1
-        startReceiveLoop(generation: wsGeneration)
+        startReceiveLoop(generation: wsGen.bump())
         // Keepalive is started by the caller AFTER the config message is sent,
         // so a keepalive text frame can never precede the required first frame.
     }
@@ -414,19 +413,19 @@ public actor SonioxASR {
         try? await ws.send(.string(SonioxConfig.keepaliveMessageJSON))
     }
 
-    private func startReceiveLoop(generation: Int) {
+    private func startReceiveLoop(generation: Generation) {
         guard let ws = ws else { return }
         ws.receive { [weak self] result in
             Task { await self?.handleReceiveResult(result, generation: generation) }
         }
     }
 
-    private func handleReceiveResult(_ result: Result<URLSessionWebSocketTask.Message, Error>, generation: Int) async {
+    private func handleReceiveResult(_ result: Result<URLSessionWebSocketTask.Message, Error>, generation: Generation) async {
         switch result {
         case .success(let msg):
             // Drop content from a socket that has since been replaced/closed so
             // a trailing frame can't mutate fresh-session state.
-            guard generation == wsGeneration else { return }
+            guard wsGen.isCurrent(generation) else { return }
             let data: Data
             switch msg {
             case .data(let d):   data = d
@@ -441,13 +440,13 @@ public actor SonioxASR {
             }
         case .failure(let err):
             // Signal the close handshake BEFORE the generation guard: when
-            // closeWebSocket() bumps wsGeneration and cancels the socket, the
+            // closeWebSocket() bumps wsGen and cancels the socket, the
             // resulting failure callback is the only thing that wakes the
             // close-await. Gating it behind the guard would make every close
             // block the full 1s timeout. Keying by this callback's own
             // generation ensures a stale socket can't wake a newer close.
             wsCloseChannels.signal(generation)
-            guard generation == wsGeneration else { return }
+            guard wsGen.isCurrent(generation) else { return }
             doushaLog("[SonioxASR] receive failed: \(err.localizedDescription)")
             if isRunning {
                 deliverError(err)

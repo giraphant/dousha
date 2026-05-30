@@ -66,7 +66,7 @@ public actor DoubaoASR {
     /// generation no longer matches — so when the close handshake runs detached
     /// (off the stop critical path), a stray callback from the socket being
     /// closed can't tear down a freshly-opened session from a new recording.
-    private var wsGeneration = 0
+    private var wsGen = SessionGeneration()
 
     /// Periodic WebSocket-level PING. Lifecycle is tied to the WS itself: started
     /// in openWebSocket() and cancelled in closeWebSocket() and on receive-loop
@@ -380,11 +380,11 @@ public actor DoubaoASR {
         // The socket's receive loop runs under the current generation; register
         // the close channel under it BEFORE the bump so the socket's own failure
         // callback (which fires with that generation) wakes this waiter.
-        let closingGeneration = wsGeneration
+        let closingGeneration = wsGen.live
         self.ws = nil
         self.session = nil
         self.taskStarted = false
-        wsGeneration += 1
+        _ = wsGen.bump()
 
         let channel = wsCloseChannels.register(closingGeneration)
         closing.cancel(with: .normalClosure, reason: nil)
@@ -410,12 +410,12 @@ public actor DoubaoASR {
         self.ws = nil
         // Register the close channel under the socket's current generation
         // BEFORE the bump so its own failure callback wakes this waiter.
-        let closingGeneration = wsGeneration
+        let closingGeneration = wsGen.live
         // Invalidate this socket's receive callbacks NOW (before awaiting the
         // close handshake). This close may run detached off the stop path, so a
         // fresh _start() could open a new socket during the await — bumping the
         // generation keeps the old socket's trailing failure from tearing it down.
-        wsGeneration += 1
+        _ = wsGen.bump()
         // Capture the session this close owns; a reentrant _start() during the
         // await may replace self.session, and we must only tear down our own.
         let owningSession = session
@@ -461,8 +461,7 @@ public actor DoubaoASR {
         self.ws = sess.webSocketTask(with: req)
         self.ws?.resume()
         // The receive loop is shared across all sessions on this connection.
-        wsGeneration += 1
-        startReceiveLoop(generation: wsGeneration)
+        startReceiveLoop(generation: wsGen.bump())
         startPingLoop()
     }
 
@@ -564,7 +563,7 @@ public actor DoubaoASR {
         try await ws.send(.data(data))
     }
 
-    private func startReceiveLoop(generation: Int) {
+    private func startReceiveLoop(generation: Generation) {
         guard let ws = ws else { return }
         ws.receive { [weak self] result in
             // Bridge URLSession's delegate-queue callback into the actor.
@@ -572,12 +571,12 @@ public actor DoubaoASR {
         }
     }
 
-    private func handleReceiveResult(_ result: Result<URLSessionWebSocketTask.Message, Error>, generation: Int) async {
+    private func handleReceiveResult(_ result: Result<URLSessionWebSocketTask.Message, Error>, generation: Generation) async {
         switch result {
         case .success(let msg):
             // Drop content from a socket that has since been replaced/closed so
             // a trailing frame can't mutate a fresh session's state.
-            guard generation == wsGeneration else { return }
+            guard wsGen.isCurrent(generation) else { return }
             let data: Data
             switch msg {
             case .data(let d):   data = d
@@ -593,7 +592,7 @@ public actor DoubaoASR {
             }
         case .failure(let err):
             // Signal the close handshake BEFORE the generation guard: when
-            // closeWebSocket() bumps wsGeneration and cancels the socket, this
+            // closeWebSocket() bumps wsGen and cancels the socket, this
             // failure callback is what wakes the close-await. Gating it behind
             // the guard would make every close block the full 1s timeout. Keying
             // by this callback's own generation ensures a stale socket can't
@@ -601,7 +600,7 @@ public actor DoubaoASR {
             wsCloseChannels.signal(generation)
             // A stale-generation failure (the socket closeWebSocket() is tearing
             // down) must not touch the live session — return after signaling.
-            guard generation == wsGeneration else { return }
+            guard wsGen.isCurrent(generation) else { return }
             doushaLog("[DoubaoASR] receive failed: \(err.localizedDescription)")
             if isRunning {
                 deliverError(err)
