@@ -98,6 +98,48 @@ final class RecordingController {
         }
     }
 
+    // MARK: - Lifecycle
+
+    func start() {
+        guard status == .idle || isErrorStatus(status) else {
+            doushaLog("[RecordingController] start REJECTED (status=\(status))")
+            return
+        }
+        // Defer if a recent cancel hasn't finished tearing down (backend cancel is
+        // async; starting into a still-draining session would silently no-op).
+        if let allowedAt = nextStartAllowedAt, allowedAt > env.now() {
+            let delay = allowedAt.timeIntervalSince(env.now())
+            doushaLog("[RecordingController] start deferred \(Int(delay * 1000))ms for cancel teardown")
+            env.scheduleAfter(delay) { [weak self] in self?.start() }
+            return
+        }
+        nextStartAllowedAt = nil
+
+        let backend = env.makeBackend()
+        self.backend = backend
+        transition(to: .recording)
+        backend.setLanguage(env.language())
+        env.resetHUDLevels()
+        env.resetHUDTranscript()
+        installBackendCallbacks(backend, generation: generation)
+    }
+
+    private func installBackendCallbacks(_ backend: SpeechBackend, generation myGen: UInt64) {
+        // Completed in Task 3. Stub for now.
+        backend.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
+    }
+
+    func cancel() {
+        guard status == .recording else {
+            doushaLog("[RecordingController] cancel REJECTED (status=\(status))")
+            return
+        }
+        generation &+= 1                 // bump BEFORE cancel so racing completions short-circuit
+        backend?.cancel()
+        nextStartAllowedAt = env.now().addingTimeInterval(Self.cancelTeardownGuard)
+        transition(to: .idle)
+    }
+
     // Test-only seam to exercise `transition` directly.
     #if DEBUG
     func testHook_transition(to next: RecordingStatus) { transition(to: next) }

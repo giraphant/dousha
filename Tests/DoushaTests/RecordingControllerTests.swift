@@ -136,3 +136,49 @@ final class RecordingControllerTransitionTests: XCTestCase {
         XCTAssertEqual(spy.visibleLog, [true])
     }
 }
+
+@MainActor
+final class RecordingControllerStartTests: XCTestCase {
+
+    func testStart_fromIdle_buildsBackend_resetsHUD_entersRecording() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        XCTAssertEqual(spy.madeBackends.count, 1)
+        XCTAssertEqual(backend.languageSet, "zh-CN")
+        XCTAssertTrue(backend.startCalled)
+        XCTAssertEqual(spy.resetLevelsCount, 1)
+        XCTAssertEqual(spy.resetTranscriptCount, 1)
+        XCTAssertEqual(c.status, .recording)
+    }
+
+    func testStart_fromRecording_isRejected() {
+        let (c, spy, _) = makeSUT()
+        c.start()
+        c.start()
+        XCTAssertEqual(spy.madeBackends.count, 1)
+        XCTAssertEqual(c.status, .recording)
+    }
+
+    func testStart_fromError_isAccepted() {
+        let (c, _, _) = makeSUT()
+        c.testHook_transition(to: .error("boom"))
+        c.start()
+        XCTAssertEqual(c.status, .recording)
+    }
+
+    func testStart_withinTeardownGuard_defersThenProceeds() {
+        let (c, spy, sched) = makeSUT()
+        c.start()
+        c.cancel()
+        XCTAssertEqual(c.status, .idle)
+        let backendsAfterCancel = spy.madeBackends.count
+        c.start()
+        XCTAssertEqual(c.status, .idle, "start within guard window must defer")
+        XCTAssertEqual(spy.madeBackends.count, backendsAfterCancel, "no backend built yet")
+        XCTAssertEqual(sched.pendingCount, 1, "a retry was scheduled")
+        sched.advance(by: 0.25)
+        XCTAssertEqual(c.status, .recording)
+        XCTAssertEqual(spy.madeBackends.count, backendsAfterCancel + 1)
+    }
+}
