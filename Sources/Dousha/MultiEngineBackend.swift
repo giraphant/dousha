@@ -82,52 +82,75 @@ final class MultiEngineBackend: SpeechBackend {
     }
 
     func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
-        let group = DispatchGroup()
+        // Early-exit routing: we only need the Chinese-specialist's result when
+        // the speech is actually Chinese. The language-faithful "classifier"
+        // engine (English slot — renders English as Latin, Chinese as Han) tells
+        // us which it is. So:
+        //   • classifier returns English/mixed → use it NOW, skip waiting for 豆包.
+        //   • classifier returns Chinese       → wait for the Chinese engine.
+        // All engines' stop() are still called (to release mic/WS); we just don't
+        // *wait* on results we won't use. `completion` fires exactly once.
         let lock = NSLock()
         var results: [Engine: TranscriptionResult] = [:]
         var timings: [Engine: TimeInterval] = [:]
+        var finished = false
+        var remaining = entries.count
         let t0 = Date()
-
-        for entry in entries {
-            let engine = entry.engine
-            group.enter()
-            entry.backend.stop { result in
-                lock.lock()
-                results[engine] = result
-                timings[engine] = Date().timeIntervalSince(t0)
-                lock.unlock()
-                group.leave()
-            }
-        }
 
         let primary = self.primary
         let router = self.router
+        let classifier = router.classifierEngine
         let orderedEngines = entries.map(\.engine)
-        group.notify(queue: .main) {
-            let textMap = results.mapValues {
-                $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
+
+        // All reads/writes below happen under `lock`.
+        func textOf(_ e: Engine) -> String? {
+            guard let t = results[e]?.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !t.isEmpty else { return nil }
+            return t
+        }
+        func firstNonEmpty(_ order: [Engine]) -> Engine? { order.first { textOf($0) != nil } }
+
+        func finish(_ engine: Engine) {
+            finished = true
             let elapsed = Date().timeIntervalSince(t0)
-            // Per-engine: transcript length + when it returned (ms after stop).
             let perEngine = orderedEngines.map { e -> String in
-                let len = textMap[e]?.count ?? -1
+                let len = textOf(e)?.count ?? -1
                 let ms = timings[e].map { Int($0 * 1000) } ?? -1
-                return "\(e.rawValue)(len=\(len),\(ms)ms\(e == primary ? ",PRIMARY" : ""))"
+                return "\(e.rawValue)(\(len)ch,\(ms)ms\(e == primary ? ",P" : "")\(e == classifier ? ",CLS" : ""))"
             }.joined(separator: " ")
-            if let pick = router.pickBest(results: textMap, primary: primary),
-               let chosen = results[pick.engine] {
-                qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | picked=\(pick.engine.rawValue)")
-                doushaLog("[MultiEngine] picked \(pick.engine.rawValue) (len=\(chosen.text.count)) from \(results.count) engines")
-                completion(chosen)
-            } else {
-                qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | picked=NONE(all empty)")
-                // Everything came back empty — hand back the primary's (empty)
-                // result so the caller's empty-text guard runs as usual.
-                let fallback = results[primary] ?? results.values.first
-                    ?? TranscriptionResult(text: "", audioDuration: 0,
-                                           lastResponseAge: nil, lastTranscriptAge: nil,
-                                           savedAudioURL: nil)
-                completion(fallback)
+            let result = results[engine] ?? TranscriptionResult(
+                text: "", audioDuration: 0, lastResponseAge: nil,
+                lastTranscriptAge: nil, savedAudioURL: nil)
+            qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | picked=\(engine.rawValue)")
+            doushaLog("[MultiEngine] picked \(engine.rawValue) len=\(result.text.count)")
+            DispatchQueue.main.async { completion(result) }
+        }
+
+        for entry in entries {
+            let engine = entry.engine
+            entry.backend.stop { result in
+                lock.lock()
+                defer { lock.unlock() }
+                results[engine] = result
+                timings[engine] = Date().timeIntervalSince(t0)
+                remaining -= 1
+                let allDone = remaining == 0
+                guard !finished else { return }
+
+                if let cText = textOf(classifier) {
+                    // We can route: classify the faithful engine's transcript.
+                    let chosen = router.slot(forScoreText: cText)
+                    if textOf(chosen) != nil {
+                        finish(chosen)                                  // routed engine's result is in
+                    } else if allDone {
+                        finish(firstNonEmpty([primary] + orderedEngines) ?? primary)  // routed engine empty/failed
+                    }
+                    // else: routed (Chinese) engine still pending — wait for it.
+                } else if allDone {
+                    // Classifier produced nothing — fall back over whatever we have.
+                    finish(firstNonEmpty([primary] + orderedEngines) ?? primary)
+                }
+                // else: classifier still pending — wait for it.
             }
         }
     }

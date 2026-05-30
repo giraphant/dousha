@@ -57,12 +57,23 @@ final class LanguageRouterTests: XCTestCase {
 
     // MARK: - pickBest
 
-    func testPickBest_routesByPrimaryThenReturnsSlotResult() {
-        // Chinese-dominant text from both; should pick Chinese engine (doubao).
-        let results: [Engine: String] = [.doubao: "你好世界你好", .soniox: "你好world你好"]
+    func testPickBest_classifiesOnFaithfulEngine_notChineseSpecialist() {
+        // User spoke English. 豆包 (chinese slot) homophone-mangles it into Han
+        // chars — looks ~100% Chinese; Soniox (english slot) renders the real
+        // English. Must route to Soniox even though primary = 豆包.
+        let results: [Engine: String] = [.doubao: "普莱斯泰勒普利斯", .soniox: "price tailor please"]
+        let pick = router.pickBest(results: results, primary: .doubao)
+        XCTAssertEqual(pick?.engine, .soniox, "should classify on the faithful engine, not 豆包's homophones")
+        XCTAssertEqual(pick?.text, "price tailor please")
+    }
+
+    func testPickBest_chineseSpeech_routesToChineseEngine() {
+        // Chinese speech: the faithful engine (Soniox) also renders Han, so it
+        // reads as Chinese → use 豆包's (cleaner) Chinese transcript.
+        let results: [Engine: String] = [.doubao: "今天天气很好啊", .soniox: "今天天气很好"]
         let pick = router.pickBest(results: results, primary: .doubao)
         XCTAssertEqual(pick?.engine, .doubao)
-        XCTAssertEqual(pick?.text, "你好世界你好")
+        XCTAssertEqual(pick?.text, "今天天气很好啊")
     }
 
     func testPickBest_englishRoutesToSoniox() {

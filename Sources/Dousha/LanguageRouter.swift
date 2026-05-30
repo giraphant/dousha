@@ -72,23 +72,24 @@ struct LanguageRouter: Equatable {
     /// a stable order; routes to the matching slot; if that slot's result is
     /// empty, falls through to any non-empty result; returns nil if all empty.
     func pickBest(results: [Engine: String], primary: Engine) -> (engine: Engine, text: String)? {
-        // Stable scan order so selection is deterministic regardless of dict order.
-        let order = orderedCandidates(primary: primary)
+        // Score on the LANGUAGE-FAITHFUL engine. A Chinese-specialist (豆包)
+        // transcribes English speech as Chinese homophones — its output reads as
+        // ~100% CJK even for English, so it can't reveal that English was spoken.
+        // The English slot (e.g. Soniox) renders English as Latin and Chinese as
+        // Han, so it's the honest signal for language composition. Score it first;
+        // the Chinese engine's text is the LAST scoring choice.
+        let scoreOrder = dedup([englishEngine, mixedEngine, primary, chineseEngine])
+        // For falling back to "any non-empty result" prefer the primary (HUD source).
+        let fallbackOrder = dedup([primary, englishEngine, mixedEngine, chineseEngine])
 
-        func firstNonEmpty() -> (Engine, String)? {
+        func firstNonEmpty(_ order: [Engine]) -> (Engine, String)? {
             for e in order {
                 if let t = results[e], !t.isEmpty { return (e, t) }
             }
             return nil
         }
 
-        // Text used to decide the language.
-        let scoreText: String
-        if let p = results[primary], !p.isEmpty {
-            scoreText = p
-        } else if let (_, t) = firstNonEmpty() {
-            scoreText = t
-        } else {
+        guard let (_, scoreText) = firstNonEmpty(scoreOrder) else {
             return nil   // nothing transcribed
         }
 
@@ -97,17 +98,19 @@ struct LanguageRouter: Equatable {
             return (chosen, t)
         }
         // Chosen engine failed/absent — fall through to any non-empty result.
-        if let (e, t) = firstNonEmpty() {
-            return (e, t)
-        }
-        return nil
+        return firstNonEmpty(fallbackOrder)
     }
 
-    /// primary first, then the three slots (deduped), for deterministic scans.
-    private func orderedCandidates(primary: Engine) -> [Engine] {
+    /// The engine whose transcript should decide the language — the
+    /// language-faithful one (English slot, falling back to mixed, then Chinese).
+    /// `MultiEngineBackend` uses this to know when it can route without waiting
+    /// for the Chinese-specialist engine.
+    var classifierEngine: Engine { englishEngine }
+
+    private func dedup(_ engines: [Engine]) -> [Engine] {
         var seen = Set<Engine>()
         var out: [Engine] = []
-        for e in [primary, chineseEngine, englishEngine, mixedEngine] where !seen.contains(e) {
+        for e in engines where !seen.contains(e) {
             seen.insert(e)
             out.append(e)
         }

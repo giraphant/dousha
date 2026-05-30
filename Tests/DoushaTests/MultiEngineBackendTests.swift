@@ -37,11 +37,24 @@ final class MultiEngineBackendTests: XCTestCase {
                                         mixedEngine: .soniox)
 
     func testStop_routesChineseDominantToDoubao() {
+        // Chinese speech: Soniox (the faithful classifier) also renders Han, so it
+        // reads as Chinese → route to 豆包's cleaner Chinese transcript.
         let multi = MultiEngineBackend(
-            entries: [(.doubao, MockBackend(text: "你好世界你好啊")), (.soniox, MockBackend(text: "ni hao"))],
+            entries: [(.doubao, MockBackend(text: "你好世界你好啊")), (.soniox, MockBackend(text: "你好世界"))],
             primary: .doubao, router: router)
         let exp = expectation(description: "stop")
         multi.stop { XCTAssertEqual($0.text, "你好世界你好啊"); exp.fulfill() }
+        wait(for: [exp], timeout: 2)
+    }
+
+    func testStop_englishMangledByDoubao_stillRoutesToSoniox() {
+        // User spoke English; 豆包 homophone-mangles to Han (looks Chinese), Soniox
+        // shows real English. Classifying on Soniox routes correctly to Soniox.
+        let multi = MultiEngineBackend(
+            entries: [(.doubao, MockBackend(text: "普莱斯泰勒")), (.soniox, MockBackend(text: "price tailor please"))],
+            primary: .doubao, router: router)
+        let exp = expectation(description: "stop")
+        multi.stop { XCTAssertEqual($0.text, "price tailor please"); exp.fulfill() }
         wait(for: [exp], timeout: 2)
     }
 
