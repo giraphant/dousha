@@ -27,29 +27,32 @@ final class RecordingSpy {
     weak var flag: AnyObject?
 }
 
-/// SpeechBackend test double. Captures the callbacks the controller installs so
-/// the test can fire partials/levels/errors and the stop completion on demand.
+/// SpeechBackend test double. `start()` hands back a stream and stores its
+/// continuation so a test can drive events on demand; `stop()`/`cancel()` record
+/// the call (and `cancel()` finishes the stream, matching production).
 final class MockSpeechBackend: SpeechBackend, @unchecked Sendable {
     nonisolated(unsafe) private(set) var languageSet: String?
     nonisolated(unsafe) private(set) var startCalled = false
     nonisolated(unsafe) private(set) var stopCalled = false
     nonisolated(unsafe) private(set) var cancelCalled = false
-    nonisolated(unsafe) var onPartial: (@Sendable (PartialTranscript) -> Void)?
-    nonisolated(unsafe) var onAudioLevel: (@Sendable (Float) -> Void)?
-    nonisolated(unsafe) var onError: (@Sendable (Error) -> Void)?
-    nonisolated(unsafe) var stopCompletion: (@Sendable (TranscriptionResult) -> Void)?
+    nonisolated(unsafe) private var continuation: AsyncStream<RecordingEvent>.Continuation?
 
     func setLanguage(_ identifier: String) { languageSet = identifier }
-    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-               onAudioLevel: @escaping @Sendable (Float) -> Void,
-               onError: @escaping @Sendable (Error) -> Void) {
+
+    func start() -> AsyncStream<RecordingEvent> {
         startCalled = true
-        self.onPartial = onPartial; self.onAudioLevel = onAudioLevel; self.onError = onError
+        let (stream, cont) = AsyncStream<RecordingEvent>.makeStream(bufferingPolicy: .unbounded)
+        continuation = cont
+        return stream
     }
-    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
-        stopCalled = true; self.stopCompletion = completion
-    }
-    func cancel() { cancelCalled = true }
+    func stop() { stopCalled = true }
+    func cancel() { cancelCalled = true; continuation?.finish() }
+
+    // Test drivers — yield events into the live stream.
+    func emitPartial(_ p: PartialTranscript) { continuation?.yield(.partial(p)) }
+    func emitLevel(_ l: Float) { continuation?.yield(.audioLevel(l)) }
+    func emitError(_ message: String) { continuation?.yield(.error(message)) }
+    func emitFinal(_ r: TranscriptionResult) { continuation?.yield(.final(r)); continuation?.finish() }
 }
 
 /// Deterministic clock + scheduler. `advance` fires every work item whose
@@ -103,6 +106,22 @@ func makeSUT(backend: MockSpeechBackend = MockSpeechBackend())
     let controller = RecordingController(environment: env)
     spy.flag = controller.recordingFlag
     return (controller, spy, sched)
+}
+
+/// Polls `cond` on the main actor until true or `timeout`, yielding the actor so
+/// the controller's stream-consumer task can run. Replaces the old
+/// `expectation + DispatchQueue.main.async` flush, which doesn't reliably order
+/// after AsyncStream delivery.
+@MainActor
+func expectEventually(_ cond: @escaping () -> Bool,
+                      _ message: String = "",
+                      timeout: TimeInterval = 1,
+                      file: StaticString = #filePath, line: UInt = #line) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !cond() {
+        if Date() > deadline { XCTFail("timed out waiting: \(message)", file: file, line: line); return }
+        try? await Task.sleep(nanoseconds: 1_000_000)   // 1ms
+    }
 }
 
 @MainActor
@@ -185,41 +204,36 @@ final class RecordingControllerStartTests: XCTestCase {
 @MainActor
 final class RecordingControllerCallbackTests: XCTestCase {
 
-    func testPartialDuringRecording_updatesHUD() {
+    func testPartialDuringRecording_updatesHUD() async {
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
         c.start()
-        backend.onAudioLevel?(0.5)
-        backend.onPartial?(PartialTranscript(finalText: "", interimText: "hi"))
-        let exp = expectation(description: "main hop")
-        DispatchQueue.main.async { exp.fulfill() }
-        wait(for: [exp], timeout: 1)
+        backend.emitLevel(0.5)
+        backend.emitPartial(PartialTranscript(finalText: "", interimText: "hi"))
+        await expectEventually({ spy.partials.map(\.combined) == ["hi"] }, "partial delivered")
         XCTAssertEqual(spy.levels, [0.5])
-        XCTAssertEqual(spy.partials.map(\.combined), ["hi"])
     }
 
-    func testPartialAfterLeavingRecording_isDropped() {
+    func testPartialAfterLeavingRecording_isDropped() async {
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
         c.start()
-        c.testHook_transition(to: .transcribing)   // leave .recording without needing stop()
-        backend.onPartial?(PartialTranscript(finalText: "", interimText: "late"))
-        let exp = expectation(description: "main hop")
-        DispatchQueue.main.async { exp.fulfill() }
-        wait(for: [exp], timeout: 1)
+        c.testHook_transition(to: .transcribing)   // leave .recording without stop()
+        backend.emitPartial(PartialTranscript(finalText: "", interimText: "late"))
+        // Sentinel: audio levels are NOT status-gated, so this is always delivered.
+        // FIFO + serial loop ⇒ once the level is observed, the earlier partial has
+        // already been processed (and dropped) — no timing dependency.
+        backend.emitLevel(0.9)
+        await expectEventually({ spy.levels == [0.9] }, "sentinel level delivered")
         XCTAssertTrue(spy.partials.isEmpty, "partials after .recording must be dropped")
     }
 
-    func testError_transitionsToError_andReleasesBackend() {
+    func testError_transitionsToError_andReleasesBackend() async {
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
         c.start()
-        backend.onError?(NSError(domain: "t", code: 1,
-                                 userInfo: [NSLocalizedDescriptionKey: "boom"]))
-        let exp = expectation(description: "main hop")
-        DispatchQueue.main.async { exp.fulfill() }
-        wait(for: [exp], timeout: 1)
-        XCTAssertEqual(c.status, .error("boom"))
+        backend.emitError("boom")
+        await expectEventually({ c.status == .error("boom") }, "error transition")
         XCTAssertTrue(backend.stopCalled, "error must release the mic via stop")
         XCTAssertEqual(spy.resetTranscriptCount, 2)  // once at start, once on error
     }
@@ -245,66 +259,64 @@ final class RecordingControllerStopTests: XCTestCase {
         XCTAssertEqual(c.status, .idle)
     }
 
-    func testStop_emptyResult_returnsToIdle_noInject() {
+    func testStop_emptyResult_returnsToIdle_noInject() async {
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
         c.start(); c.stop()
-        fireStop(backend, text: "   ")
-        XCTAssertEqual(c.status, .idle)
+        backend.emitFinal(result(text: "   "))
+        await expectEventually({ c.status == .idle }, "empty result returns to idle")
         XCTAssertTrue(spy.injected.isEmpty)
     }
 
-    func testStop_withText_refineDisabled_injectsRawThenGreenFlashToIdle() {
+    func testStop_withText_refineDisabled_injectsRawThenGreenFlashToIdle() async {
         let backend = MockSpeechBackend()
         let (c, spy, sched) = makeSUT(backend: backend)
         spy.refineEnabled = false
         c.start(); c.stop()
-        fireStop(backend, text: "hello world")
+        backend.emitFinal(result(text: "hello world"))
+        await expectEventually({ spy.injected == ["hello world"] }, "raw injected")
         XCTAssertEqual(spy.finalTranscripts, ["hello world"])
-        XCTAssertEqual(spy.injected, ["hello world"])
         XCTAssertEqual(c.status, .injecting)
         sched.advance(by: 0.25)
         XCTAssertEqual(c.status, .idle)
     }
 
-    func testStop_immediateRefine_injectsRefinedText() {
+    func testStop_immediateRefine_injectsRefinedText() async {
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
         spy.refineEnabled = true; spy.refineMode = .immediate
         spy.refineResult = .some("polished")
         c.start(); c.stop()
-        fireStop(backend, text: "raw")
-        XCTAssertEqual(spy.injected, ["polished"])
+        backend.emitFinal(result(text: "raw"))
+        await expectEventually({ spy.injected == ["polished"] }, "refined injected")
     }
 
-    func testStop_deferredRefine_injectsRawAndRewritesClipboard() {
+    func testStop_deferredRefine_injectsRawAndRewritesClipboard() async {
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
         spy.refineEnabled = true; spy.refineMode = .deferred
         spy.refineResult = .some("polished")
         c.start(); c.stop()
-        fireStop(backend, text: "raw")
-        XCTAssertEqual(spy.injected, ["raw"])
-        XCTAssertEqual(spy.clipboardWrites, ["polished"])
+        backend.emitFinal(result(text: "raw"))
+        await expectEventually({ spy.injected == ["raw"] && spy.clipboardWrites == ["polished"] },
+                               "raw injected + clipboard rewritten")
     }
 
-    func testStop_completionAfterCancel_isDropped() {
+    func testCancel_thenLateFinal_isDropped() async {
+        // After cancel() the stream is finished; a late .final is a no-op yield.
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
-        c.start(); c.stop()
-        c.testHook_bumpGenerationLikeCancel()
-        fireStop(backend, text: "should be dropped")
+        c.start()
+        c.cancel()
+        // cancel() finished the stream; yielding to a finished continuation is a
+        // contractual no-op, so this late emit can never be delivered.
+        backend.emitFinal(result(text: "should be dropped"))
         XCTAssertTrue(spy.injected.isEmpty)
         XCTAssertTrue(spy.finalTranscripts.isEmpty)
     }
 
-    /// Fire the captured stop completion synchronously on main.
-    private func fireStop(_ b: MockSpeechBackend, text: String) {
-        let exp = expectation(description: "stop completion")
-        b.stopCompletion?(TranscriptionResult(text: text, audioDuration: 1,
-                                              lastResponseAge: nil, lastTranscriptAge: nil))
-        DispatchQueue.main.async { exp.fulfill() }
-        wait(for: [exp], timeout: 1)
+    private func result(text: String) -> TranscriptionResult {
+        TranscriptionResult(text: text, audioDuration: 1, lastResponseAge: nil, lastTranscriptAge: nil)
     }
 }
 
@@ -337,18 +349,16 @@ final class RecordingControllerCancelTests: XCTestCase {
         XCTAssertEqual(c.status, .transcribing)
     }
 
-    func testCancel_bumpsGeneration_soLateBackendErrorIsDropped() {
-        // cancel() bumps generation; an error from the now-superseded session
-        // (captured the old generation) must be dropped, not flashed to the HUD.
+    func testCancel_thenLateError_isDropped() async {
+        // cancel() finishes the stream; a late .error from the superseded session
+        // is a no-op yield and must not flash the HUD red.
         let backend = MockSpeechBackend()
         let (c, _, _) = makeSUT(backend: backend)
         c.start()
-        c.cancel()                      // status .idle, generation advanced
-        backend.onError?(NSError(domain: "t", code: 1,
-                                 userInfo: [NSLocalizedDescriptionKey: "late boom"]))
-        let exp = expectation(description: "main hop")
-        DispatchQueue.main.async { exp.fulfill() }
-        wait(for: [exp], timeout: 1)
+        c.cancel()                      // status .idle, stream finished
+        // cancel() finished the stream; yielding to a finished continuation is a
+        // contractual no-op, so this late emit can never be delivered.
+        backend.emitError("late boom")
         XCTAssertEqual(c.status, .idle, "stale error after cancel must be dropped, not enter .error")
     }
 }

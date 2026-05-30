@@ -30,6 +30,20 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     private let router: LanguageRouter
     private let hub: AudioTapHub?
 
+    /// The live session's stream continuation, set in `start()`, yielded to from
+    /// the engine callbacks / capture, and finished by `stop()` / `cancel()`.
+    /// Written only from `start()` on the main actor; the `stop()`/`cancel()`
+    /// tasks read it after that write — no off-main-actor writes, which is what
+    /// makes the `@unchecked Sendable` access pattern safe.
+    private var continuation: AsyncStream<RecordingEvent>.Continuation?
+    /// The task that runs `beginAllSessions` + capture start + `openStream`.
+    /// `stop()` / `cancel()` await it so they never route/teardown before the
+    /// session has actually begun (replaces the old hub-less start semaphore).
+    /// Written only from `start()` on the main actor; the `stop()`/`cancel()`
+    /// tasks read it after that write — no off-main-actor writes, which is what
+    /// makes the `@unchecked Sendable` access pattern safe.
+    private var startTask: Task<Void, Never>?
+
     /// Online language signal (QUA-153): the language-faithful classifier engine
     /// emits Latin/Han *during* recording via its partials, so by the time the
     /// user stops we already know the language — we don't have to wait for that
@@ -115,48 +129,39 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         for entry in entries { entry.backend.setLanguage(identifier) }
     }
 
-    func start(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
-               onAudioLevel: @escaping @Sendable (Float) -> Void,
-               onError: @escaping @Sendable (Error) -> Void) {
+    func start() -> AsyncStream<RecordingEvent> {
+        let (stream, cont) = AsyncStream<RecordingEvent>.makeStream(bufferingPolicy: .unbounded)
+        self.continuation = cont
         onlineSignal.reset()   // QUA-153: fresh language signal per recording
-        guard let hub else {
-            // Hub-less path (unit tests only — production always has a hub). Drive
-            // the SAME push protocol, but block until every engine has begun +
-            // opened so callers observe a fully-started state synchronously
-            // (mirrors the old synchronous start the mock tests rely on). The
-            // semaphore is safe here precisely because this branch never runs in
-            // production and the mock backends do no real async work.
-            let sem = DispatchSemaphore(value: 0)
-            Task {
-                await self.beginAllSessions(onPartial: onPartial, onError: onError)
-                for entry in self.entries { entry.backend.openStream() }
-                sem.signal()
-            }
-            sem.wait()
-            return
-        }
 
-        Task {
+        startTask = Task {
             // Phase 1 — reset every engine's session state BEFORE capture starts,
             // so a buffer pushed the instant the tap goes live isn't dropped.
-            await self.beginAllSessions(onPartial: onPartial, onError: onError)
+            await self.beginAllSessions(
+                onPartial: { cont.yield(.partial($0)) },
+                onError:   { cont.yield(.error($0.localizedDescription)) })
 
-            // Phase 2 — one shared mic tap. Its failure is fatal (no audio at
-            // all): tear down the just-prepared engines so they don't sit through
-            // a finish-wait timeout, then surface the error.
-            do {
-                try await hub.startCapture(onLevel: onAudioLevel)
-            } catch {
-                doushaLog("[MultiEngine] capture start failed: \(error.localizedDescription)")
-                for entry in self.entries { entry.backend.cancelSession() }
-                DispatchQueue.main.async { onError(error) }
-                return
+            // Phase 2 — one shared mic tap (skipped in hub-less unit tests). Its
+            // failure is fatal (no audio at all): tear down the just-prepared
+            // engines, surface the error, finish the stream.
+            if let hub = self.hub {
+                do {
+                    try await hub.startCapture(onLevel: { cont.yield(.audioLevel($0)) })
+                } catch {
+                    doushaLog("[MultiEngine] capture start failed: \(error.localizedDescription)")
+                    for entry in self.entries { entry.backend.cancelSession() }
+                    cont.yield(.error(error.localizedDescription))
+                    cont.finish()
+                    return
+                }
             }
 
             // Phase 3 — open each engine's stream; audio buffered during setup
             // flushes once the stream is ready.
             for entry in self.entries { entry.backend.openStream() }
         }
+
+        return stream
     }
 
     /// Reset every engine's session state. The primary drives the user's HUD
@@ -195,16 +200,16 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         }
     }
 
-    func stop(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
-        guard let hub else {
-            routeFinalResult(completion: completion)
-            return
-        }
-        // Remove the tap + drain the tail BEFORE the engines flush + finish, so
-        // every engine's pcmBuffer holds the last buffers the user spoke.
+    func stop() {
         Task {
-            await hub.stopCapture()
-            routeFinalResult(completion: completion)
+            await self.startTask?.value          // never route before the session began
+            // Remove the tap + drain the tail BEFORE the engines flush + finish,
+            // so every engine's pcmBuffer holds the last buffers the user spoke.
+            if let hub = self.hub { await hub.stopCapture() }
+            self.routeFinalResult { result in
+                self.continuation?.yield(.final(result))
+                self.continuation?.finish()
+            }
         }
     }
 
@@ -248,8 +253,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     /// applies the QUA-153 online / classifier routing the instant enough results
     /// are in, and fires `completion` exactly once. All mutable state is guarded by
     /// `lock`; the engine `finish` completions are `@Sendable` and capture this
-    /// reference (a `Sendable` class) rather than the raw vars — which is what the
-    /// old `.v5`-mode nested-function + captured-var form did implicitly.
+    /// reference (a `Sendable` class) rather than raw vars.
     private final class FinalResultCollector: @unchecked Sendable {
         private let lock = NSLock()
         private var results: [Engine: TranscriptionResult] = [:]
@@ -338,13 +342,21 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             let onlineTag = onlineChosen.map { "online=\($0.rawValue)" } ?? "online=none"
             qua145Debug("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | \(onlineTag) | picked=\(engine.rawValue)")
             doushaLog("[MultiEngine] picked \(engine.rawValue) len=\(result.text.count)")
-            let completion = self.completion
-            DispatchQueue.main.async { completion(result) }
+            // Yielding to the AsyncStream is thread-safe from any thread; the
+            // .final crosses to the main actor via the controller's `for await`,
+            // so the explicit main-hop here is redundant.
+            completion(result)
         }
     }
 
     func cancel() {
-        if let hub { Task { await hub.cancelCapture() } }
-        for entry in entries { entry.backend.cancelSession() }
+        // Stop the consumer immediately; engine/hub teardown happens after the
+        // start task settles so we never cancel sessions that haven't begun.
+        continuation?.finish()
+        Task {
+            await self.startTask?.value
+            if let hub = self.hub { await hub.cancelCapture() }
+            for entry in self.entries { entry.backend.cancelSession() }
+        }
     }
 }

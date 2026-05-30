@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 import ASRSupport
 @testable import Dousha
 
@@ -44,122 +45,134 @@ final class MultiEngineBackendTests: XCTestCase {
         func cancelSession() { cancelCalled = true }
     }
 
-    private final class ErrorBox: @unchecked Sendable { var error: Error? }
-
     private let router = LanguageRouter(chineseEngine: .doubao,
                                         englishEngine: .soniox,
                                         mixedEngine: .soniox)
 
-    func testStop_routesChineseDominantToDoubao() {
+    /// Drives the new stream API to completion and returns the routed final
+    /// result. `start()` sets up the sessions (mock partials/errors emitted
+    /// synchronously inside beginSession); `stop()` awaits that setup, routes,
+    /// and yields the terminal `.final`. We consume the stream until it arrives.
+    private func finalResult(_ multi: MultiEngineBackend) async -> TranscriptionResult {
+        let stream = multi.start()
+        multi.stop()
+        for await event in stream {
+            if case .final(let r) = event { return r }
+        }
+        return TranscriptionResult(text: "<no final>", audioDuration: 0,
+                                   lastResponseAge: nil, lastTranscriptAge: nil)
+    }
+
+    /// Polls `cond` until true or timeout (non-MainActor; for the cancel test).
+    private func eventually(_ cond: @escaping () -> Bool, timeout: TimeInterval = 1) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !cond() {
+            if Date() > deadline { XCTFail("timed out"); return }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+    }
+
+    func testStop_routesChineseDominantToDoubao() async {
         // Chinese speech: Soniox (the faithful classifier) also renders Han, so it
         // reads as Chinese → route to 豆包's cleaner Chinese transcript.
         let multi = MultiEngineBackend(
             entries: [(.doubao, MockBackend(text: "你好世界你好啊")), (.soniox, MockBackend(text: "你好世界"))],
             primary: .doubao, router: router)
-        let exp = expectation(description: "stop")
-        multi.stop { XCTAssertEqual($0.text, "你好世界你好啊"); exp.fulfill() }
-        wait(for: [exp], timeout: 2)
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "你好世界你好啊")
     }
 
-    func testStop_englishMangledByDoubao_stillRoutesToSoniox() {
+    func testStop_englishMangledByDoubao_stillRoutesToSoniox() async {
         // User spoke English; 豆包 homophone-mangles to Han (looks Chinese), Soniox
         // shows real English. Classifying on Soniox routes correctly to Soniox.
         let multi = MultiEngineBackend(
             entries: [(.doubao, MockBackend(text: "普莱斯泰勒")), (.soniox, MockBackend(text: "price tailor please"))],
             primary: .doubao, router: router)
-        let exp = expectation(description: "stop")
-        multi.stop { XCTAssertEqual($0.text, "price tailor please"); exp.fulfill() }
-        wait(for: [exp], timeout: 2)
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "price tailor please")
     }
 
-    func testStop_routesEnglishDominantToSoniox() {
+    func testStop_routesEnglishDominantToSoniox() async {
         let multi = MultiEngineBackend(
             entries: [(.doubao, MockBackend(text: "皮森哈喽")), (.soniox, MockBackend(text: "Python hello there"))],
             primary: .soniox, router: router)
-        let exp = expectation(description: "stop")
-        multi.stop { XCTAssertEqual($0.text, "Python hello there"); exp.fulfill() }
-        wait(for: [exp], timeout: 2)
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "Python hello there")
     }
 
-    func testStop_chosenEngineEmpty_fallsThroughToNonEmpty() {
+    func testStop_chosenEngineEmpty_fallsThroughToNonEmpty() async {
         // Chinese-dominant score → chosen doubao, but doubao empty → fall through.
         let multi = MultiEngineBackend(
             entries: [(.doubao, MockBackend(text: "")), (.soniox, MockBackend(text: "你好世界你好啊"))],
             primary: .soniox, router: router)
-        let exp = expectation(description: "stop")
-        multi.stop { XCTAssertEqual($0.text, "你好世界你好啊"); exp.fulfill() }
-        wait(for: [exp], timeout: 2)
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "你好世界你好啊")
     }
 
-    func testStop_allEmpty_returnsEmpty() {
+    func testStop_allEmpty_returnsEmpty() async {
         let multi = MultiEngineBackend(
             entries: [(.doubao, MockBackend(text: "")), (.soniox, MockBackend(text: ""))],
             primary: .doubao, router: router)
-        let exp = expectation(description: "stop")
-        multi.stop { XCTAssertTrue($0.text.isEmpty); exp.fulfill() }
-        wait(for: [exp], timeout: 2)
+        let result = await finalResult(multi)
+        XCTAssertTrue(result.text.isEmpty)
     }
 
-    func testStart_secondaryErrorIsNonFatal() {
+    func testStart_secondaryErrorIsNonFatal() async {
         let soniox = MockBackend(text: "x", errorOnStart: NSError(domain: "t", code: 1))
         let doubao = MockBackend(text: "你好")
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
-        let box = ErrorBox()
-        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { box.error = $0 })
-        XCTAssertNil(box.error, "a secondary engine's error must not abort the recording")
+        let stream = multi.start()
+        multi.stop()
+        var sawError = false
+        for await event in stream { if case .error = event { sawError = true } }
+        XCTAssertFalse(sawError, "a secondary engine's error must not reach the stream")
         XCTAssertTrue(doubao.startCalled)
         XCTAssertTrue(soniox.startCalled)
     }
 
-    func testStart_primaryErrorIsFatal() {
+    func testStart_primaryErrorIsFatal() async {
         let doubao = MockBackend(text: "", errorOnStart: NSError(domain: "t", code: 2))
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, MockBackend(text: "ok"))],
                                        primary: .doubao, router: router)
-        let box = ErrorBox()
-        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { box.error = $0 })
-        XCTAssertNotNil(box.error, "the primary engine's error must be forwarded as fatal")
+        let stream = multi.start()
+        multi.stop()
+        var sawError = false
+        for await event in stream { if case .error = event { sawError = true } }
+        XCTAssertTrue(sawError, "the primary engine's error must be forwarded as a stream .error event")
     }
 
-    func testStop_englishEarlyExit_doesNotWaitForSlowChineseEngine() {
+    func testStop_englishEarlyExit_doesNotWaitForSlowChineseEngine() async {
         // 豆包 is slow (1s); Soniox (classifier) returns English instantly. The
         // result must come back via Soniox WITHOUT waiting the full second.
         let doubao = MockBackend(text: "普莱斯", stopDelay: 1.0)
         let soniox = MockBackend(text: "price please now")
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
-        let exp = expectation(description: "stop")
         let t0 = Date()
-        multi.stop { result in
-            let elapsed = Date().timeIntervalSince(t0)
-            XCTAssertEqual(result.text, "price please now")
-            XCTAssertLessThan(elapsed, 0.5, "English should early-exit via Soniox, not wait for the 1s 豆包")
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 3)
+        let result = await finalResult(multi)
+        let elapsed = Date().timeIntervalSince(t0)
+        XCTAssertEqual(result.text, "price please now")
+        XCTAssertLessThan(elapsed, 0.5, "English should early-exit via Soniox, not wait for the 1s 豆包")
     }
 
-    func testStop_chineseWaitsForChineseEngine_evenIfSlow() {
+    func testStop_chineseWaitsForChineseEngine_evenIfSlow() async {
         // Soniox (classifier) returns Chinese (Han) instantly → route to 豆包, which
         // is slow (0.4s). Must WAIT for 豆包 and return its cleaner transcript.
         let doubao = MockBackend(text: "今天天气很好啊", stopDelay: 0.4)
         let soniox = MockBackend(text: "今天天气很好")
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
-        let exp = expectation(description: "stop")
         let t0 = Date()
-        multi.stop { result in
-            let elapsed = Date().timeIntervalSince(t0)
-            XCTAssertEqual(result.text, "今天天气很好啊")
-            XCTAssertGreaterThan(elapsed, 0.3, "Chinese must wait for 豆包")
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 3)
+        let result = await finalResult(multi)
+        let elapsed = Date().timeIntervalSince(t0)
+        XCTAssertEqual(result.text, "今天天气很好啊")
+        XCTAssertGreaterThan(elapsed, 0.3, "Chinese must wait for 豆包")
     }
 
     // MARK: - QUA-153 online language judgement
 
-    func testOnline_chineseKnownDuringRecording_waitsOnlyForDoubao_notSlowClassifier() {
+    func testOnline_chineseKnownDuringRecording_waitsOnlyForDoubao_notSlowClassifier() async {
         // Soniox (classifier) streams a Chinese partial DURING recording, so the
         // language is known before any final arrives. 豆包 finals instantly; Soniox's
         // FINAL is deliberately slow (1s). The online path must route to 豆包 and
@@ -169,21 +182,15 @@ final class MultiEngineBackendTests: XCTestCase {
                                  partialOnStart: "今天天气很好")
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
-        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
-
-        let exp = expectation(description: "stop")
         let t0 = Date()
-        multi.stop { result in
-            let elapsed = Date().timeIntervalSince(t0)
-            XCTAssertEqual(result.text, "今天天气很好啊")
-            XCTAssertLessThan(elapsed, 0.5,
-                "Chinese known online must wait only for 豆包, not the slow Soniox final")
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 3)
+        let result = await finalResult(multi)
+        let elapsed = Date().timeIntervalSince(t0)
+        XCTAssertEqual(result.text, "今天天气很好啊")
+        XCTAssertLessThan(elapsed, 0.5,
+            "Chinese known online must wait only for 豆包, not the slow Soniox final")
     }
 
-    func testOnline_englishKnownDuringRecording_routesToSoniox_skipsDoubao() {
+    func testOnline_englishKnownDuringRecording_routesToSoniox_skipsDoubao() async {
         // Soniox streams an English partial during recording → online language is
         // English → route to Soniox and don't wait for the slow 豆包.
         let doubao = MockBackend(text: "皮森哈喽", stopDelay: 1.0)
@@ -191,54 +198,42 @@ final class MultiEngineBackendTests: XCTestCase {
                                  partialOnStart: "Python hello there")
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
-        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
-
-        let exp = expectation(description: "stop")
         let t0 = Date()
-        multi.stop { result in
-            let elapsed = Date().timeIntervalSince(t0)
-            XCTAssertEqual(result.text, "Python hello there")
-            XCTAssertLessThan(elapsed, 0.5, "English known online must skip the slow 豆包")
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 3)
+        let result = await finalResult(multi)
+        let elapsed = Date().timeIntervalSince(t0)
+        XCTAssertEqual(result.text, "Python hello there")
+        XCTAssertLessThan(elapsed, 0.5, "English known online must skip the slow 豆包")
     }
 
-    func testOnline_chosenEngineEmpty_fallsThroughToNonEmpty() {
+    func testOnline_chosenEngineEmpty_fallsThroughToNonEmpty() async {
         // Online says Chinese → chosen 豆包, but 豆包 finals empty → fall through to
         // any non-empty result (Soniox).
         let doubao = MockBackend(text: "")
         let soniox = MockBackend(text: "今天天气很好", partialOnStart: "今天天气很好")
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
-        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
-
-        let exp = expectation(description: "stop")
-        multi.stop { XCTAssertEqual($0.text, "今天天气很好"); exp.fulfill() }
-        wait(for: [exp], timeout: 2)
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "今天天气很好")
     }
 
-    func testOnline_noPartials_fallsBackToClassifierFinalLogic() {
+    func testOnline_noPartials_fallsBackToClassifierFinalLogic() async {
         // No partials streamed (silence / instant stop) → no online signal → the
         // existing classifier-final routing must still apply.
         let doubao = MockBackend(text: "你好世界你好啊")
         let soniox = MockBackend(text: "你好世界")
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
-        multi.start(onPartial: { _ in }, onAudioLevel: { _ in }, onError: { _ in })
-
-        let exp = expectation(description: "stop")
-        multi.stop { XCTAssertEqual($0.text, "你好世界你好啊"); exp.fulfill() }
-        wait(for: [exp], timeout: 2)
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "你好世界你好啊")
     }
 
-    func testCancel_cancelsAllEngines() {
+    func testCancel_cancelsAllEngines() async {
         let doubao = MockBackend(text: "a")
         let soniox = MockBackend(text: "b")
         let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
+        _ = multi.start()
         multi.cancel()
-        XCTAssertTrue(doubao.cancelCalled)
-        XCTAssertTrue(soniox.cancelCalled)
+        await eventually({ doubao.cancelCalled && soniox.cancelCalled })
     }
 }
