@@ -150,6 +150,41 @@ final class MultiEngineBackendTests: XCTestCase {
         wait(for: [exp], timeout: 3)
     }
 
+    func testStop_englishEarlyExit_doesNotWaitForSlowChineseEngine() {
+        // English: Soniox (classifier) returns fast; 豆包 is slow. Must finish via
+        // Soniox immediately, NOT wait ~1s for 豆包.
+        let doubao = MockBackend(text: "普莱斯", stopDelay: 1.0)
+        let soniox = MockBackend(text: "price please now")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        let exp = expectation(description: "stop")
+        let t0 = Date()
+        multi.stop { result in
+            XCTAssertEqual(result.text, "price please now")
+            XCTAssertLessThan(Date().timeIntervalSince(t0), 0.5,
+                              "English should finish via Soniox without waiting for slow 豆包")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+    }
+
+    func testStop_chineseWaitsForChineseEngine_evenWhenSlow() {
+        // Chinese: Soniox returns fast (Han) → route to 豆包, which is slow → must wait.
+        let doubao = MockBackend(text: "今天天气很好啊", stopDelay: 0.4)
+        let soniox = MockBackend(text: "今天天气很好")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        let exp = expectation(description: "stop")
+        let t0 = Date()
+        multi.stop { result in
+            XCTAssertEqual(result.text, "今天天气很好啊")
+            XCTAssertGreaterThan(Date().timeIntervalSince(t0), 0.3,
+                                 "Chinese must wait for 豆包's cleaner transcript")
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+    }
+
     func testCancel_cancelsAllEngines() {
         let doubao = MockBackend(text: "a")
         let soniox = MockBackend(text: "b")
