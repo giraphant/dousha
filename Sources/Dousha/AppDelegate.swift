@@ -181,7 +181,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         // 引擎 — 子菜单，标题右侧带当前选中值
-        let engineItem = NSMenuItem(title: "引擎：\(prefs.engine.displayName)",
+        let engineSummary = prefs.activeEngines.count > 1
+            ? prefs.activeEngines.map(\.displayName).joined(separator: "+")
+            : prefs.engine.displayName
+        let engineItem = NSMenuItem(title: "引擎：\(engineSummary)",
                                     action: nil, keyEquivalent: "")
         engineItem.image = menuIcon("waveform")
         let engineMenu = NSMenu()
@@ -191,7 +194,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                   keyEquivalent: "")
             item.target = self
             item.representedObject = e.rawValue
-            if e == prefs.engine { item.state = .on }
+            // Check every active engine; clicking one collapses to single-engine.
+            if prefs.activeEngines.contains(e) { item.state = .on }
             engineMenu.addItem(item)
         }
         engineMenu.addItem(.separator())
