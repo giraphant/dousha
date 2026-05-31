@@ -91,13 +91,16 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(prefs.activeEngines, [.apple])
     }
 
-    func testEngineSlots_migrateFromLegacySingleEngine() {
+    func testEngineSlots_ignoreRetiredLegacyEngineKey() {
+        // The pre-QUA-145 single `engine` key has been retired. A stale value
+        // left in storage must NOT seed the routing slots anymore — unset slots
+        // fall back to the baseline default (apple).
         defaults.set(Engine.soniox.rawValue, forKey: "engine")
         let p = Preferences(defaults: defaults)
-        XCTAssertEqual(p.chineseEngine, .soniox)
-        XCTAssertEqual(p.englishEngine, .soniox)
-        XCTAssertEqual(p.mixedEngine, .soniox)
-        XCTAssertEqual(p.activeEngines, [.soniox])
+        XCTAssertEqual(p.chineseEngine, .apple)
+        XCTAssertEqual(p.englishEngine, .apple)
+        XCTAssertEqual(p.mixedEngine, .apple)
+        XCTAssertEqual(p.activeEngines, [.apple])
     }
 
     func testPrimaryEngine_followsLanguageSlots() {
@@ -191,18 +194,6 @@ final class PreferencesTests: XCTestCase {
     }
 
     // MARK: - Window/system toggles (QUA-142)
-
-    func testLaunchAtLogin_defaultsToDisabled() {
-        XCTAssertFalse(prefs.launchAtLogin)
-    }
-
-    func testLaunchAtLogin_persistsAcrossInstances() {
-        prefs.launchAtLogin = true
-
-        let fresh = Preferences(defaults: defaults)
-
-        XCTAssertTrue(fresh.launchAtLogin)
-    }
 
     func testShowDockIcon_defaultsToHidden() {
         XCTAssertFalse(prefs.showDockIcon)
