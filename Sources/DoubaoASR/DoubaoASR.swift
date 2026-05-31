@@ -349,11 +349,7 @@ public actor DoubaoASR {
         let waitStart = Date()
         let outcomeStr: String
         if let channel = finishedChannel {
-            let timeout = finishWaitTimeout
-            if timeout < 10.0 {
-                doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms no transcript after \(framesSentCount) frames; capping post-Finish wait to \(Int(timeout * 1000))ms")
-            }
-            switch await waitWithTimeout(channel: channel, timeout: timeout) {
+            switch await waitWithTimeout(channel: channel, timeout: DoubaoConstants.finishGraceOnStopSeconds) {
             case .signaled: outcomeStr = "signaled"
             case .timeout: outcomeStr = "timedOut"
             case .cancelled: outcomeStr = "cancelled"
@@ -363,6 +359,21 @@ public actor DoubaoASR {
             outcomeStr = "no-channel"
         }
         doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
+
+        if outcomeStr != "signaled" {
+            let partialLen = assembledText().count
+            let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms SessionFinished missing after finish grace; returning empty result partial.len=\(partialLen) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
+            detachAndCloseWebSocketInBackground()
+            return TranscriptionResult(
+                text: "",
+                audioDuration: audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0,
+                lastResponseAge: lastResponseAt.map { Date().timeIntervalSince($0) },
+                lastTranscriptAge: lastTranscriptAt.map { Date().timeIntervalSince($0) },
+                maxSegmentGap: nil,
+                traceId: requestId
+            )
+        }
 
         let final = assembledText()
         let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
@@ -749,13 +760,6 @@ public actor DoubaoASR {
 
     private var streamReady: Bool {
         canSendAudio || framesSentCount > 0
-    }
-
-    private var finishWaitTimeout: TimeInterval {
-        if framesSentCount > 0 && lastTranscriptAt == nil {
-            return DoubaoConstants.noTranscriptFinishWaitSeconds
-        }
-        return 10.0
     }
 
     private func assembledText() -> String {
