@@ -27,8 +27,7 @@ final class CancelKeyMonitor: @unchecked Sendable {
     private let shouldFire: @Sendable () -> Bool
     private let onFire: @MainActor () -> Void
 
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private let tap = EventTap()
 
     init(keyCode: UInt16?,
          shouldFire: @escaping @Sendable () -> Bool,
@@ -51,52 +50,23 @@ final class CancelKeyMonitor: @unchecked Sendable {
             doushaLog("[Dousha] CancelKeyMonitor: disabled (no keycode configured)")
             return true
         }
-        guard eventTap == nil else { return true }
+        guard !tap.isInstalled else { return true }
 
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
-        let userInfo = Unmanaged.passUnretained(self).toOpaque()
-        let callback: CGEventTapCallBack = { _, type, event, refcon in
-            guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
-            let me = Unmanaged<CancelKeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
-            return me.handle(type: type, event: event)
-        }
-
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: userInfo
-        ) else {
-            doushaLog("[Dousha] CancelKeyMonitor: failed to create event tap (Accessibility permission required)")
+        guard tap.install(mask: mask, label: "CancelKeyMonitor", handler: { [weak self] type, event in
+            self?.handle(type: type, event: event) ?? Unmanaged.passUnretained(event)
+        }) else {
             return false
         }
-
-        eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
         doushaLog("[Dousha] CancelKeyMonitor: tap installed for keyCode=\(keyCode!)")
         return true
     }
 
     func stop() {
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-            runLoopSource = nil
-        }
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            eventTap = nil
-        }
+        tap.teardown()
     }
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
-            return Unmanaged.passUnretained(event)
-        }
         guard type == .keyDown else { return Unmanaged.passUnretained(event) }
         guard let target = keyCode else { return Unmanaged.passUnretained(event) }
 
@@ -123,37 +93,19 @@ final class CancelKeyMonitor: @unchecked Sendable {
 /// its keycode. Used by the Settings "Record" button for the cancel hotkey.
 /// Mirrors `HotkeyRecorder` but listens to keyDown instead of flagsChanged.
 final class CancelKeyRecorder: @unchecked Sendable {
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private let tap = EventTap()
     private var onCaptured: (@MainActor (UInt16) -> Void)?
 
     func start(onCaptured: @escaping @MainActor (UInt16) -> Void) {
-        guard eventTap == nil else { return }
+        guard !tap.isInstalled else { return }
         self.onCaptured = onCaptured
 
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
-        let userInfo = Unmanaged.passUnretained(self).toOpaque()
-        let callback: CGEventTapCallBack = { _, type, event, refcon in
-            guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
-            let me = Unmanaged<CancelKeyRecorder>.fromOpaque(refcon).takeUnretainedValue()
-            return me.handle(type: type, event: event)
+        if !tap.install(mask: mask, label: "CancelKeyRecorder", handler: { [weak self] type, event in
+            self?.handle(type: type, event: event) ?? Unmanaged.passUnretained(event)
+        }) {
+            self.onCaptured = nil
         }
-
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: userInfo
-        ) else {
-            doushaLog("[Dousha] CancelKeyRecorder: failed to create event tap")
-            return
-        }
-        eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     func cancel() { teardown() }
@@ -172,14 +124,7 @@ final class CancelKeyRecorder: @unchecked Sendable {
     }
 
     private func teardown() {
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-            runLoopSource = nil
-        }
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            eventTap = nil
-        }
+        tap.teardown()
         onCaptured = nil
     }
 }

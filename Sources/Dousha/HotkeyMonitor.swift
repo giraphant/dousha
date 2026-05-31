@@ -65,8 +65,7 @@ final class HotkeyMonitor: @unchecked Sendable {
     private let config: HotkeyConfig
     private let dispatcher: HotkeyEventDispatcher
 
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private let tap = EventTap()
     private var isHeld: Bool = false
 
     @MainActor
@@ -115,50 +114,24 @@ final class HotkeyMonitor: @unchecked Sendable {
 
     @discardableResult
     func start() -> Bool {
-        guard eventTap == nil else { return true }
+        guard !tap.isInstalled else { return true }
         guard Self.isAllowed(keyCode: config.keyCode) else {
             doushaLog("[Dousha] HotkeyMonitor: keyCode \(config.keyCode) is not in the modifier whitelist")
             return false
         }
 
         let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
-        let userInfo = Unmanaged.passUnretained(self).toOpaque()
-
-        let callback: CGEventTapCallBack = { _, type, event, refcon in
-            guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
-            let me = Unmanaged<HotkeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
-            return me.handle(type: type, event: event)
-        }
-
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: userInfo
-        ) else {
-            doushaLog("[Dousha] HotkeyMonitor: failed to create event tap (Accessibility permission required)")
+        guard tap.install(mask: mask, label: "HotkeyMonitor", handler: { [weak self] type, event in
+            self?.handle(type: type, event: event) ?? Unmanaged.passUnretained(event)
+        }) else {
             return false
         }
-
-        eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
         doushaLog("[Dousha] HotkeyMonitor: tap installed for keyCode=\(config.keyCode) (\(Self.displayName(forKeyCode: config.keyCode))) mode=\(config.mode.rawValue)")
         return true
     }
 
     func stop() {
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-            runLoopSource = nil
-        }
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            eventTap = nil
-        }
+        tap.teardown()
         isHeld = false
     }
 
@@ -173,10 +146,6 @@ final class HotkeyMonitor: @unchecked Sendable {
     // MARK: - Event handling
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
-            return Unmanaged.passUnretained(event)
-        }
         guard type == .flagsChanged else { return Unmanaged.passUnretained(event) }
 
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
