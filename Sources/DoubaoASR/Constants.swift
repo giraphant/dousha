@@ -68,6 +68,11 @@ enum DoubaoConstants {
     // instead of blocking on URLSession's ~10s request timeout.
     static let startupGraceOnStopSeconds: TimeInterval = 2.0
 
+    // If Doubao accepted audio frames but never produced any transcript, the
+    // session is effectively a blackhole. Do not wait the full finalization
+    // timeout; return empty quickly so MultiEngine can use a backup result.
+    static let noTranscriptFinishWaitSeconds: TimeInterval = 1.5
+
     // WebSocket keepalive. Matches the official Doubao IME client's
     // SAMICore.UpdateFrontierClientPingInterval(3000) — without periodic pings
     // the server tears down long-running sessions mid-stream and the tail

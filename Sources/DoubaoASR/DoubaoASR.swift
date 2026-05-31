@@ -349,7 +349,11 @@ public actor DoubaoASR {
         let waitStart = Date()
         let outcomeStr: String
         if let channel = finishedChannel {
-            switch await waitWithTimeout(channel: channel, timeout: 10.0) {
+            let timeout = finishWaitTimeout
+            if timeout < 10.0 {
+                doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms no transcript after \(framesSentCount) frames; capping post-Finish wait to \(Int(timeout * 1000))ms")
+            }
+            switch await waitWithTimeout(channel: channel, timeout: timeout) {
             case .signaled: outcomeStr = "signaled"
             case .timeout: outcomeStr = "timedOut"
             case .cancelled: outcomeStr = "cancelled"
@@ -745,6 +749,13 @@ public actor DoubaoASR {
 
     private var streamReady: Bool {
         canSendAudio || framesSentCount > 0
+    }
+
+    private var finishWaitTimeout: TimeInterval {
+        if framesSentCount > 0 && lastTranscriptAt == nil {
+            return DoubaoConstants.noTranscriptFinishWaitSeconds
+        }
+        return 10.0
     }
 
     private func assembledText() -> String {
