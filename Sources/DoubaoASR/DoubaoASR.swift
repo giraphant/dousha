@@ -28,6 +28,7 @@ public actor DoubaoASR {
     /// `start(contextHint:)` so a Settings change mid-recording can't alter the
     /// active session for the rest of the recording. Empty string = no hint.
     private var contextHint: String = ""
+    private var experimentProfile: DoubaoExperimentProfile = .official
     private var pcmBuffer = Data()
     private var didSendFirstFrame = false
     private var canSendAudio = false
@@ -41,6 +42,7 @@ public actor DoubaoASR {
     /// previous sessions don't leak forward.
     private var finishedChannel: OneShotChannel<Void>?
     private var didReceiveFinal = false
+    private var stopStartedAt: Date?
 
     /// Whether StartTask has been sent + acked on the current WebSocket. Doubao ties a
     /// task to a connection — sending StartTask twice on the same WS yields
@@ -132,6 +134,7 @@ public actor DoubaoASR {
         guard !isRunning else { return }
         isRunning = true
         self.contextHint = contextHint
+        self.experimentProfile = DoubaoExperimentProfile.resolve()
         self.onPartial = onPartial
         self.onError = onError
         self.committedSegments = []
@@ -141,6 +144,7 @@ public actor DoubaoASR {
         self.didSendFirstFrame = false
         self.canSendAudio = false
         self.didReceiveFinal = false
+        self.stopStartedAt = nil
         self.framesSentCount = 0
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
@@ -148,7 +152,7 @@ public actor DoubaoASR {
         self.audioStartedAt = Date()
         self.lastResponseAt = nil
         self.lastTranscriptAt = nil
-        doushaLog("[DoubaoASR] traceId=\(requestId) prepareSession (capture owned by AudioTapHub)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) prepareSession \(experimentProfile.logSummary) (capture owned by AudioTapHub)")
     }
 
     /// Phase 2 — open the WebSocket and run StartTask/StartSession, then flush
@@ -266,6 +270,10 @@ public actor DoubaoASR {
                 traceId: requestId
             )
         }
+        let stopStartedAt = Date()
+        self.stopStartedAt = stopStartedAt
+        let transcriptAgeAtStop = lastTranscriptAt.map { Int(stopStartedAt.timeIntervalSince($0) * 1000) } ?? -1
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs(now: stopStartedAt))ms stop begin lastTranscriptAge=\(transcriptAgeAtStop)ms frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
         // The shared AudioTapHub has already removed the mic tap and held its own
         // drain window before calling us, so no new audio is arriving. But the
         // tap dispatched the last buffers the user spoke as separate Tasks into
@@ -274,6 +282,7 @@ public actor DoubaoASR {
         // isRunning=false (which would otherwise drop them via the ingest guard,
         // truncating the final word). Draining is what preserves the tail.
         for _ in 0..<4 { await Task.yield() }
+        doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms actor-drain-yield done pcmBufferBytes=\(pcmBuffer.count)")
         isRunning = false
 
         // Trailing silence into the outbound PCM buffer so the server's VAD
@@ -294,11 +303,19 @@ public actor DoubaoASR {
         // flushAndSendLastFrame alone would only handle the very last partial
         // frame.
         do {
+            let beforeFlush = Date()
             try await flushPendingFrames()
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms flushPending done duration=\(elapsedMs(since: beforeFlush))ms frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
+
+            let beforeLast = Date()
             try await flushAndSendLastFrame()
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms lastFrame done duration=\(elapsedMs(since: beforeLast))ms frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
+
+            let beforeFinish = Date()
             try await sendFinishSession()
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms FinishSession sent duration=\(elapsedMs(since: beforeFinish))ms")
         } catch {
-            doushaLog("[DoubaoASR] stop send error: \(error.localizedDescription)")
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stop send error: \(error.localizedDescription)")
         }
 
         // Wait for SessionFinished. Doubao streaming ASR has ~1.5-2s first-response
@@ -319,10 +336,11 @@ public actor DoubaoASR {
         } else {
             outcomeStr = "no-channel"
         }
-        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
 
         let final = assembledText()
-        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms stop final text.len=\(final.count) segments=\(committedSegments.count)")
+        let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
+        doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stop final text.len=\(final.count) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
 
         let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
         let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
@@ -551,7 +569,7 @@ public actor DoubaoASR {
     }
 
     private func sessionConfigJSON(deviceId: String) -> String {
-        buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint)
+        buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint, profile: experimentProfile)
     }
 
     private func sendFinishSession() async throws {
@@ -625,6 +643,9 @@ public actor DoubaoASR {
             return
         }
         doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms recv messageType=\(resp.messageType) code=\(resp.statusCode) jsonLen=\(resp.resultJson.count)")
+        if let stopStartedAt {
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms recv-after-stop messageType=\(resp.messageType) code=\(resp.statusCode) jsonLen=\(resp.resultJson.count)")
+        }
 
         // Drop responses for prior (closed) sessions on this reused WebSocket. Server
         // echoes our request_id; if it doesn't match the current session, it's stale.
@@ -703,7 +724,8 @@ public actor DoubaoASR {
                 && !currentInterim.hasPrefix(text)
 
             let preview = text.prefix(40).replacingOccurrences(of: "\n", with: " ")
-            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms result isInterim=\(isInterim) vadFinished=\(vadFinished) nonstream=\(nonstreamResult) textLen=\(text.count) currentInterimLen=\(currentInterim.count) newUtterance=\(looksLikeNewUtterance) preview=\(preview)")
+            let stopDelta = stopStartedAt.map { " stop+\(elapsedMs(since: $0))ms" } ?? ""
+            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms\(stopDelta) result isInterim=\(isInterim) vadFinished=\(vadFinished) nonstream=\(nonstreamResult) textLen=\(text.count) currentInterimLen=\(currentInterim.count) newUtterance=\(looksLikeNewUtterance) preview=\(preview)")
 
             if looksLikeNewUtterance {
                 let rescued = currentInterim
@@ -734,6 +756,10 @@ public actor DoubaoASR {
     private func traceElapsedMs(now: Date = Date()) -> Int {
         guard let audioStartedAt else { return 0 }
         return Int(now.timeIntervalSince(audioStartedAt) * 1000)
+    }
+
+    private func elapsedMs(since start: Date, now: Date = Date()) -> Int {
+        Int(now.timeIntervalSince(start) * 1000)
     }
 
     private func signalFinished() {
