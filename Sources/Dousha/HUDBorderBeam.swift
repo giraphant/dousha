@@ -3,9 +3,18 @@ import SwiftUI
 struct HUDBorderBeam: View {
     let cornerRadius: CGFloat
     let baseColor: Color
-    var lineWidth: CGFloat = 0.95
-    var glowRadius: CGFloat = 5.5
+    var lineWidth: CGFloat = 0.9
+    var glowRadius: CGFloat = 15.0
     var duration: TimeInterval = 2.45
+
+    static let baseStrokeOpacity = 0.30
+    static let inverseMaskBlurMultiplier = 1.0
+    static let beamMaskBlurDivisor = 1.5
+    static let beamMaskPaddingMultiplier = -2.0
+    static let beamVisibleStartLocation = 0.52
+    static let beamVisibleEndLocation = 0.97
+    static let glowOpacity = 0.54
+    static let sameColorHotspotOpacity = 0.92
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -32,32 +41,54 @@ struct HUDBorderBeam: View {
     }
 
     private func beamLayer(rotation: Double) -> some View {
-        let beam = AngularGradient(
+        let borderGradient = AngularGradient(
             stops: [
                 .init(color: .clear, location: 0.00),
-                .init(color: .clear, location: 0.60),
-                .init(color: baseColor.opacity(0.12), location: 0.68),
-                .init(color: baseColor.opacity(0.72), location: 0.74),
-                .init(color: Color.white.opacity(0.64), location: 0.77),
-                .init(color: baseColor.opacity(0.44), location: 0.82),
-                .init(color: .clear, location: 0.90),
+                .init(color: .clear, location: Self.beamVisibleStartLocation),
+                .init(color: baseColor.opacity(0.12), location: 0.62),
+                .init(color: baseColor.opacity(0.60), location: 0.72),
+                .init(color: baseColor.opacity(Self.sameColorHotspotOpacity), location: 0.79),
+                .init(color: baseColor.opacity(0.52), location: 0.88),
+                .init(color: .clear, location: Self.beamVisibleEndLocation),
                 .init(color: .clear, location: 1.00),
             ],
             center: .center,
             startAngle: .degrees(rotation - 90),
             endAngle: .degrees(rotation + 270)
         )
+        let beamGradient = LinearGradient(
+            colors: [baseColor.opacity(0.12), baseColor, baseColor.opacity(Self.sameColorHotspotOpacity), baseColor],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
 
         return ZStack {
             shape
-                .strokeBorder(baseColor.opacity(0.30), lineWidth: 0.65)
+                .strokeBorder(baseColor.opacity(Self.baseStrokeOpacity), lineWidth: 0.65)
 
             shape
-                .strokeBorder(beam, lineWidth: lineWidth)
-                .shadow(color: baseColor.opacity(0.42), radius: glowRadius)
+                .fill(beamGradient)
+                .mask {
+                    Rectangle()
+                        .overlay {
+                            shape
+                                .blur(radius: glowRadius * Self.inverseMaskBlurMultiplier)
+                                .blendMode(.destinationOut)
+                        }
+                }
+                .mask {
+                    shape
+                        .fill(borderGradient)
+                        .blur(radius: glowRadius / Self.beamMaskBlurDivisor)
+                        .padding(glowRadius * Self.beamMaskPaddingMultiplier)
+                }
+                .opacity(Self.glowOpacity)
 
             shape
-                .strokeBorder(beam, lineWidth: max(0.55, lineWidth * 0.58))
+                .strokeBorder(borderGradient, lineWidth: lineWidth)
+
+            shape
+                .strokeBorder(borderGradient, lineWidth: max(0.55, lineWidth * 0.58))
         }
     }
 }
