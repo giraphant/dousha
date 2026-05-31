@@ -285,6 +285,28 @@ public actor DoubaoASR {
         doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms actor-drain-yield done pcmBufferBytes=\(pcmBuffer.count)")
         isRunning = false
 
+        if !streamReady {
+            // We are abandoning the startup path unless it becomes ready within
+            // the short grace below. Quarantine callbacks so a late URLSession
+            // timeout cannot turn a successful fallback into a UI error.
+            onPartial = nil
+            onError = nil
+
+            let sessionAge = audioStartedAt.map { stopStartedAt.timeIntervalSince($0) } ?? 0
+            let remainingGrace = max(0, DoubaoConstants.startupGraceOnStopSeconds - sessionAge)
+            if remainingGrace > 0, let channel = finishedChannel {
+                doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stream not ready; waiting startup grace \(Int(remainingGrace * 1000))ms")
+                _ = await waitWithTimeout(channel: channel, timeout: remainingGrace)
+            }
+
+            if !streamReady {
+                let result = currentResult()
+                doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stream not ready after startup grace; skip FinishSession and return text.len=\(result.text.count) frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
+                detachAndCloseWebSocketInBackground()
+                return result
+            }
+        }
+
         // Trailing silence into the outbound PCM buffer so the server's VAD
         // finalizes the last utterance. The explicit `finish_audio: true` on the
         // last frame should make this unnecessary; gated on a tunable (see
@@ -342,35 +364,7 @@ public actor DoubaoASR {
         let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
         doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stop final text.len=\(final.count) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
 
-        let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
-        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
-
-        let maxSegmentGap: TimeInterval? = {
-            // Only meaningful with 2+ commits — the lead gap from audioStartedAt
-            // to the first commit is NOT a reliable signal (a user who talks
-            // continuously without pausing has a "lead gap" equal to the entire
-            // recording duration, but nothing was dropped). What IS a real signal
-            // is silence between two committed segments: Doubao normally commits
-            // every few seconds when VAD finalizes, so a >10s gap between two
-            // commits means something happened mid-recording.
-            guard segmentCommittedAt.count >= 2 else { return nil }
-            var maxGap: TimeInterval = 0
-            for i in 1..<segmentCommittedAt.count {
-                let gap = segmentCommittedAt[i].timeIntervalSince(segmentCommittedAt[i-1])
-                if gap > maxGap { maxGap = gap }
-            }
-            return maxGap
-        }()
-
-        let result = TranscriptionResult(
-            text: final,
-            audioDuration: audioDuration,
-            lastResponseAge: lastResponseAge,
-            lastTranscriptAge: lastTranscriptAge,
-            maxSegmentGap: maxSegmentGap,
-            traceId: requestId
-        )
+        let result = currentResult()
         // Close the WebSocket after every session (see class doc), but off the
         // critical path — the transcript is already assembled, so the caller
         // gets it NOW instead of waiting on the up-to-1s close handshake. We
@@ -749,8 +743,36 @@ public actor DoubaoASR {
         }
     }
 
+    private var streamReady: Bool {
+        canSendAudio || framesSentCount > 0
+    }
+
     private func assembledText() -> String {
         committedSegments.joined() + currentInterim
+    }
+
+    private func currentResult() -> TranscriptionResult {
+        let now = Date()
+        let audioDuration: TimeInterval = audioStartedAt.map { now.timeIntervalSince($0) } ?? 0
+        let lastResponseAge: TimeInterval? = lastResponseAt.map { now.timeIntervalSince($0) }
+        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { now.timeIntervalSince($0) }
+        let maxSegmentGap: TimeInterval? = {
+            guard segmentCommittedAt.count >= 2 else { return nil }
+            var maxGap: TimeInterval = 0
+            for i in 1..<segmentCommittedAt.count {
+                let gap = segmentCommittedAt[i].timeIntervalSince(segmentCommittedAt[i-1])
+                if gap > maxGap { maxGap = gap }
+            }
+            return maxGap
+        }()
+        return TranscriptionResult(
+            text: assembledText(),
+            audioDuration: audioDuration,
+            lastResponseAge: lastResponseAge,
+            lastTranscriptAge: lastTranscriptAge,
+            maxSegmentGap: maxSegmentGap,
+            traceId: requestId
+        )
     }
 
     private func traceElapsedMs(now: Date = Date()) -> Int {
