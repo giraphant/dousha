@@ -149,6 +149,21 @@ final class FloatingHUDLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testBorderBeamUsesReferenceStyleInverseMaskGlow() {
+        XCTAssertEqual(FloatingHUDView.borderBeamLineWidth, 0.9)
+        XCTAssertEqual(FloatingHUDView.borderBeamGlowRadius, 15.0)
+        XCTAssertEqual(FloatingHUDView.borderBeamPadding, 0.5)
+        XCTAssertEqual(HUDBorderBeam.baseStrokeOpacity, 0.30)
+        XCTAssertEqual(HUDBorderBeam.inverseMaskBlurMultiplier, 1.0)
+        XCTAssertEqual(HUDBorderBeam.beamMaskBlurDivisor, 1.5)
+        XCTAssertEqual(HUDBorderBeam.beamMaskPaddingMultiplier, -2.0)
+        XCTAssertEqual(HUDBorderBeam.beamVisibleStartLocation, 0.52)
+        XCTAssertEqual(HUDBorderBeam.beamVisibleEndLocation, 0.97)
+        XCTAssertEqual(HUDBorderBeam.glowOpacity, 0.54)
+        XCTAssertEqual(HUDBorderBeam.sameColorHotspotOpacity, 0.92)
+    }
+
+    @MainActor
     func testLayoutRevisionMarksInstalledBuild() {
         XCTAssertEqual(
             FloatingHUDView.layoutRevision,

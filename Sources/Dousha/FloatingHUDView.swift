@@ -245,6 +245,10 @@ struct FloatingHUDView: View {
         return min(1, max(0, fadeHeight / viewportHeight))
     }
 
+    static let borderBeamLineWidth: CGFloat = 0.9
+    static let borderBeamGlowRadius: CGFloat = 15.0
+    static let borderBeamPadding: CGFloat = 0.5
+
     static let layoutRevision = "QUA-147-HUD-SCROLLVIEW-MEASUREDCAP-20260531-1519"
 
     private static let hudShape = RoundedRectangle(cornerRadius: hudCornerRadius, style: .continuous)
@@ -586,11 +590,11 @@ private struct HUDChrome<Content: View>: View {
                 HUDBorderBeam(
                     cornerRadius: cornerRadius,
                     baseColor: glowColor,
-                    lineWidth: 0.95,
-                    glowRadius: 5.5,
+                    lineWidth: FloatingHUDView.borderBeamLineWidth,
+                    glowRadius: FloatingHUDView.borderBeamGlowRadius,
                     duration: 2.45
                 )
-                .padding(-0.35)
+                .padding(FloatingHUDView.borderBeamPadding)
                 .opacity(beamOpacity)
                 .allowsHitTesting(false)
             }
