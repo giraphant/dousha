@@ -47,13 +47,15 @@ public enum SonioxConfig {
         return ["terms": terms]
     }
 
-    /// Builds the first-message JSON (a text frame). Auto-detect only: we
-    /// deliberately omit `language_hints`, translation, diarization, and
-    /// language-id — this is plain dictation (see design doc, "Out of scope").
+    /// Builds the first-message JSON (a text frame).
     ///
     /// - Parameter contextTerms: Glossary terms for `context.terms`. Empty =>
     ///   no `context` key is sent.
-    public static func configMessageJSON(apiKey: String, contextTerms: [String] = []) -> String {
+    /// - Parameter languageHints: ISO codes (e.g. `["zh", "en"]`) biasing
+    ///   Soniox's auto-detect toward the user's languages — without them short
+    ///   utterances drift (zh dictation returning as Korean/Danish). Empty =>
+    ///   no `language_hints` key is sent (pure auto-detect).
+    public static func configMessageJSON(apiKey: String, contextTerms: [String] = [], languageHints: [String] = []) -> String {
         var payload: [String: Any] = [
             "api_key": apiKey,
             "model": model,
@@ -64,6 +66,9 @@ public enum SonioxConfig {
         ]
         if let context = contextObject(terms: contextTerms) {
             payload["context"] = context
+        }
+        if !languageHints.isEmpty {
+            payload["language_hints"] = languageHints
         }
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"

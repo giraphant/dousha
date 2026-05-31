@@ -430,7 +430,6 @@ struct SettingsView: View {
         do {
             try actions.setLaunchAtLogin(newValue)
             launchAtLoginError = ""
-            Preferences.shared.launchAtLogin = newValue
         } catch {
             launchAtLoginError = "设置开机启动失败：\(error.localizedDescription)"
             // Revert the toggle to the real system state.

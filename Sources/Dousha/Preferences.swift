@@ -42,10 +42,6 @@ final class Preferences: @unchecked Sendable {
 
     private enum Keys {
         static let language                  = "language"
-        // Legacy single-engine pref (pre-QUA-145). Still read as the migration
-        // seed for the per-language engine slots below, and still written by
-        // single-engine quick-switch from the menu bar.
-        static let engine                    = "engine"
         // QUA-145 multi-engine: per-language routing slots + the parallel-active set.
         static let chineseEngine             = "chineseEngine"
         static let englishEngine             = "englishEngine"
@@ -70,7 +66,6 @@ final class Preferences: @unchecked Sendable {
         // turned cancel off and the app restarted.
         static let cancelHotkeyKeyCode       = "cancelHotkey.keyCode"
         static let refineMode                = "refineMode"
-        static let launchAtLogin             = "launchAtLogin"
         static let showDockIcon              = "showDockIcon"
         static let showMenuBarIcon           = "showMenuBarIcon"
     }
@@ -83,7 +78,6 @@ final class Preferences: @unchecked Sendable {
         self.defaults = defaults
         defaults.register(defaults: [
             Keys.language:                 Language.zh_CN.rawValue,
-            Keys.engine:                   Engine.apple.rawValue,
             Keys.llmEnabled:               false,
             Keys.llmBaseURL:               "https://api.openai.com/v1",
             Keys.llmModel:                 "gpt-4o-mini",
@@ -97,17 +91,9 @@ final class Preferences: @unchecked Sendable {
             Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode),
             Keys.refineMode:               RefineMode.immediate.rawValue,
             // Menu-bar accessory app by default: no Dock icon, status item shown.
-            // `launchAtLogin` here is only a UI mirror; SMAppService is the
-            // source of truth and is consulted directly when the window opens.
-            Keys.launchAtLogin:            false,
             Keys.showDockIcon:             false,
             Keys.showMenuBarIcon:          true
         ])
-    }
-
-    var launchAtLogin: Bool {
-        get { defaults.bool(forKey: Keys.launchAtLogin) }
-        set { defaults.set(newValue, forKey: Keys.launchAtLogin) }
     }
 
     var showDockIcon: Bool {
@@ -125,11 +111,10 @@ final class Preferences: @unchecked Sendable {
         set { defaults.set(newValue, forKey: Keys.language) }
     }
 
-    /// Legacy single-engine value (pre-QUA-145). Used only as the migration
-    /// seed for the routing slots / active set when those haven't been set yet.
-    private var legacySingleEngine: Engine {
-        Engine(rawValue: defaults.string(forKey: Keys.engine) ?? "") ?? .apple
-    }
+    /// Default engine for a slot that was never explicitly set (fresh install).
+    /// Previously seeded from the retired pre-QUA-145 `engine` key; that
+    /// migration window is closed, so this is now just the baseline default.
+    private static let defaultEngine: Engine = .apple
 
     /// The primary engine — the slot matching the current primary language. Drives
     /// HUD partials/level. Computed, not stored: it follows `language`.
@@ -141,7 +126,7 @@ final class Preferences: @unchecked Sendable {
     }
 
     private func engineSlot(_ key: String) -> Engine {
-        Engine(rawValue: defaults.string(forKey: key) ?? "") ?? legacySingleEngine
+        Engine(rawValue: defaults.string(forKey: key) ?? "") ?? Preferences.defaultEngine
     }
 
     /// Engine used when the transcript is ≥95% CJK.
@@ -168,16 +153,16 @@ final class Preferences: @unchecked Sendable {
     var activeEngines: [Engine] {
         get {
             guard let raw = defaults.stringArray(forKey: Keys.activeEngines) else {
-                return [legacySingleEngine]
+                return [Preferences.defaultEngine]
             }
             let engines = raw.compactMap(Engine.init(rawValue:))
-            return engines.isEmpty ? [legacySingleEngine] : engines
+            return engines.isEmpty ? [Preferences.defaultEngine] : engines
         }
         set {
             let unique = newValue.reduce(into: [Engine]()) { acc, e in
                 if !acc.contains(e) { acc.append(e) }
             }
-            defaults.set((unique.isEmpty ? [legacySingleEngine] : unique).map(\.rawValue),
+            defaults.set((unique.isEmpty ? [Preferences.defaultEngine] : unique).map(\.rawValue),
                          forKey: Keys.activeEngines)
         }
     }
@@ -193,7 +178,6 @@ final class Preferences: @unchecked Sendable {
     /// Collapse to single-engine mode: all three slots and the active set point
     /// at one engine. Zero-overhead degenerate case; what the menu quick-switch uses.
     func setSingleEngine(_ e: Engine) {
-        defaults.set(e.rawValue, forKey: Keys.engine)   // keep legacy seed in sync
         chineseEngine = e
         englishEngine = e
         mixedEngine = e

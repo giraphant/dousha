@@ -23,6 +23,12 @@ public actor SonioxASR {
     /// active session for the rest of the recording. Empty => no `context` sent.
     private var contextTerms: [String] = []
 
+    /// ISO language codes sent as Soniox `language_hints` to bias auto-detect
+    /// toward the user's languages (prevents zh dictation drifting to Korean /
+    /// Danish). Snapshotted at `prepareSession` like `contextTerms`. Empty =>
+    /// no hints sent (pure auto-detect).
+    private var languageHints: [String] = []
+
     private var session: URLSession?
     private var ws: URLSessionWebSocketTask?
 
@@ -91,12 +97,16 @@ public actor SonioxASR {
     ///
     /// - Parameter contextTerms: Glossary terms for Soniox's `context.terms`.
     ///   Pass `[]` for none. Snapshotted for the duration of this recording.
+    /// - Parameter languageHints: ISO codes for Soniox `language_hints`. Pass
+    ///   `[]` for pure auto-detect. Snapshotted for this recording.
     public func prepareSession(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                                onError: @escaping @Sendable (Error) -> Void,
-                               contextTerms: [String] = []) {
+                               contextTerms: [String] = [],
+                               languageHints: [String] = []) {
         guard !isRunning else { return }
         isRunning = true
         self.contextTerms = contextTerms
+        self.languageHints = languageHints
         self.onPartial = onPartial
         self.onError = onError
         self.parser = SonioxResponseParser()
@@ -283,7 +293,7 @@ public actor SonioxASR {
             doushaLog("[SonioxASR] traceId=\(requestId) async stop — no WAV captured")
             return makeResult()
         }
-        let client = SonioxAsyncClient(apiKey: apiKey, contextTerms: contextTerms)
+        let client = SonioxAsyncClient(apiKey: apiKey, contextTerms: contextTerms, languageHints: languageHints)
         do {
             let text = try await client.transcribe(fileURL: savedURL, traceId: requestId)
             parser.ingest(object: ["tokens": [["text": text, "is_final": true]], "finished": true])
@@ -370,7 +380,7 @@ public actor SonioxASR {
 
     private func sendConfigMessage() async throws {
         guard let ws = ws else { throw URLError(.networkConnectionLost) }
-        let json = SonioxConfig.configMessageJSON(apiKey: apiKey, contextTerms: contextTerms)
+        let json = SonioxConfig.configMessageJSON(apiKey: apiKey, contextTerms: contextTerms, languageHints: languageHints)
         if contextTerms.isEmpty {
             doushaLog("[SonioxASR] traceId=\(requestId) config context: (none)")
         } else {
