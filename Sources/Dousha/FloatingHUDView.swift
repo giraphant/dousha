@@ -1,5 +1,6 @@
 import SwiftUI
 import ASRSupport
+import TalkerCommonSync
 
 @MainActor
 final class FloatingHUDModel: ObservableObject {
@@ -153,6 +154,9 @@ struct FloatingHUDView: View {
     /// measured off-screen. Drives the card's explicit height so the chrome —
     /// and its border beam — track the visible card edge exactly at every size.
     @State private var measuredTextHeight: CGFloat = 0
+    /// Real rendered height of five rows with the current font/line spacing. This
+    /// avoids hand-tuning a magic row pitch that either clips row 5 or leaks row 6.
+    @State private var measuredFiveLineHeight: CGFloat = Self.transcriptTextBandHeight
 
     private static let hudCornerRadius: CGFloat = 16
     private let cornerRadius: CGFloat = Self.hudCornerRadius
@@ -172,19 +176,76 @@ struct FloatingHUDView: View {
     // MARK: Live-transcript growth (only used once text arrives)
     static let transcriptFontSize: CGFloat = 13
     /// Single transcript line box (font + lineSpacing).
-    static let transcriptLineHeight: CGFloat = 19
+    static let transcriptLineHeight: CGFloat = 16
     /// Hard cap on visible transcript lines; older lines fade off the top.
     static let maxTranscriptLines: Int = 5
-    static let transcriptTopPadding: CGFloat = 14
+    static let transcriptTopPadding: CGFloat = 12
+    static let transcriptBottomPadding: CGFloat = 6
     private static let transcriptHorizontalPadding: CGFloat = 16
+    /// Overflow uses a bottom-anchored ScrollView rather than a fade mask, so the
+    /// first visible row stays intact when the transcript reaches the 5-line cap.
+    static let transcriptFadeHeight: CGFloat = 0
     /// Bottom strip reserved for the meter while transcript is showing.
-    static let meterRegionHeight: CGFloat = 26
-    /// Transcript text area cap: top padding + the 5 lines (the visible limit).
-    static let transcriptMaxHeight: CGFloat = transcriptTopPadding + transcriptLineHeight * CGFloat(maxTranscriptLines)
+    static let meterRegionHeight: CGFloat = 28
+    /// SwiftUI's rendered 13pt medium Chinese rows need more vertical box than
+    /// the added lineSpacing alone; reserve this pitch so 5 capped rows don't crush.
+    static let transcriptRenderedLinePitch: CGFloat = 17.5
+    /// Text band cap: the five visible rows, excluding persistent top breathing room.
+    static let transcriptTextBandHeight: CGFloat = transcriptRenderedLinePitch * CGFloat(maxTranscriptLines)
+    /// Transcript viewport cap: top padding + visible rows + bottom breathing room.
+    static let transcriptViewportHeight: CGFloat = measuredTranscriptViewportHeight()
+    /// Backward-compatible name for the capped transcript viewport height.
+    static let transcriptMaxHeight: CGFloat = transcriptViewportHeight
     /// Grown card cap = transcript cap + meter strip. The fixed panel sizes to this.
-    static let maxHeight: CGFloat = transcriptMaxHeight + meterRegionHeight
+    static let maxHeight: CGFloat = transcriptViewportHeight + meterRegionHeight
     /// FloatingWindow sizes the (fixed) panel to the cap so the grown card fits.
     static let cardMaxHeight: CGFloat = maxHeight
+
+    static func measuredTranscriptViewportHeight(
+        renderedLinePitch: CGFloat = transcriptRenderedLinePitch,
+        maxLines: Int = maxTranscriptLines,
+        topPadding: CGFloat = transcriptTopPadding,
+        bottomPadding: CGFloat = transcriptBottomPadding
+    ) -> CGFloat {
+        topPadding + renderedLinePitch * CGFloat(maxLines) + bottomPadding
+    }
+
+    static func resolvedTranscriptTextBandHeight(
+        measuredTextHeight: CGFloat,
+        capHeight: CGFloat = transcriptTextBandHeight
+    ) -> CGFloat {
+        min(capHeight, max(0, measuredTextHeight))
+    }
+
+    static func resolvedTranscriptViewportHeight(
+        measuredTextHeight: CGFloat,
+        capHeight: CGFloat = transcriptTextBandHeight
+    ) -> CGFloat {
+        transcriptTopPadding
+            + resolvedTranscriptTextBandHeight(measuredTextHeight: measuredTextHeight, capHeight: capHeight)
+            + transcriptBottomPadding
+    }
+
+    static func resolvedCardHeight(
+        hasTranscript: Bool,
+        measuredTextHeight: CGFloat,
+        capHeight: CGFloat = transcriptTextBandHeight
+    ) -> CGFloat {
+        guard hasTranscript else { return compactHeight }
+        let needed = resolvedTranscriptViewportHeight(measuredTextHeight: measuredTextHeight, capHeight: capHeight)
+            + meterRegionHeight
+        return min(maxHeight, max(compactHeight, needed))
+    }
+
+    static func transcriptFadeStopLocation(
+        fadeHeight: CGFloat = transcriptFadeHeight,
+        viewportHeight: CGFloat = transcriptViewportHeight
+    ) -> CGFloat {
+        guard viewportHeight > 0 else { return 0 }
+        return min(1, max(0, fadeHeight / viewportHeight))
+    }
+
+    static let layoutRevision = "QUA-147-HUD-SCROLLVIEW-MEASUREDCAP-20260531-1519"
 
     private static let hudShape = RoundedRectangle(cornerRadius: hudCornerRadius, style: .continuous)
 
@@ -221,11 +282,27 @@ struct FloatingHUDView: View {
     }
 
     /// Card height: compact when there's no transcript (original design),
-    /// otherwise grown to fit the measured text, clamped to the 5-line cap.
+    /// otherwise grown to the clipped transcript viewport, never past the 5-line cap.
     private var currentCardHeight: CGFloat {
-        guard model.hasTranscript else { return Self.compactHeight }
-        let needed = measuredTextHeight + Self.meterRegionHeight
-        return min(Self.maxHeight, max(Self.compactHeight, needed))
+        Self.resolvedCardHeight(
+            hasTranscript: model.hasTranscript,
+            measuredTextHeight: measuredTextHeight,
+            capHeight: measuredFiveLineHeight
+        )
+    }
+
+    private var currentTranscriptTextBandHeight: CGFloat {
+        Self.resolvedTranscriptTextBandHeight(
+            measuredTextHeight: measuredTextHeight,
+            capHeight: measuredFiveLineHeight
+        )
+    }
+
+    private var currentTranscriptViewportHeight: CGFloat {
+        Self.resolvedTranscriptViewportHeight(
+            measuredTextHeight: measuredTextHeight,
+            capHeight: measuredFiveLineHeight
+        )
     }
 
     private var hudCard: some View {
@@ -241,11 +318,14 @@ struct FloatingHUDView: View {
                     .opacity(isExpandedNow ? 1 : 0)
                     .allowsHitTesting(isExpandedNow)
             }
+            .frame(width: Self.cardWidth, height: currentCardHeight)
+            .clipped()
         }
         // Explicit frame keeps the chrome (and its beam) locked to the visible
         // card edge; height is dynamic but always exact.
         .frame(width: Self.cardWidth, height: currentCardHeight)
         .background(transcriptHeightMeasurer)
+        .background(transcriptFiveLineHeightMeasurer)
         .contentShape(Self.hudShape)
         .onHover { hovering in
             guard canExpand else {
@@ -274,7 +354,6 @@ struct FloatingHUDView: View {
         transcriptStyledText
             .fixedSize(horizontal: false, vertical: true)
             .frame(width: Self.cardWidth - 2 * Self.transcriptHorizontalPadding, alignment: .topLeading)
-            .padding(.top, Self.transcriptTopPadding)
             .background(
                 GeometryReader { proxy in
                     Color.clear.preference(key: TranscriptHeightKey.self, value: proxy.size.height)
@@ -282,6 +361,31 @@ struct FloatingHUDView: View {
             )
             .hidden()
             .onPreferenceChange(TranscriptHeightKey.self) { measuredTextHeight = $0 }
+    }
+
+    /// Hidden five-line probe using the exact transcript styling/width. SwiftUI's
+    /// rendered line boxes are not equal to `fontSize + lineSpacing`, so this is
+    /// the reliable cap for the bottom-anchored transcript ScrollView.
+    private var transcriptFiveLineHeightMeasurer: some View {
+        Text(Array(repeating: "测", count: Self.maxTranscriptLines).joined(separator: "\n"))
+            .font(.system(size: Self.transcriptFontSize, weight: .medium))
+            .lineSpacing(Self.transcriptLineHeight - Self.transcriptFontSize)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: Self.cardWidth - 2 * Self.transcriptHorizontalPadding, alignment: .topLeading)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: TranscriptFiveLineHeightKey.self, value: proxy.size.height)
+                }
+            )
+            .hidden()
+            .onPreferenceChange(TranscriptFiveLineHeightKey.self) { height in
+                let next = max(1, height)
+                if abs(measuredFiveLineHeight - next) > 0.5 {
+                    measuredFiveLineHeight = next
+                    doushaLog("[Dousha] HUD measured five-line cap height: \(next)")
+                }
+            }
     }
 
     private var compactSection: some View {
@@ -350,23 +454,32 @@ struct FloatingHUDView: View {
     /// faded off the top.
     private var transcriptSection: some View {
         VStack(spacing: 0) {
-            transcriptStyledText
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .bottomLeading)
-                .padding(.horizontal, Self.transcriptHorizontalPadding)
-                .padding(.top, Self.transcriptTopPadding)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .clipped()
-                .mask(
-                    LinearGradient(
-                        stops: [
-                            .init(color: .clear, location: 0.0),
-                            .init(color: .black, location: Self.transcriptLineHeight / Self.transcriptMaxHeight),
-                            .init(color: .black, location: 1.0),
-                        ],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
+            VStack(spacing: 0) {
+                Color.clear
+                    .frame(height: Self.transcriptTopPadding)
+
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        transcriptStyledText
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .bottomLeading)
+                            .padding(.horizontal, Self.transcriptHorizontalPadding)
+                            .id("transcript-bottom")
+                    }
+                    .frame(height: currentTranscriptTextBandHeight, alignment: .bottom)
+                    .clipped()
+                    .onChange(of: model.transcript.combined) { _, _ in
+                        withAnimation(.easeOut(duration: 0.08)) {
+                            proxy.scrollTo("transcript-bottom", anchor: .bottom)
+                        }
+                    }
+                }
+
+                Color.clear
+                    .frame(height: Self.transcriptBottomPadding)
+            }
+            .frame(height: currentTranscriptViewportHeight, alignment: .bottom)
+            .clipped()
 
             levelMeter(opacity: 0.74, minHeight: 3.0, maxHeight: 14)
                 .frame(width: Self.cardWidth - 28)
@@ -424,6 +537,13 @@ struct FloatingHUDView: View {
 /// Carries the full (unclamped) transcript text height up from the off-screen
 /// measurer so the card can size itself.
 private struct TranscriptHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct TranscriptFiveLineHeightKey: PreferenceKey {
     static var defaultValue: CGFloat { 0 }
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())

@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recording: RecordingController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        doushaLog("[Dousha] HUD layout revision: \(FloatingHUDView.layoutRevision)")
         applyDockIconVisibility()
         installMainMenu()
         menuBar = MenuBarController(openSettings: { [weak self] in self?.openSettings() })
