@@ -30,7 +30,7 @@ public struct SonioxAsyncTranscriptParser: Sendable {
                 if t == "<end>" { continue }
                 text += t
             }
-            if !text.isEmpty { return text }
+            if !text.isEmpty { return TranscriptFormatter.normalize(text) }
         }
         return (obj["text"] as? String) ?? ""
     }

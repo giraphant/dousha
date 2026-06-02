@@ -1,4 +1,5 @@
 import Foundation
+import ASRSupport
 
 /// Pure, `Sendable`, unit-testable parser for Soniox real-time STT responses.
 ///
@@ -32,8 +33,10 @@ public struct SonioxResponseParser: Sendable {
 
     public init() {}
 
-    /// The text to surface live: finalized prefix plus the current interim.
-    public var displayText: String { finalText + interimText }
+    /// The text to surface live: finalized prefix plus the current interim,
+    /// with Soniox's spacing normalised — stray full-width-punctuation spaces
+    /// stripped, missing CJK<->Latin spaces inserted (QUA-173).
+    public var displayText: String { TranscriptFormatter.normalize(finalText + interimText) }
 
     /// Outcome of ingesting one batch, so the actor can react (deliver partial,
     /// signal finished, deliver error) without re-reading parser state.
@@ -109,10 +112,13 @@ public struct SonioxResponseParser: Sendable {
         }
 
         let produced = appendedFinal || !interimText.isEmpty
+        // Deliver normalised text so the live HUD matches the committed result's
+        // spacing (QUA-173). `displayText` normalises the combined string for the
+        // committed/pasted result.
         return Update(
             displayText: displayText,
-            finalText: finalText,
-            interimText: interimText,
+            finalText: TranscriptFormatter.normalize(finalText),
+            interimText: TranscriptFormatter.normalize(interimText),
             didProduceContent: produced,
             finished: finishedNow,
             errorMessage: nil

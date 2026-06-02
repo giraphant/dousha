@@ -721,14 +721,19 @@ public actor DoubaoASR {
             } else {
                 currentInterim = text
             }
-            let partial = PartialTranscript(finalText: committedSegments.joined(), interimText: currentInterim)
+            let partial = PartialTranscript(
+                finalText: TranscriptFormatter.normalize(committedSegments.joined()),
+                interimText: TranscriptFormatter.normalize(currentInterim)
+            )
             let cb = onPartial
             DispatchQueue.main.async { cb?(partial) }
         }
     }
 
     private func assembledText() -> String {
-        committedSegments.joined() + currentInterim
+        // Route through the shared formatter so Doubao output gets the same
+        // CJK/Latin spacing normalisation as Soniox (QUA-173).
+        TranscriptFormatter.normalize(committedSegments.joined() + currentInterim)
     }
 
     private func traceElapsedMs(now: Date = Date()) -> Int {
