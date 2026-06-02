@@ -41,6 +41,12 @@ public actor DoubaoASR {
     /// Fresh channel per session — recreated in _start() so signals from
     /// previous sessions don't leak forward.
     private var finishedChannel: OneShotChannel<Void>?
+    /// Fires once the startup path reaches a terminal state — either StartSession
+    /// succeeded (`canSendAudio` flipped true) or `openStream` failed. The stop
+    /// path's startup grace waits on this so it wakes the instant the stream
+    /// becomes ready, instead of sleeping the full grace on `finishedChannel`
+    /// (which only signals on SessionFinished, never on stream-ready).
+    private var streamReadyChannel: OneShotChannel<Void>?
     private var didReceiveFinal = false
     private var stopStartedAt: Date?
 
@@ -149,6 +155,7 @@ public actor DoubaoASR {
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
         self.finishedChannel = OneShotChannel<Void>()
+        self.streamReadyChannel = OneShotChannel<Void>()
         self.audioStartedAt = Date()
         self.lastResponseAt = nil
         self.lastTranscriptAt = nil
@@ -187,12 +194,14 @@ public actor DoubaoASR {
 
             // Now drain whatever audio accumulated during WS setup.
             self.canSendAudio = true
+            self.streamReadyChannel?.finish(())
             try await flushPendingFrames()
         } catch {
             doushaLog("[DoubaoASR] openStream() failed: \(error.localizedDescription)")
             deliverError(error)
             await closeWebSocket()
             isRunning = false
+            self.streamReadyChannel?.finish(())
             signalFinished()
         }
     }
@@ -294,7 +303,7 @@ public actor DoubaoASR {
 
             let sessionAge = audioStartedAt.map { stopStartedAt.timeIntervalSince($0) } ?? 0
             let remainingGrace = max(0, DoubaoConstants.startupGraceOnStopSeconds - sessionAge)
-            if remainingGrace > 0, let channel = finishedChannel {
+            if remainingGrace > 0, let channel = streamReadyChannel {
                 doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stream not ready; waiting startup grace \(Int(remainingGrace * 1000))ms")
                 _ = await waitWithTimeout(channel: channel, timeout: remainingGrace)
             }
@@ -340,12 +349,14 @@ public actor DoubaoASR {
             doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stop send error: \(error.localizedDescription)")
         }
 
-        // Wait for SessionFinished. Doubao streaming ASR has ~1.5-2s first-response
-        // latency, and long fast recordings can have several seconds of backlog
-        // to flush after the server sees FinishSession. The official Doubao IME
-        // client sets SAMICoreAsrContextCreateParameter.finish_wait_timeout = 10000,
-        // so we mirror that — 4s was empirically too short for ~30s+ recordings
-        // where the server backlog took longer to drain than the wait allowed.
+        // Wait for SessionFinished, but only briefly. This is NOT the official
+        // client's finish_wait_timeout=10000 "drain the whole backlog" wait — by
+        // the time we send FinishSession the partials are already assembled, so
+        // we only need a quick confirmation that the server agrees the session is
+        // done. If SessionFinished doesn't arrive within finishGraceOnStopSeconds
+        // we treat the session as failed and return an empty result, letting
+        // MultiEngine fall back to a backup engine (which re-runs the retained
+        // audio) instead of blocking the paste on a slow tail.
         let waitStart = Date()
         let outcomeStr: String
         if let channel = finishedChannel {
