@@ -28,6 +28,7 @@ public actor DoubaoASR {
     /// `start(contextHint:)` so a Settings change mid-recording can't alter the
     /// active session for the rest of the recording. Empty string = no hint.
     private var contextHint: String = ""
+    private var experimentProfile: DoubaoExperimentProfile = .official
     private var pcmBuffer = Data()
     private var didSendFirstFrame = false
     private var canSendAudio = false
@@ -40,7 +41,14 @@ public actor DoubaoASR {
     /// Fresh channel per session — recreated in _start() so signals from
     /// previous sessions don't leak forward.
     private var finishedChannel: OneShotChannel<Void>?
+    /// Fires once the startup path reaches a terminal state — either StartSession
+    /// succeeded (`canSendAudio` flipped true) or `openStream` failed. The stop
+    /// path's startup grace waits on this so it wakes the instant the stream
+    /// becomes ready, instead of sleeping the full grace on `finishedChannel`
+    /// (which only signals on SessionFinished, never on stream-ready).
+    private var streamReadyChannel: OneShotChannel<Void>?
     private var didReceiveFinal = false
+    private var stopStartedAt: Date?
 
     /// Whether StartTask has been sent + acked on the current WebSocket. Doubao ties a
     /// task to a connection — sending StartTask twice on the same WS yields
@@ -132,6 +140,7 @@ public actor DoubaoASR {
         guard !isRunning else { return }
         isRunning = true
         self.contextHint = contextHint
+        self.experimentProfile = DoubaoExperimentProfile.resolve()
         self.onPartial = onPartial
         self.onError = onError
         self.committedSegments = []
@@ -141,14 +150,16 @@ public actor DoubaoASR {
         self.didSendFirstFrame = false
         self.canSendAudio = false
         self.didReceiveFinal = false
+        self.stopStartedAt = nil
         self.framesSentCount = 0
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
         self.finishedChannel = OneShotChannel<Void>()
+        self.streamReadyChannel = OneShotChannel<Void>()
         self.audioStartedAt = Date()
         self.lastResponseAt = nil
         self.lastTranscriptAt = nil
-        doushaLog("[DoubaoASR] traceId=\(requestId) prepareSession (capture owned by AudioTapHub)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) prepareSession \(experimentProfile.logSummary) (capture owned by AudioTapHub)")
     }
 
     /// Phase 2 — open the WebSocket and run StartTask/StartSession, then flush
@@ -183,12 +194,14 @@ public actor DoubaoASR {
 
             // Now drain whatever audio accumulated during WS setup.
             self.canSendAudio = true
+            self.streamReadyChannel?.finish(())
             try await flushPendingFrames()
         } catch {
             doushaLog("[DoubaoASR] openStream() failed: \(error.localizedDescription)")
             deliverError(error)
             await closeWebSocket()
             isRunning = false
+            self.streamReadyChannel?.finish(())
             signalFinished()
         }
     }
@@ -266,6 +279,10 @@ public actor DoubaoASR {
                 traceId: requestId
             )
         }
+        let stopStartedAt = Date()
+        self.stopStartedAt = stopStartedAt
+        let transcriptAgeAtStop = lastTranscriptAt.map { Int(stopStartedAt.timeIntervalSince($0) * 1000) } ?? -1
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs(now: stopStartedAt))ms stop begin lastTranscriptAge=\(transcriptAgeAtStop)ms frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
         // The shared AudioTapHub has already removed the mic tap and held its own
         // drain window before calling us, so no new audio is arriving. But the
         // tap dispatched the last buffers the user spoke as separate Tasks into
@@ -274,7 +291,30 @@ public actor DoubaoASR {
         // isRunning=false (which would otherwise drop them via the ingest guard,
         // truncating the final word). Draining is what preserves the tail.
         for _ in 0..<4 { await Task.yield() }
+        doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms actor-drain-yield done pcmBufferBytes=\(pcmBuffer.count)")
         isRunning = false
+
+        if !streamReady {
+            // We are abandoning the startup path unless it becomes ready within
+            // the short grace below. Quarantine callbacks so a late URLSession
+            // timeout cannot turn a successful fallback into a UI error.
+            onPartial = nil
+            onError = nil
+
+            let sessionAge = audioStartedAt.map { stopStartedAt.timeIntervalSince($0) } ?? 0
+            let remainingGrace = max(0, DoubaoConstants.startupGraceOnStopSeconds - sessionAge)
+            if remainingGrace > 0, let channel = streamReadyChannel {
+                doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stream not ready; waiting startup grace \(Int(remainingGrace * 1000))ms")
+                _ = await waitWithTimeout(channel: channel, timeout: remainingGrace)
+            }
+
+            if !streamReady {
+                let result = currentResult()
+                doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stream not ready after startup grace; skip FinishSession and return text.len=\(result.text.count) frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
+                detachAndCloseWebSocketInBackground()
+                return result
+            }
+        }
 
         // Trailing silence into the outbound PCM buffer so the server's VAD
         // finalizes the last utterance. The explicit `finish_audio: true` on the
@@ -294,23 +334,33 @@ public actor DoubaoASR {
         // flushAndSendLastFrame alone would only handle the very last partial
         // frame.
         do {
+            let beforeFlush = Date()
             try await flushPendingFrames()
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms flushPending done duration=\(elapsedMs(since: beforeFlush))ms frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
+
+            let beforeLast = Date()
             try await flushAndSendLastFrame()
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms lastFrame done duration=\(elapsedMs(since: beforeLast))ms frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
+
+            let beforeFinish = Date()
             try await sendFinishSession()
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms FinishSession sent duration=\(elapsedMs(since: beforeFinish))ms")
         } catch {
-            doushaLog("[DoubaoASR] stop send error: \(error.localizedDescription)")
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stop send error: \(error.localizedDescription)")
         }
 
-        // Wait for SessionFinished. Doubao streaming ASR has ~1.5-2s first-response
-        // latency, and long fast recordings can have several seconds of backlog
-        // to flush after the server sees FinishSession. The official Doubao IME
-        // client sets SAMICoreAsrContextCreateParameter.finish_wait_timeout = 10000,
-        // so we mirror that — 4s was empirically too short for ~30s+ recordings
-        // where the server backlog took longer to drain than the wait allowed.
+        // Wait for SessionFinished, but only briefly. This is NOT the official
+        // client's finish_wait_timeout=10000 "drain the whole backlog" wait — by
+        // the time we send FinishSession the partials are already assembled, so
+        // we only need a quick confirmation that the server agrees the session is
+        // done. If SessionFinished doesn't arrive within finishGraceOnStopSeconds
+        // we treat the session as failed and return an empty result, letting
+        // MultiEngine fall back to a backup engine (which re-runs the retained
+        // audio) instead of blocking the paste on a slow tail.
         let waitStart = Date()
         let outcomeStr: String
         if let channel = finishedChannel {
-            switch await waitWithTimeout(channel: channel, timeout: 10.0) {
+            switch await waitWithTimeout(channel: channel, timeout: DoubaoConstants.finishGraceOnStopSeconds) {
             case .signaled: outcomeStr = "signaled"
             case .timeout: outcomeStr = "timedOut"
             case .cancelled: outcomeStr = "cancelled"
@@ -319,40 +369,28 @@ public actor DoubaoASR {
         } else {
             outcomeStr = "no-channel"
         }
-        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms post-Finish wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms result=\(outcomeStr)")
+
+        if outcomeStr != "signaled" {
+            let partialLen = assembledText().count
+            let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms SessionFinished missing after finish grace; returning empty result partial.len=\(partialLen) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
+            detachAndCloseWebSocketInBackground()
+            return TranscriptionResult(
+                text: "",
+                audioDuration: audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0,
+                lastResponseAge: lastResponseAt.map { Date().timeIntervalSince($0) },
+                lastTranscriptAge: lastTranscriptAt.map { Date().timeIntervalSince($0) },
+                maxSegmentGap: nil,
+                traceId: requestId
+            )
+        }
 
         let final = assembledText()
-        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms stop final text.len=\(final.count) segments=\(committedSegments.count)")
+        let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
+        doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stop final text.len=\(final.count) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
 
-        let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
-        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
-
-        let maxSegmentGap: TimeInterval? = {
-            // Only meaningful with 2+ commits — the lead gap from audioStartedAt
-            // to the first commit is NOT a reliable signal (a user who talks
-            // continuously without pausing has a "lead gap" equal to the entire
-            // recording duration, but nothing was dropped). What IS a real signal
-            // is silence between two committed segments: Doubao normally commits
-            // every few seconds when VAD finalizes, so a >10s gap between two
-            // commits means something happened mid-recording.
-            guard segmentCommittedAt.count >= 2 else { return nil }
-            var maxGap: TimeInterval = 0
-            for i in 1..<segmentCommittedAt.count {
-                let gap = segmentCommittedAt[i].timeIntervalSince(segmentCommittedAt[i-1])
-                if gap > maxGap { maxGap = gap }
-            }
-            return maxGap
-        }()
-
-        let result = TranscriptionResult(
-            text: final,
-            audioDuration: audioDuration,
-            lastResponseAge: lastResponseAge,
-            lastTranscriptAge: lastTranscriptAge,
-            maxSegmentGap: maxSegmentGap,
-            traceId: requestId
-        )
+        let result = currentResult()
         // Close the WebSocket after every session (see class doc), but off the
         // critical path — the transcript is already assembled, so the caller
         // gets it NOW instead of waiting on the up-to-1s close handshake. We
@@ -551,7 +589,7 @@ public actor DoubaoASR {
     }
 
     private func sessionConfigJSON(deviceId: String) -> String {
-        buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint)
+        buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint, profile: experimentProfile)
     }
 
     private func sendFinishSession() async throws {
@@ -625,6 +663,9 @@ public actor DoubaoASR {
             return
         }
         doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms recv messageType=\(resp.messageType) code=\(resp.statusCode) jsonLen=\(resp.resultJson.count)")
+        if let stopStartedAt {
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms recv-after-stop messageType=\(resp.messageType) code=\(resp.statusCode) jsonLen=\(resp.resultJson.count)")
+        }
 
         // Drop responses for prior (closed) sessions on this reused WebSocket. Server
         // echoes our request_id; if it doesn't match the current session, it's stale.
@@ -703,7 +744,8 @@ public actor DoubaoASR {
                 && !currentInterim.hasPrefix(text)
 
             let preview = text.prefix(40).replacingOccurrences(of: "\n", with: " ")
-            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms result isInterim=\(isInterim) vadFinished=\(vadFinished) nonstream=\(nonstreamResult) textLen=\(text.count) currentInterimLen=\(currentInterim.count) newUtterance=\(looksLikeNewUtterance) preview=\(preview)")
+            let stopDelta = stopStartedAt.map { " stop+\(elapsedMs(since: $0))ms" } ?? ""
+            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms\(stopDelta) result isInterim=\(isInterim) vadFinished=\(vadFinished) nonstream=\(nonstreamResult) textLen=\(text.count) currentInterimLen=\(currentInterim.count) newUtterance=\(looksLikeNewUtterance) preview=\(preview)")
 
             if looksLikeNewUtterance {
                 let rescued = currentInterim
@@ -730,15 +772,47 @@ public actor DoubaoASR {
         }
     }
 
+    private var streamReady: Bool {
+        canSendAudio || framesSentCount > 0
+    }
+
     private func assembledText() -> String {
         // Route through the shared formatter so Doubao output gets the same
         // CJK/Latin spacing normalisation as Soniox (QUA-173).
         TranscriptFormatter.normalize(committedSegments.joined() + currentInterim)
     }
 
+    private func currentResult() -> TranscriptionResult {
+        let now = Date()
+        let audioDuration: TimeInterval = audioStartedAt.map { now.timeIntervalSince($0) } ?? 0
+        let lastResponseAge: TimeInterval? = lastResponseAt.map { now.timeIntervalSince($0) }
+        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { now.timeIntervalSince($0) }
+        let maxSegmentGap: TimeInterval? = {
+            guard segmentCommittedAt.count >= 2 else { return nil }
+            var maxGap: TimeInterval = 0
+            for i in 1..<segmentCommittedAt.count {
+                let gap = segmentCommittedAt[i].timeIntervalSince(segmentCommittedAt[i-1])
+                if gap > maxGap { maxGap = gap }
+            }
+            return maxGap
+        }()
+        return TranscriptionResult(
+            text: assembledText(),
+            audioDuration: audioDuration,
+            lastResponseAge: lastResponseAge,
+            lastTranscriptAge: lastTranscriptAge,
+            maxSegmentGap: maxSegmentGap,
+            traceId: requestId
+        )
+    }
+
     private func traceElapsedMs(now: Date = Date()) -> Int {
         guard let audioStartedAt else { return 0 }
         return Int(now.timeIntervalSince(audioStartedAt) * 1000)
+    }
+
+    private func elapsedMs(since start: Date, now: Date = Date()) -> Int {
+        Int(now.timeIntervalSince(start) * 1000)
     }
 
     private func signalFinished() {

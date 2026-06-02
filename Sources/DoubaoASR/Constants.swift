@@ -62,6 +62,17 @@ enum DoubaoConstants {
     static let trailingSilencePadMs = 0
     static var trailingSilencePadSamples: Int { sampleRate * trailingSilencePadMs / 1000 }
 
+    // If the user stops before StartTask/StartSession completed, Doubao has not
+    // sent any audio yet. Give the startup path a short chance to become ready;
+    // after that, return an empty result so MultiEngine can use a backup engine
+    // instead of blocking on URLSession's ~10s request timeout.
+    static let startupGraceOnStopSeconds: TimeInterval = 2.0
+
+    // After FinishSession, Doubao must produce SessionFinished quickly or this
+    // session is treated as failed. Returning an empty result lets MultiEngine
+    // use a backup engine without Doubao-specific routing logic.
+    static let finishGraceOnStopSeconds: TimeInterval = 2.0
+
     // WebSocket keepalive. Matches the official Doubao IME client's
     // SAMICore.UpdateFrontierClientPingInterval(3000) — without periodic pings
     // the server tears down long-running sessions mid-stream and the tail
