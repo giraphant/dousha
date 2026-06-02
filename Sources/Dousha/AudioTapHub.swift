@@ -1,5 +1,5 @@
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import ASRSupport
 import TalkerCommonSync
 
@@ -102,7 +102,10 @@ actor AudioTapHub {
             let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 1024)
             guard let outBuf = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
 
-            var fed = false
+            // Synchronous: the converter input block runs inline within
+            // convert(to:error:), never concurrently — so this var is not
+            // actually shared across threads despite the @Sendable block type.
+            nonisolated(unsafe) var fed = false
             var convError: NSError?
             _ = converter.convert(to: outBuf, error: &convError) { _, outStatus in
                 if fed { outStatus.pointee = .noDataNow; return nil }
