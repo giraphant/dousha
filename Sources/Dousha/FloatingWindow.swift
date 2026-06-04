@@ -7,6 +7,8 @@ final class FloatingWindow {
     private let panel: NSPanel
     let model: FloatingHUDModel
     private var hosting: NSHostingController<FloatingHUDView>!
+    private var clickRegion: ClickRegionView?
+    private var mouseMonitors: [Any] = []
     private var cancellables = Set<AnyCancellable>()
 
     /// Horizontal padding around the visible HUD card. Provides AppKit's
@@ -53,7 +55,32 @@ final class FloatingWindow {
         hosting.view.frame = frame
         hosting.view.wantsLayer = true
         hosting.view.layer?.backgroundColor = NSColor.clear.cgColor
-        panel.contentView = hosting.view
+
+        // Only the visible card should claim clicks. The panel frame is much
+        // bigger than the card — a 40px shadow margin on every side, and it's
+        // sized to the 5-line max height while a short card sits at the bottom —
+        // so a plain contentView swallows clicks across that whole dead-zone
+        // while recording (ignoresMouseEvents=false). ClickRegionView passes
+        // through everything outside the current card rect.
+        let clickRegion = ClickRegionView(frame: frame)
+        // Sensible fallback until the first real card frame arrives.
+        clickRegion.cardRect = NSRect(x: Self.panelHorizontalMargin, y: Self.panelVerticalMargin,
+                                      width: FloatingHUDView.cardWidth, height: FloatingHUDView.compactHeight)
+        hosting.view.frame = clickRegion.bounds
+        hosting.view.autoresizingMask = [.width, .height]
+        clickRegion.addSubview(hosting.view)
+        panel.contentView = clickRegion
+        self.clickRegion = clickRegion
+
+        // The view reports the visible card's frame (SwiftUI top-left coords);
+        // flip Y into the click region's (bottom-left) space and clamp the
+        // hit-test region to exactly that rect.
+        model.onCardFrameChange = { [weak self] f in
+            guard let self, let cr = self.clickRegion, f != .zero else { return }
+            cr.cardRect = NSRect(x: f.minX, y: cr.bounds.height - f.maxY,
+                                 width: f.width, height: f.height)
+            self.updateMousePassthrough()
+        }
 
         // React to status changes: enable mouse events ONLY during .recording.
         // Without this gate, hovering near the bottom of the screen during
@@ -68,6 +95,7 @@ final class FloatingWindow {
                 MainActor.assumeIsolated { self?.applyMouseAcceptance(for: newStatus) }
             }
             .store(in: &cancellables)
+
     }
 
     func show() {
@@ -124,14 +152,54 @@ final class FloatingWindow {
     }
 
     private func applyMouseAcceptance(for status: RecordingStatus) {
-        // Only flip during .recording. Everywhere else, keep panel transparent
-        // to clicks so it doesn't absorb interactions in the focused app.
-        switch status {
-        case .recording:
-            panel.ignoresMouseEvents = false
-        default:
-            panel.ignoresMouseEvents = true
+        if status == .recording {
+            installMouseMonitorsIfNeeded()
+        } else {
+            removeMouseMonitors()
         }
+        updateMousePassthrough()
+    }
+
+    /// While recording, watch the cursor so we can pass clicks through the
+    /// transparent panel area that surrounds the visible card. A nil `hitTest`
+    /// does NOT pass a click to the app behind for a panel window — the window
+    /// still swallows it — so the reliable fix is to toggle the WHOLE window's
+    /// `ignoresMouseEvents` per cursor position: interactive only directly over
+    /// the card, click-through everywhere else (the surrounding "ring").
+    private func installMouseMonitorsIfNeeded() {
+        guard mouseMonitors.isEmpty else { return }
+        // Global: cursor moving over other apps (the ring / outside the card).
+        if let g = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateMousePassthrough() }
+        } {
+            mouseMonitors.append(g)
+        }
+        // Local: cursor over the panel itself (when it's currently interactive).
+        if let l = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] e in
+            MainActor.assumeIsolated { self?.updateMousePassthrough() }
+            return e
+        } {
+            mouseMonitors.append(l)
+        }
+    }
+
+    private func removeMouseMonitors() {
+        for m in mouseMonitors { NSEvent.removeMonitor(m) }
+        mouseMonitors.removeAll()
+    }
+
+    private func updateMousePassthrough() {
+        guard model.status == .recording, let cr = clickRegion, cr.cardRect != .zero else {
+            panel.ignoresMouseEvents = true
+            return
+        }
+        // cardRect is in the content view's (bottom-left) coords; the panel is
+        // borderless so content coords == window base coords, offset to screen
+        // by the panel's frame origin.
+        let f = panel.frame
+        let cardOnScreen = NSRect(x: f.minX + cr.cardRect.minX, y: f.minY + cr.cardRect.minY,
+                                  width: cr.cardRect.width, height: cr.cardRect.height)
+        panel.ignoresMouseEvents = !cardOnScreen.contains(NSEvent.mouseLocation)
     }
 
     /// True if the cursor is physically over the panel right now. Used to reject
@@ -144,5 +212,24 @@ final class FloatingWindow {
     /// check keeps real clicks working while dropping the phantom ones.
     func isCursorOverPanel() -> Bool {
         panel.frame.contains(NSEvent.mouseLocation)
+    }
+}
+
+/// Panel content view that only claims clicks on the visible card rect. The card
+/// is bottom-anchored within a much larger panel (40px shadow margin per side +
+/// sized to the 5-line max height), so without this the panel swallowed clicks
+/// across the whole frame while recording — a dead-zone several times the size of
+/// the visible HUD. Returning nil from `hitTest` for points outside the card lets
+/// those clicks pass through to the app behind. Geometry is in this view's own
+/// (non-flipped, bottom-left origin) coordinates: the card sits `verticalMargin`
+/// up from the bottom, `horizontalMargin` in from the left.
+private final class ClickRegionView: NSView {
+    /// The visible card rect in this view's (bottom-left origin) coordinates.
+    /// Set by FloatingWindow from the SwiftUI-reported card frame.
+    var cardRect: CGRect = .zero
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        return cardRect.contains(local) ? super.hitTest(point) : nil
     }
 }

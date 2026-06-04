@@ -2,6 +2,13 @@ import SwiftUI
 import ASRSupport
 import TalkerCommonSync
 
+/// Reports the visible HUD card's frame up to FloatingWindow (via the model
+/// callback) so the click-absorbing region can be clamped to exactly the card.
+private struct CardFrameKey: PreferenceKey {
+    static var defaultValue: CGRect { .zero }
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
 @MainActor
 final class FloatingHUDModel: ObservableObject {
     @Published var status: RecordingStatus = .idle
@@ -118,6 +125,12 @@ final class FloatingHUDModel: ObservableObject {
     /// status == .recording (the FloatingWindow keeps mouse events disabled
     /// otherwise, so hover never fires).
     @Published var isExpanded: Bool = false
+
+    /// Reports the visible card's frame (HUD root coords, top-left origin) so
+    /// `FloatingWindow` can shrink the panel's click-absorbing region to exactly
+    /// the visible card — the panel frame is much larger (see ClickRegionView).
+    /// A callback (not @Published) so it never re-renders the HUD.
+    var onCardFrameChange: (@MainActor (CGRect) -> Void)?
 
     /// Invoked by the "完成录音" button. Wired by AppDelegate to the same code
     /// path as releasing a push-to-talk modifier.
@@ -280,10 +293,18 @@ struct FloatingHUDView: View {
             // center it and make it grow both ways.)
             Spacer(minLength: 0)
             hudCard
+                .background(GeometryReader { geo in
+                    Color.clear.preference(key: CardFrameKey.self,
+                                           value: geo.frame(in: .named(Self.rootSpace)))
+                })
                 .padding(.bottom, 40)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .coordinateSpace(name: Self.rootSpace)
+        .onPreferenceChange(CardFrameKey.self) { model.onCardFrameChange?($0) }
     }
+
+    fileprivate static let rootSpace = "hudRoot"
 
     /// Card height: compact when there's no transcript (original design),
     /// otherwise grown to the clipped transcript viewport, never past the 5-line cap.
