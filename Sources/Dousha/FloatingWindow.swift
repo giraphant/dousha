@@ -105,7 +105,13 @@ final class FloatingWindow {
     }
 
     private func positionAtBottomCenter() {
-        guard let screen = NSScreen.main else { return }
+        // Show on the screen the user is actually working on, not the menu-bar
+        // ("main") display. Dousha is LSUIElement (no key window), so NSScreen.main
+        // is just the menu-bar screen — it never tracks focus. The cursor's screen
+        // is the best proxy for "where the user is dictating"; fall back to .main.
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        guard let screen else { return }
         let visible = screen.visibleFrame
         let size = panel.frame.size
         let x = visible.midX - size.width / 2
@@ -126,5 +132,17 @@ final class FloatingWindow {
         default:
             panel.ignoresMouseEvents = true
         }
+    }
+
+    /// True if the cursor is physically over the panel right now. Used to reject
+    /// the spurious-cancel bug: on multi-monitor setups SwiftUI's `.onHover` exit
+    /// event is dropped when the cursor jumps to another display, so
+    /// `model.isExpanded` latches true and the 取消/完成 buttons stay hit-testable;
+    /// a stray/synthesized event then fires onCancel/onFinish with the cursor
+    /// nowhere near the HUD (proven: fired at mouse=(2932,-819), another screen),
+    /// silently discarding the live recording. Gating the button actions on this
+    /// check keeps real clicks working while dropping the phantom ones.
+    func isCursorOverPanel() -> Bool {
+        panel.frame.contains(NSEvent.mouseLocation)
     }
 }

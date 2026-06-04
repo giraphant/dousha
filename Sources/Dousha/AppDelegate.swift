@@ -77,8 +77,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ))
         // Wire HUD button actions. Captured weakly to avoid retain cycles via
         // the FloatingHUDModel that this AppDelegate owns transitively.
-        hudModel.onFinish = { [weak self] in self?.recording.stop() }
-        hudModel.onCancel = { [weak self] in self?.recording.cancel() }
+        hudModel.onFinish = { [weak self] in
+            guard let self else { return }
+            let m = NSEvent.mouseLocation
+            let overHUD = self.floatingWindow?.isCursorOverPanel() ?? true
+            doushaLog("[Dousha] HUD onFinish fired — mouse=(\(Int(m.x)),\(Int(m.y))) overHUD=\(overHUD)")
+            guard overHUD else { return }   // drop phantom fires (cursor not on the HUD)
+            self.recording.stop()
+        }
+        hudModel.onCancel = { [weak self] in
+            guard let self else { return }
+            let m = NSEvent.mouseLocation
+            let overHUD = self.floatingWindow?.isCursorOverPanel() ?? true
+            doushaLog("[Dousha] HUD onCancel fired — mouse=(\(Int(m.x)),\(Int(m.y))) overHUD=\(overHUD)")
+            guard overHUD else { return }   // drop phantom fires (cursor not on the HUD)
+            self.recording.cancel()
+        }
         requestSpeechAndMicPermissions()
 
         focusTracker.onChange = { [weak self] focus in
