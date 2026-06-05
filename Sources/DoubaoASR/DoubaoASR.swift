@@ -50,6 +50,14 @@ public actor DoubaoASR {
     private var didReceiveFinal = false
     private var stopStartedAt: Date?
 
+    /// Flipped true the instant we know the WebSocket is gone — either a
+    /// receive-loop failure or a WS-level PING failure (connection abort).
+    /// `_stop()` reads it to skip `finishGraceOnStopSeconds`: once the socket is
+    /// dead the `SessionFinished` that grace waits for can never arrive, so
+    /// burning the full 2s before falling back to a ready engine is pure latency
+    /// (QUA-181). Reset per session in `prepareSession`.
+    private var wsConnectionDead = false
+
     /// Whether StartTask has been sent + acked on the current WebSocket. Doubao ties a
     /// task to a connection — sending StartTask twice on the same WS yields
     /// "task already started". Currently we close the WS after every stop() so this
@@ -151,6 +159,7 @@ public actor DoubaoASR {
         self.canSendAudio = false
         self.didReceiveFinal = false
         self.stopStartedAt = nil
+        self.wsConnectionDead = false
         self.framesSentCount = 0
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
@@ -359,9 +368,18 @@ public actor DoubaoASR {
         // audio) instead of blocking the paste on a slow tail.
         let waitStart = Date()
         let outcomeStr: String
-        if let channel = finishedChannel {
+        if wsConnectionDead {
+            // The WS is already known dead (ping/receive failure) — SessionFinished
+            // can never arrive, so don't wait the grace. Fall through to the
+            // empty-result path below so MultiEngine falls back to a ready engine
+            // immediately instead of blocking ~2s (QUA-181).
+            outcomeStr = "ws-dead"
+        } else if let channel = finishedChannel {
             switch await waitWithTimeout(channel: channel, timeout: DoubaoConstants.finishGraceOnStopSeconds) {
-            case .signaled: outcomeStr = "signaled"
+            // A dead-connection signal racing the wait (ping/receive failure fires
+            // signalFinished while we're parked) wakes us as .signaled — re-check
+            // the flag so we still take the fallback path, not the success path.
+            case .signaled: outcomeStr = wsConnectionDead ? "ws-dead" : "signaled"
             case .timeout: outcomeStr = "timedOut"
             case .cancelled: outcomeStr = "cancelled"
             case .failed: outcomeStr = "failed"
@@ -374,7 +392,7 @@ public actor DoubaoASR {
         if outcomeStr != "signaled" {
             let partialLen = assembledText().count
             let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
-            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms SessionFinished missing after finish grace; returning empty result partial.len=\(partialLen) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms SessionFinished missing (outcome=\(outcomeStr)); returning empty result partial.len=\(partialLen) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
             detachAndCloseWebSocketInBackground()
             return TranscriptionResult(
                 text: "",
@@ -526,11 +544,28 @@ public actor DoubaoASR {
     /// signal, this is just for visibility.
     private func sendKeepalivePing() {
         guard let ws = ws else { return }
-        ws.sendPing { error in
+        let generation = wsGen.live
+        ws.sendPing { [weak self] error in
             if let error = error {
                 doushaLog("[DoubaoASR] ws ping failed: \(error.localizedDescription)")
+                Task { await self?.notePingFailure(generation: generation) }
             }
         }
+    }
+
+    /// A WS-level PING failed — the connection is dead (often half-open: the
+    /// outbound ping errors instantly while the pending `receive` callback sits
+    /// for far longer than the finish grace). Mark the socket dead and wake any
+    /// in-flight finish wait so `_stop()` falls back to a ready engine NOW
+    /// instead of burning `finishGraceOnStopSeconds` waiting for a
+    /// `SessionFinished` that can never arrive (QUA-181). We deliberately do NOT
+    /// tear the socket down here — the receive loop stays the canonical teardown
+    /// path; this only flips the fast-fail flag and signals the channel.
+    private func notePingFailure(generation: Generation) {
+        guard wsGen.isCurrent(generation) else { return }
+        guard !wsConnectionDead else { return }
+        wsConnectionDead = true
+        signalFinished()
     }
 
     private func sendInitialMessages(deviceId: String) async throws {
@@ -640,6 +675,8 @@ public actor DoubaoASR {
             // down) must not touch the live session — return after signaling.
             guard wsGen.isCurrent(generation) else { return }
             doushaLog("[DoubaoASR] receive failed: \(err.localizedDescription)")
+            // Known-dead connection: let _stop() skip the finish grace (QUA-181).
+            wsConnectionDead = true
             if isRunning {
                 deliverError(err)
             }
