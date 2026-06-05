@@ -1,0 +1,4 @@
+CFBundleDisplayName = "Dousha";
+CFBundleName = "Dousha";
+NSMicrophoneUsageDescription = "Dousha needs microphone access to transcribe your voice into text.";
+NSSpeechRecognitionUsageDescription = "Dousha uses speech recognition to convert what you say into text.";

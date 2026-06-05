@@ -1,0 +1,4 @@
+CFBundleDisplayName = "豆沙";
+CFBundleName = "豆沙";
+NSMicrophoneUsageDescription = "豆沙需要使用麦克风，把你的语音转写成文字。";
+NSSpeechRecognitionUsageDescription = "豆沙通过语音识别，把你说的话转换成文字。";
