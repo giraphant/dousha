@@ -184,22 +184,7 @@ public actor DoubaoASR {
     private func _openStream() async {
         guard isRunning else { return }
         do {
-            let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
-            self.token = creds.token
-            self.deviceId = creds.deviceId
-            doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
-
-            self.opusEncoder = try OpusEncoder()
-            doushaLog("[DoubaoASR] opus encoder ready")
-
-            if self.ws == nil {
-                try openWebSocket()
-                doushaLog("[DoubaoASR] websocket opened (fresh)")
-            } else {
-                doushaLog("[DoubaoASR] reusing existing websocket")
-            }
-            try await sendInitialMessages(deviceId: self.deviceId)
-            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms StartTask+StartSession ok pcmBufferBytes=\(self.pcmBuffer.count)")
+            try await establishSession()
 
             // Now drain whatever audio accumulated during WS setup.
             self.canSendAudio = true
@@ -213,6 +198,47 @@ public actor DoubaoASR {
             self.streamReadyChannel?.finish(())
             signalFinished()
         }
+    }
+
+    /// Acquires credentials, opens the WebSocket, and runs StartTask/StartSession.
+    ///
+    /// If the handshake fails, assume Doubao rejected our cached, opaque `app_key`
+    /// (QUA-179): the token Doubao hands back is a 10-char `app_key`, not a JWT, so
+    /// `DoubaoCredentialStore.isJWTExpired` never fires and a server-invalidated
+    /// token would otherwise fail *every* recording until the user manually reset
+    /// the credentials. Drop the cached credentials, re-register, and retry the
+    /// handshake exactly once before giving up.
+    private func establishSession() async throws {
+        do {
+            try await openAndHandshake()
+        } catch {
+            guard isRunning else { throw error }
+            doushaLog("[DoubaoASR] traceId=\(requestId) handshake failed: \(error.localizedDescription); resetting Doubao credentials and retrying once")
+            await closeWebSocket()
+            await DoubaoCredentialStore.shared.reset()
+            guard isRunning else { throw error }
+            try await openAndHandshake()
+            doushaLog("[DoubaoASR] traceId=\(requestId) handshake recovered after credential reset")
+        }
+    }
+
+    private func openAndHandshake() async throws {
+        let creds = try await DoubaoCredentialStore.shared.ensureCredentials()
+        self.token = creds.token
+        self.deviceId = creds.deviceId
+        doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
+
+        self.opusEncoder = try OpusEncoder()
+        doushaLog("[DoubaoASR] opus encoder ready")
+
+        if self.ws == nil {
+            try openWebSocket()
+            doushaLog("[DoubaoASR] websocket opened (fresh)")
+        } else {
+            doushaLog("[DoubaoASR] reusing existing websocket")
+        }
+        try await sendInitialMessages(deviceId: self.deviceId)
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms StartTask+StartSession ok pcmBufferBytes=\(self.pcmBuffer.count)")
     }
 
     /// Push one chunk of int16 16 kHz mono PCM from the shared `AudioTapHub`.
