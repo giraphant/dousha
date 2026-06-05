@@ -15,8 +15,12 @@ import TalkerCommonSync
 ///   2. `hub.startCapture` (one tap goes live)
 ///   3. `openStream` on every engine (audio buffered during setup then flushes)
 ///
-/// - Only the **primary** engine's partials reach the HUD; audio level comes
-///   from the hub (one RMS). Secondary engines run silently.
+/// - The **primary** engine's partials drive the HUD; audio level comes from
+///   the hub (one RMS). Secondary engines normally run silently — EXCEPT when
+///   the primary goes quiet for `hudFallbackSeconds` (QUA-180: 豆包 primary with a
+///   dead WS emits zero partials, leaving the HUD blank and looking frozen). Then
+///   one designated secondary (Soniox) takes over the live-subtitle area until the
+///   primary resumes. This is HUD-only; final routing is unchanged.
 /// - A **secondary** engine's error is non-fatal (logged). Only the primary
 ///   engine's (and the hub's capture) error is forwarded as fatal.
 /// - On `stop()`, `hub.stopCapture()` removes the tap and drains the tail first,
@@ -30,6 +34,9 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     private let primary: Engine
     private let router: LanguageRouter
     private let hub: AudioTapHub?
+    /// QUA-180: how long the primary may emit no partials before a secondary is
+    /// allowed to drive the HUD's live-subtitle area. Injectable for tests.
+    private let hudFallbackSeconds: TimeInterval
 
     /// The live session's stream continuation, set in `start()`, yielded to from
     /// the engine callbacks / capture, and finished by `stop()` / `cancel()`.
@@ -71,20 +78,85 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         }
     }
 
+    /// QUA-180: routes live partials to the HUD's subtitle area, normally from the
+    /// primary engine. If the primary emits nothing for `fallbackAfter` seconds, a
+    /// designated secondary's partials take over until the primary resumes — so a
+    /// dead 豆包 WS (frames=0, zero partials) no longer leaves the HUD blank while
+    /// Soniox is transcribing fine in the background. The fallback is gated on
+    /// *real secondary partials* arriving: a genuine speech pause (no engine emits)
+    /// never triggers it, because the gate is only checked when a secondary fires.
+    ///
+    /// Ordering: every shipping engine dispatches its partial callback on the main
+    /// queue (`DoubaoASR`/`SonioxASR`/`AppleSpeechBackend` all `DispatchQueue.main.async`),
+    /// so `recordPrimary` and `recordSecondary` run serially and never interleave —
+    /// `userPartial` sits outside the lock only because there is no concurrent caller
+    /// to reorder against. The lock still guards the small mutable state defensively
+    /// (and keeps this correct if a future engine ever emits off-main).
+    private final class HUDPartialRouter: @unchecked Sendable {
+        private let lock = NSLock()
+        private let userPartial: @Sendable (PartialTranscript) -> Void
+        private let fallbackAfter: TimeInterval
+        private let sessionStart = Date()
+        private var lastPrimaryAt: Date?
+        private var didFallback = false
+
+        init(fallbackAfter: TimeInterval,
+             userPartial: @escaping @Sendable (PartialTranscript) -> Void) {
+            self.fallbackAfter = fallbackAfter
+            self.userPartial = userPartial
+        }
+
+        /// Primary partial: always drives the HUD and refreshes the liveness clock.
+        func recordPrimary(_ p: PartialTranscript) {
+            lock.lock(); lastPrimaryAt = Date(); lock.unlock()
+            userPartial(p)
+        }
+
+        /// Secondary partial: drives the HUD only if the primary has been silent
+        /// for `fallbackAfter` (measured from its last partial, or session start).
+        func recordSecondary(_ p: PartialTranscript) {
+            lock.lock()
+            let silentSince = lastPrimaryAt ?? sessionStart
+            let shouldFallback = Date().timeIntervalSince(silentSince) >= fallbackAfter
+            let firstTime = shouldFallback && !didFallback
+            if firstTime { didFallback = true }
+            lock.unlock()
+            guard shouldFallback else { return }
+            if firstTime {
+                doushaLog("[MultiEngine] HUD fallback → secondary (primary silent ≥\(fallbackAfter)s)")
+            }
+            userPartial(p)
+        }
+    }
+
+    /// The secondary that takes over the HUD when the primary goes quiet (QUA-180).
+    /// Prefer the language-faithful classifier (Soniox) if it's a secondary — it's
+    /// the readable real-time transcript; otherwise fall to the first secondary.
+    /// `nil` when there is no secondary (single-engine session).
+    private var hudFallbackEngine: Engine? {
+        let secondaries = entries.map(\.engine).filter { $0 != primary }
+        if secondaries.contains(router.classifierEngine) { return router.classifierEngine }
+        return secondaries.first
+    }
+
     /// - Parameters:
     ///   - entries: the active engines and their backends (must be non-empty).
     ///   - primary: the HUD-driving engine; forced into `entries` if missing.
     ///   - router: language router whose slots index into `entries`.
     ///   - hub: the shared capture hub, or nil to skip real capture (tests).
+    ///   - hudFallbackSeconds: primary-silence window before a secondary may drive
+    ///     the HUD (QUA-180). Tests pass a small value to exercise the fallback.
     init(entries: [(engine: Engine, backend: PushCaptureEngine)],
          primary: Engine,
          router: LanguageRouter,
-         hub: AudioTapHub? = nil) {
+         hub: AudioTapHub? = nil,
+         hudFallbackSeconds: TimeInterval = 2.0) {
         precondition(!entries.isEmpty, "MultiEngineBackend needs at least one engine")
         self.entries = entries
         self.primary = entries.contains(where: { $0.engine == primary }) ? primary : entries[0].engine
         self.router = router
         self.hub = hub
+        self.hudFallbackSeconds = hudFallbackSeconds
     }
 
     /// Build from Preferences: one backend per active engine, primary derived
@@ -172,8 +244,10 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     /// errors. Shared by the real-capture and hub-less (test) start paths.
     private func beginAllSessions(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                                   onError: @escaping @Sendable (Error) -> Void) async {
+        let hud = HUDPartialRouter(fallbackAfter: hudFallbackSeconds, userPartial: onPartial)
+        let fallbackEngine = hudFallbackEngine
         for entry in entries {
-            let partialCB = partialCallback(for: entry.engine, userPartial: onPartial)
+            let partialCB = partialCallback(for: entry.engine, hud: hud, fallbackEngine: fallbackEngine)
             if entry.engine == primary {
                 await entry.backend.beginSession(onPartial: partialCB, onError: onError)
             } else {
@@ -185,16 +259,24 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         }
     }
 
-    /// Per-engine partial sink. The primary's partials drive the HUD (the user's
-    /// `onPartial`); secondaries are silent (`{ _ in }`). The language-faithful
-    /// classifier engine — whether primary or secondary — additionally feeds the
-    /// online language signal (QUA-153), so the two roles compose when the
-    /// classifier *is* the primary.
+    /// Per-engine partial sink. The primary's partials drive the HUD; the
+    /// designated `fallbackEngine` drives it only after the primary goes quiet
+    /// (QUA-180, via `HUDPartialRouter`); any other secondary is silent. The
+    /// language-faithful classifier engine — whether primary or secondary —
+    /// additionally feeds the online language signal (QUA-153), so the roles
+    /// compose regardless of which engine the classifier is.
     private func partialCallback(for engine: Engine,
-                                 userPartial: @escaping @Sendable (PartialTranscript) -> Void)
+                                 hud: HUDPartialRouter,
+                                 fallbackEngine: Engine?)
         -> @Sendable (PartialTranscript) -> Void {
-        let silent: @Sendable (PartialTranscript) -> Void = { _ in }
-        let base: @Sendable (PartialTranscript) -> Void = (engine == primary) ? userPartial : silent
+        let base: @Sendable (PartialTranscript) -> Void
+        if engine == primary {
+            base = { hud.recordPrimary($0) }
+        } else if engine == fallbackEngine {
+            base = { hud.recordSecondary($0) }
+        } else {
+            base = { _ in }
+        }
         guard engine == router.classifierEngine else { return base }
         let signal = onlineSignal
         return { p in
