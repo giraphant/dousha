@@ -139,15 +139,37 @@ final class MultiEngineBackendTests: XCTestCase {
         XCTAssertTrue(soniox.startCalled)
     }
 
-    func testStart_primaryErrorIsFatal() async {
+    func testStart_primaryErrorAlone_isNonFatal_secondaryCarriesSession() async {
+        // QUA-180: 豆包 (primary) errors at openStream (e.g. WS TLS failure), but
+        // Soniox is alive. The error must NOT be fatal — the session keeps running
+        // and the secondary's transcript is returned, not a dropped recording.
         let doubao = MockBackend(text: "", errorOnStart: NSError(domain: "t", code: 2))
-        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, MockBackend(text: "ok"))],
+        let soniox = MockBackend(text: "ok")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router)
+        let stream = multi.start()
+        multi.stop()
+        var sawError = false
+        var final: TranscriptionResult?
+        for await event in stream {
+            if case .error = event { sawError = true }
+            if case .final(let r) = event { final = r }
+        }
+        XCTAssertFalse(sawError, "a primary error must not be fatal while a secondary is alive")
+        XCTAssertEqual(final?.text, "ok", "the secondary must carry the final transcript")
+    }
+
+    func testStart_allEnginesError_isFatal() async {
+        // Only when EVERY engine fails (e.g. full network loss) is the error fatal.
+        let doubao = MockBackend(text: "", errorOnStart: NSError(domain: "t", code: 2))
+        let soniox = MockBackend(text: "", errorOnStart: NSError(domain: "t", code: 3))
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
                                        primary: .doubao, router: router)
         let stream = multi.start()
         multi.stop()
         var sawError = false
         for await event in stream { if case .error = event { sawError = true } }
-        XCTAssertTrue(sawError, "the primary engine's error must be forwarded as a stream .error event")
+        XCTAssertTrue(sawError, "with every engine down, the error must be forwarded as fatal")
     }
 
     func testStop_englishEarlyExit_doesNotWaitForSlowChineseEngine() async {
@@ -319,6 +341,35 @@ final class MultiEngineBackendTests: XCTestCase {
                       "a resumed primary partial must reclaim the HUD")
         XCTAssertFalse(partials.contains("副字幕被压制"),
                        "a freshly-resumed primary must re-suppress the secondary")
+    }
+
+    func testHUD_primaryError_secondaryTakesOverImmediately() async {
+        // Primary errors at openStream → HUD must switch to the secondary on its
+        // next partial WITHOUT waiting out the silence window (markPrimaryFailed).
+        // The window is huge so only the error path can trigger the fallback.
+        let doubao = MockBackend(text: "", errorOnStart: NSError(domain: "t", code: 2))
+        let soniox = MockBackend(text: "你好")
+        let multi = MultiEngineBackend(entries: [(.doubao, doubao), (.soniox, soniox)],
+                                       primary: .doubao, router: router,
+                                       hudFallbackSeconds: 100)
+        let stream = multi.start()
+        let collected = Task { () -> [String] in
+            var out: [String] = []
+            for await event in stream {
+                switch event {
+                case .partial(let p): out.append(p.combined)
+                case .final: return out
+                default: break
+                }
+            }
+            return out
+        }
+        await eventually({ doubao.startCalled && soniox.startCalled })
+        soniox.emit("副字幕立即接管")
+        multi.stop()
+        let partials = await collected.value
+        XCTAssertTrue(partials.contains("副字幕立即接管"),
+                      "a primary error must hand the HUD to the secondary immediately")
     }
 
     func testHUD_singleEngine_noFallbackEngine_primaryStillDrivesHUD() async {

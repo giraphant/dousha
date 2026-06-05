@@ -21,8 +21,10 @@ import TalkerCommonSync
 ///   dead WS emits zero partials, leaving the HUD blank and looking frozen). Then
 ///   one designated secondary (Soniox) takes over the live-subtitle area until the
 ///   primary resumes. This is HUD-only; final routing is unchanged.
-/// - A **secondary** engine's error is non-fatal (logged). Only the primary
-///   engine's (and the hub's capture) error is forwarded as fatal.
+/// - Any single engine's error is non-fatal (logged) as long as another engine
+///   can still carry the session — a primary failure hands the HUD to a secondary
+///   (QUA-180). Only when EVERY engine has failed (or the hub's capture fails) is
+///   an error forwarded as fatal.
 /// - On `stop()`, `hub.stopCapture()` removes the tap and drains the tail first,
 ///   then every engine finishes in parallel and `LanguageRouter.pickBest`
 ///   chooses whose transcript to hand back.
@@ -99,6 +101,10 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         private let sessionStart = Date()
         private var lastPrimaryAt: Date?
         private var didFallback = false
+        /// Set when the primary engine reports an error: the primary is known dead,
+        /// so the secondary takes the HUD on its very next partial — no need to wait
+        /// out the silence window (QUA-180: 豆包 WS TLS/connect failure).
+        private var primaryDead = false
 
         init(fallbackAfter: TimeInterval,
              userPartial: @escaping @Sendable (PartialTranscript) -> Void) {
@@ -112,20 +118,52 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             userPartial(p)
         }
 
-        /// Secondary partial: drives the HUD only if the primary has been silent
-        /// for `fallbackAfter` (measured from its last partial, or session start).
+        /// The primary engine errored — let the secondary take over immediately.
+        func markPrimaryFailed() {
+            lock.lock(); primaryDead = true; lock.unlock()
+        }
+
+        /// Secondary partial: drives the HUD if the primary is known dead, or has
+        /// been silent for `fallbackAfter` (measured from its last partial, or
+        /// session start).
         func recordSecondary(_ p: PartialTranscript) {
             lock.lock()
             let silentSince = lastPrimaryAt ?? sessionStart
-            let shouldFallback = Date().timeIntervalSince(silentSince) >= fallbackAfter
+            let shouldFallback = primaryDead
+                || Date().timeIntervalSince(silentSince) >= fallbackAfter
             let firstTime = shouldFallback && !didFallback
             if firstTime { didFallback = true }
             lock.unlock()
             guard shouldFallback else { return }
             if firstTime {
-                doushaLog("[MultiEngine] HUD fallback → secondary (primary silent ≥\(fallbackAfter)s)")
+                doushaLog("[MultiEngine] HUD fallback → secondary (primaryDead=\(primaryDead))")
             }
             userPartial(p)
+        }
+    }
+
+    /// Tracks which engines are still alive. A single engine's error is non-fatal
+    /// while any other engine can still carry the session (QUA-180); only when the
+    /// LAST engine fails do we surface a fatal stream error. Lock-guarded; the
+    /// engine `onError` callbacks fire from arbitrary backend threads.
+    private final class ErrorGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var live: Set<Engine>
+        private let onAllFailed: @Sendable (Error) -> Void
+
+        init(engines: [Engine], onAllFailed: @escaping @Sendable (Error) -> Void) {
+            self.live = Set(engines)
+            self.onAllFailed = onAllFailed
+        }
+
+        /// Record one engine's failure. Fires `onAllFailed` exactly once, when the
+        /// last live engine goes down.
+        func recordFailure(_ engine: Engine, _ error: Error) {
+            lock.lock()
+            live.remove(engine)
+            let allDead = live.isEmpty
+            lock.unlock()
+            if allDead { onAllFailed(error) }
         }
     }
 
@@ -240,22 +278,26 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     }
 
     /// Reset every engine's session state. The primary drives the user's HUD
-    /// partials + fatal errors; secondaries run silently with non-fatal (logged)
-    /// errors. Shared by the real-capture and hub-less (test) start paths.
+    /// partials; a designated secondary takes over the HUD when the primary dies.
+    /// QUA-180: a single engine's error is NON-fatal as long as another engine can
+    /// still carry the session — only when the LAST engine fails do we surface a
+    /// fatal stream error (via `ErrorGate`). When the primary errors, the HUD is
+    /// switched to the secondary immediately. Shared by the real-capture and
+    /// hub-less (test) start paths.
     private func beginAllSessions(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                                   onError: @escaping @Sendable (Error) -> Void) async {
         let hud = HUDPartialRouter(fallbackAfter: hudFallbackSeconds, userPartial: onPartial)
         let fallbackEngine = hudFallbackEngine
+        let errorGate = ErrorGate(engines: entries.map(\.engine), onAllFailed: onError)
         for entry in entries {
             let partialCB = partialCallback(for: entry.engine, hud: hud, fallbackEngine: fallbackEngine)
-            if entry.engine == primary {
-                await entry.backend.beginSession(onPartial: partialCB, onError: onError)
-            } else {
-                let e = entry.engine
-                await entry.backend.beginSession(onPartial: partialCB, onError: { err in
-                    doushaLog("[MultiEngine] secondary \(e.rawValue) error (non-fatal): \(err.localizedDescription)")
-                })
-            }
+            let e = entry.engine
+            let isPrimary = (e == primary)
+            await entry.backend.beginSession(onPartial: partialCB, onError: { err in
+                doushaLog("[MultiEngine] \(e.rawValue)\(isPrimary ? " (primary)" : "") error: \(err.localizedDescription)")
+                if isPrimary { hud.markPrimaryFailed() }   // hand the HUD to the secondary now
+                errorGate.recordFailure(e, err)            // fatal only once every engine is down
+            })
         }
     }
 
