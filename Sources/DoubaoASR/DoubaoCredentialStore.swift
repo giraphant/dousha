@@ -64,6 +64,14 @@ public actor DoubaoCredentialStore {
     public nonisolated var fileURLForDiagnostics: URL { fileURL }
 
     /// Returns valid credentials, registering and/or refreshing the token as needed.
+    ///
+    /// Note (QUA-179): the cached `token` is Doubao's opaque ~10-char `app_key`
+    /// (see `fetchToken`), NOT a JWT — so `isJWTExpired` always returns false and
+    /// this never proactively refreshes a stale token. We can't tell from the
+    /// app_key alone when the server invalidates it; recovery is reactive instead.
+    /// `DoubaoASR.establishSession` calls `reset()` and re-registers when the WS
+    /// handshake is rejected, so an invalidated app_key self-heals on the next
+    /// recording rather than failing forever until a manual reset.
     func ensureCredentials() async throws -> DeviceCredentials {
         if var existing = cached, !existing.deviceId.isEmpty {
             if existing.token.isEmpty || Self.isJWTExpired(existing.token) {
