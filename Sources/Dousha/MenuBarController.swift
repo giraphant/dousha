@@ -27,7 +27,14 @@ final class MenuBarController {
         if let btn = statusItem.button {
             if let url = Bundle.main.url(forResource: "MenuIcon", withExtension: "png"),
                let img = NSImage(contentsOf: url) {
-                img.size = NSSize(width: 20, height: 20)
+                // MenuIcon.png is cropped tight to the glyph (no transparent
+                // border), so the status item only adds its own padding — one
+                // layer, matching system icons. Size to a standard 18pt menu-bar
+                // height and derive the width from the glyph's aspect ratio so a
+                // non-square glyph isn't stretched.
+                let targetHeight: CGFloat = 18
+                let aspect = img.size.height > 0 ? img.size.width / img.size.height : 1
+                img.size = NSSize(width: targetHeight * aspect, height: targetHeight)
                 img.isTemplate = true
                 btn.image = img
             } else {
