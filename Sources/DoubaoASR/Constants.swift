@@ -84,4 +84,21 @@ enum DoubaoConstants {
     // the server tears down long-running sessions mid-stream and the tail
     // of a long recording silently disappears.
     static let websocketPingIntervalSeconds: TimeInterval = 3.0
+
+    // Mid-recording reconnect + audio replay (QUA-193). When the connection dies
+    // *during* a recording (not at stop), we reopen a fresh session and replay the
+    // retained audio so a transient UK→CN link drop doesn't lose the recording.
+    // Doubao binds a task to its connection, so a reconnect is a brand-new session
+    // that re-transcribes the replayed audio from scratch (no server-side resume
+    // protocol is known). The official SAMICore client retries 7× over ~9.5s
+    // (backoff [200,400,800,1000]ms). We keep the 7-attempt count but stretch the
+    // tail to ~12.7s of sleeps: in our model a failed reconnect attempt fast-fails
+    // (REJECT/TLS error returns immediately), so the official's short cycling
+    // intervals would burn all 7 tries in ~5s and miss a ~10s UK→CN drop. The retry
+    // loop runs in the background (doesn't block audio buffering or stop), so a
+    // longer window is near-free; on real-device tests a 6s outage landed on
+    // attempt 5, so this leaves comfortable headroom. If it still exhausts, we fall
+    // back to a co-active engine (Soniox) that already has the full audio.
+    static let reconnectMaxAttempts = 7
+    static let reconnectBackoffMs: [Int] = [200, 500, 1000, 2000, 3000, 3000, 3000]
 }
