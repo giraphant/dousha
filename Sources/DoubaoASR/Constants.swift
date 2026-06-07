@@ -71,6 +71,12 @@ enum DoubaoConstants {
     // After FinishSession, Doubao must produce SessionFinished quickly or this
     // session is treated as failed. Returning an empty result lets MultiEngine
     // use a backup engine without Doubao-specific routing logic.
+    // QUA-191: 2s. With last_post_process the re-punctuated final arrives ~1s after
+    // FinishSession even for a healthy 112s recording, so 2s is enough when the
+    // connection is healthy. The failures on long recordings are connection lag /
+    // mid-stream WS death (ws-dead skips this grace anyway), NOT a too-short grace —
+    // a duration-scaled grace was considered and dropped as it doesn't address the
+    // real bottleneck (WebSocket reliability over the UK→CN link).
     static let finishGraceOnStopSeconds: TimeInterval = 2.0
 
     // WebSocket keepalive. Matches the official Doubao IME client's

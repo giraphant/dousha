@@ -117,6 +117,31 @@ public func buildSessionConfigJSON(
             // Text-formatting knobs mirrored from the official IME's StartSession
             // in `.official`; QUA-167 profiles vary them for measured latency tests.
             "enable_print_chinese": false,
+            // QUA-191: clean punctuation across thinking pauses. The IME server
+            // VAD-splits at every pause and bakes a terminal 句号 onto each segment,
+            // so a paused-but-continuing sentence got a spurious 句号. These five
+            // flags (mirrored from the official Mac client's voicegenie config —
+            // same bigASR backend; the IME extra is the flat backend param dict, so
+            // the backend honors them) make the server keep one utterance and re-
+            // punctuate it semantically at the very end instead:
+            //   • enable_vad_timeout_break=false — don't finalize a segment on a pause
+            //   • no_repeat_ngram_size / max_indefinite_utterance — guard the now
+            //     un-broken long utterance against decoder degeneration (repetition
+            //     loops) that vad_timeout_break alone triggers
+            //   • enable_text_post_process + last_post_process — one end-of-stream
+            //     re-punctuation pass; the re-punctuated text arrives as the final
+            //     is_interim:false frame ~1s after FinishSession (handled as-is).
+            // NOTE: asr_text_post_process_type MUST be "last_post_process", not
+            // "stream_post_process" — stream re-punctuates per frame and lags
+            // recognition on the UK→CN link (timed out → Soniox fallback at 42s/99s).
+            // Reliable ≤~1min on a healthy connection; longer / flaky connections
+            // fall back to Soniox (the real bottleneck is WS reliability, see
+            // docs/doubao-protocol-notes.md §8 + the Linear WebSocket issue).
+            "enable_vad_timeout_break": false,
+            "no_repeat_ngram_size": 6,
+            "max_indefinite_utterance": 1,
+            "enable_text_post_process": true,
+            "asr_text_post_process_type": "last_post_process",
             "end_smooth_window_ms": profile.endSmoothWindowMs,
             "input_mode": "tool",
             "os": "Android",
