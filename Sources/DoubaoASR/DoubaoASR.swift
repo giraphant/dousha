@@ -58,6 +58,30 @@ public actor DoubaoASR {
     /// (QUA-181). Reset per session in `prepareSession`.
     private var wsConnectionDead = false
 
+    /// All PCM that has been (or was attempted to be) streamed to the server this
+    /// session, retained so we can replay it on a mid-recording reconnect (QUA-193).
+    /// A frame is appended here the instant it's dequeued from `pcmBuffer` —
+    /// *before* the send — so audio whose send failed mid-flight is still replayed.
+    /// On reconnect it's moved back to the front of `pcmBuffer` and rebuilt as the
+    /// fresh session re-streams it. Bounded by recording length (~2 MB/min); a
+    /// dictation recording is short enough that a full in-memory replay buffer is
+    /// fine, and full replay is the only correct option since Doubao gives us no
+    /// way to resume a session mid-stream on a new connection.
+    private var retainedPCM = Data()
+
+    /// True while a mid-recording reconnect is in flight. Gates re-entrancy: a
+    /// second connection failure during an attempt must not kick off a parallel
+    /// reconnect or surface a fatal error — the attempt loop owns the outcome.
+    private var isReconnecting = false
+
+    /// Best transcript assembled *before* the current reconnect cleared the live
+    /// session state. A reconnect starts a fresh Doubao session (empty transcript)
+    /// that re-transcribes the replayed audio; if that fresh session dies early and
+    /// produces *less* than we already had, we must not regress. `currentResult()`
+    /// returns whichever of {this, the live transcript} is longer — mirroring the
+    /// "retranscribe must be strictly longer to win" rule (protocol-notes §3.6).
+    private var preReconnectText = ""
+
     /// Whether StartTask has been sent + acked on the current WebSocket. Doubao ties a
     /// task to a connection — sending StartTask twice on the same WS yields
     /// "task already started". Currently we close the WS after every stop() so this
@@ -160,6 +184,9 @@ public actor DoubaoASR {
         self.didReceiveFinal = false
         self.stopStartedAt = nil
         self.wsConnectionDead = false
+        self.retainedPCM = Data()
+        self.isReconnecting = false
+        self.preReconnectText = ""
         self.framesSentCount = 0
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
@@ -241,6 +268,95 @@ public actor DoubaoASR {
         doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms StartTask+StartSession ok pcmBufferBytes=\(self.pcmBuffer.count)")
     }
 
+    // MARK: - Mid-recording reconnect + replay (QUA-193)
+
+    /// The connection died *during* a recording. Reopen a fresh session and replay
+    /// the retained audio, retrying with backoff up to `reconnectMaxAttempts`. On
+    /// success the recording continues transparently; if every attempt fails we
+    /// fall through to `finalizeConnectionDeath`, which lets `MultiEngine` route to
+    /// a co-active engine (Soniox) that already has the full audio.
+    ///
+    /// Transport-neutral by construction: it drives the handshake + audio replay,
+    /// not WS framing — so the future QUIC leg reuses this orchestration unchanged,
+    /// swapping only what `openAndHandshake`/`flushPendingFrames` sit on.
+    private func attemptReconnectAfterLoss(error: Error) async {
+        isReconnecting = true
+        // Stop draining onto the (now absent) socket; live audio keeps buffering in
+        // pcmBuffer until the fresh session is ready.
+        canSendAudio = false
+        // Preserve the best transcript we had — the fresh session starts empty and
+        // must not be allowed to regress below this if it dies early.
+        preReconnectText = longerText(preReconnectText, assembledText())
+        doushaLog("[DoubaoASR] traceId=\(requestId) reconnect begin after loss: \(error.localizedDescription) replayBytes=\(retainedPCM.count) preReconnectText.len=\(preReconnectText.count)")
+
+        let attempts = DoubaoConstants.reconnectMaxAttempts
+        for attempt in 1...attempts {
+            let backoff = DoubaoConstants.reconnectBackoffMs[min(attempt - 1, DoubaoConstants.reconnectBackoffMs.count - 1)]
+            try? await Task.sleep(nanoseconds: UInt64(backoff) * 1_000_000)
+            guard isRunning, stopStartedAt == nil else {
+                doushaLog("[DoubaoASR] reconnect aborted before attempt \(attempt) (isRunning=\(isRunning) stopping=\(stopStartedAt != nil))")
+                break
+            }
+            do {
+                try await reopenAndReplay()
+                isReconnecting = false
+                wsConnectionDead = false
+                doushaLog("[DoubaoASR] traceId=\(requestId) reconnect SUCCESS on attempt \(attempt) frames=\(framesSentCount) pcmBufferBytes=\(pcmBuffer.count)")
+                return
+            } catch {
+                doushaLog("[DoubaoASR] reconnect attempt \(attempt)/\(attempts) failed: \(error.localizedDescription)")
+                await closeWebSocket()
+            }
+        }
+
+        isReconnecting = false
+        doushaLog("[DoubaoASR] traceId=\(requestId) reconnect exhausted — falling back")
+        finalizeConnectionDeath(error)
+    }
+
+    /// Open a fresh session and replay the full retained recording into it. Doubao
+    /// binds a task to a connection, so this is a brand-new session (new requestId)
+    /// that re-transcribes the replayed audio from scratch; the live transcript
+    /// state is reset and rebuilds as the replay streams.
+    private func reopenAndReplay() async throws {
+        requestId = UUID().uuidString.lowercased()
+        taskStarted = false
+        didSendFirstFrame = false
+        committedSegments = []
+        currentInterim = ""
+        segmentCommittedAt = []
+
+        // Move retained audio to the front of the send buffer so the fresh session
+        // replays the whole recording ahead of any live audio that arrived while we
+        // were reconnecting. flushPendingFrames re-appends to retainedPCM as it sends.
+        if !retainedPCM.isEmpty {
+            var replay = retainedPCM
+            replay.append(pcmBuffer)
+            pcmBuffer = replay
+            retainedPCM = Data()
+        }
+
+        // openAndHandshake reuses cached creds, opens a fresh WS (ws == nil now),
+        // builds a fresh Opus encoder, and runs StartTask + StartSession.
+        try await openAndHandshake()
+
+        canSendAudio = true
+        try await flushPendingFrames()
+        doushaLog("[DoubaoASR] traceId=\(requestId) reconnect replayed pcmBufferBytes=\(pcmBuffer.count) frames=\(framesSentCount)")
+    }
+
+    /// Terminal "give up" after a connection loss that couldn't be recovered.
+    /// Mirrors the pre-reconnect receive-failure teardown (QUA-181): mark the
+    /// connection dead so `_stop()` skips the finish grace, surface the error if
+    /// still running, and wake any finish wait.
+    private func finalizeConnectionDeath(_ error: Error) {
+        wsConnectionDead = true
+        if isRunning { deliverError(error) }
+        signalFinished()
+    }
+
+    private func longerText(_ a: String, _ b: String) -> String { b.count > a.count ? b : a }
+
     /// Push one chunk of int16 16 kHz mono PCM from the shared `AudioTapHub`.
     /// Replaces the old internal mic-tap callback; buffers until `canSendAudio`,
     /// then streams in Opus frames.
@@ -306,7 +422,7 @@ public actor DoubaoASR {
         doushaLog("[DoubaoASR] stop() isRunning=\(isRunning)")
         guard isRunning else {
             return TranscriptionResult(
-                text: assembledText(),
+                text: bestText(),
                 audioDuration: 0,
                 lastResponseAge: nil,
                 lastTranscriptAge: nil,
@@ -590,6 +706,15 @@ public actor DoubaoASR {
     private func notePingFailure(generation: Generation) {
         guard wsGen.isCurrent(generation) else { return }
         guard !wsConnectionDead else { return }
+        if isRunning, stopStartedAt == nil, !isReconnecting {
+            // Mid-recording half-open connection: the pending `receive` callback can
+            // sit far longer than we'd want to wait. Cancel the socket so the
+            // receive loop fails *now* and routes into the reconnect path (QUA-193),
+            // instead of stalling until the OS TCP timeout.
+            doushaLog("[DoubaoASR] ping failed mid-recording — cancelling socket to trigger fast reconnect")
+            ws?.cancel(with: .abnormalClosure, reason: nil)
+            return
+        }
         wsConnectionDead = true
         signalFinished()
     }
@@ -701,21 +826,37 @@ public actor DoubaoASR {
             // down) must not touch the live session — return after signaling.
             guard wsGen.isCurrent(generation) else { return }
             doushaLog("[DoubaoASR] receive failed: \(err.localizedDescription)")
-            // Known-dead connection: let _stop() skip the finish grace (QUA-181).
-            wsConnectionDead = true
-            if isRunning {
-                deliverError(err)
-            }
-            // Connection is dead — drop references so next start() reopens.
+            // Drop the dead socket's references so a reopen starts clean. This is
+            // done unconditionally — whether we reconnect or fall back, the socket
+            // that just failed is gone.
             stopPingLoop()
             ws = nil
             session?.invalidateAndCancel()
             session = nil
             taskStarted = false
             pendingResponseFilter = nil
+            // Unblock any handshake wait in flight (e.g. a reconnect attempt that
+            // was mid-StartTask when this socket failed) so it can retry/abort.
             pendingResponseChannel?.finish(throwing: CancellationError())
             pendingResponseChannel = nil
-            signalFinished()
+
+            if isRunning, stopStartedAt == nil, !isReconnecting {
+                // Mid-recording connection death — try to reopen + replay the
+                // retained audio before giving up (QUA-193). The attempt loop owns
+                // the terminal outcome (success → resume; exhausted → fall back).
+                await attemptReconnectAfterLoss(error: err)
+            } else if isReconnecting {
+                // A failure during an in-flight reconnect attempt: the attempt's
+                // handshake wait was just unblocked above, so its `do/catch` drives
+                // the retry. Don't mark dead or deliver an error here.
+                doushaLog("[DoubaoASR] receive failed during reconnect attempt — letting attempt loop retry")
+            } else {
+                // Not mid-recording (stopping / cancelled / not running): behave as
+                // before. Known-dead lets _stop() skip the finish grace (QUA-181).
+                wsConnectionDead = true
+                if isRunning { deliverError(err) }
+                signalFinished()
+            }
         }
     }
 
@@ -845,6 +986,13 @@ public actor DoubaoASR {
         TranscriptFormatter.normalize(committedSegments.joined() + currentInterim)
     }
 
+    /// The transcript to hand back: the longer of the live session text and any
+    /// text preserved from before a reconnect (QUA-193). Without a reconnect,
+    /// `preReconnectText` is empty so this is just `assembledText()`.
+    private func bestText() -> String {
+        longerText(preReconnectText, assembledText())
+    }
+
     private func currentResult() -> TranscriptionResult {
         let now = Date()
         let audioDuration: TimeInterval = audioStartedAt.map { now.timeIntervalSince($0) } ?? 0
@@ -860,7 +1008,7 @@ public actor DoubaoASR {
             return maxGap
         }()
         return TranscriptionResult(
-            text: assembledText(),
+            text: bestText(),
             audioDuration: audioDuration,
             lastResponseAge: lastResponseAge,
             lastTranscriptAge: lastTranscriptAge,
@@ -893,24 +1041,31 @@ public actor DoubaoASR {
 
     /// Sends as many complete 20ms frames as the buffer holds. No-op until
     /// `canSendAudio` is true (i.e., until StartSession has succeeded).
+    ///
+    /// Each dequeued frame is appended to `retainedPCM` *before* the send so it can
+    /// be replayed on a mid-recording reconnect even if this very send fails
+    /// (QUA-193). On a send failure we cancel the socket — that surfaces as a
+    /// receive-loop failure which routes into the reconnect/fallback path — and
+    /// rethrow so a replay-in-progress reconnect attempt fails fast and retries.
     private func flushPendingFrames() async throws {
         guard canSendAudio else { return }
         let frameSize = DoubaoConstants.bytesPerFrame
         while pcmBuffer.count >= frameSize {
-            let frame = pcmBuffer.prefix(frameSize)
+            let frame = Data(pcmBuffer.prefix(frameSize))
             pcmBuffer.removeFirst(frameSize)
+            retainedPCM.append(frame)
+            let state: FrameState = didSendFirstFrame ? .middle : .first
             do {
-                let state: FrameState = didSendFirstFrame ? .middle : .first
-                try await encodeAndSend(Data(frame), state: state)
-                didSendFirstFrame = true
-                framesSentCount += 1
-                if framesSentCount == 1 || framesSentCount % 100 == 0 {
-                    doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms sent frame state=\(state.rawValue) frames=\(framesSentCount) pcmBytesOut=\(totalPcmBytesOut) pcmBufferBytes=\(pcmBuffer.count)")
-                }
+                try await encodeAndSend(frame, state: state)
             } catch {
-                doushaLog("[DoubaoASR] encodeAndSend error: \(error.localizedDescription)")
-                deliverError(error)
-                return
+                doushaLog("[DoubaoASR] encodeAndSend error: \(error.localizedDescription); cancelling socket to trigger reconnect/fallback")
+                ws?.cancel(with: .abnormalClosure, reason: nil)
+                throw error
+            }
+            didSendFirstFrame = true
+            framesSentCount += 1
+            if framesSentCount == 1 || framesSentCount % 100 == 0 {
+                doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms sent frame state=\(state.rawValue) frames=\(framesSentCount) pcmBytesOut=\(totalPcmBytesOut) pcmBufferBytes=\(pcmBuffer.count)")
             }
         }
     }
