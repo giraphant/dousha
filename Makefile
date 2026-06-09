@@ -64,16 +64,26 @@ dist:
 	@rm -rf "$(DIST_DIR)" "$(DMG_STAGING)"
 	@mkdir -p "$(DIST_DIR)" "$(DMG_STAGING)"
 	@cp -R "$(APP_BUNDLE)" "$(DIST_APP)"
-	@cp -R "$(APP_BUNDLE)" "$(DMG_STAGING)/$(APP_NAME).app"
+	@echo "Built dist app: $(DIST_APP)"
+
+# Two-stage notarization. The .app must carry its OWN stapled ticket: a staple
+# on the DMG does NOT travel with Dousha.app once a user drags it to
+# /Applications, so without this the extracted app fails Gatekeeper's offline
+# check ("Apple cannot verify ..."). So we notarize + staple the app FIRST,
+# then build the DMG around the already-stapled app, then notarize + staple
+# the DMG itself (so the downloaded DMG also passes cleanly).
+notarize: dist
+	@ditto -c -k --keepParent "$(DIST_APP)" "$(DIST_DIR)/$(APP_NAME).zip"
+	xcrun notarytool submit "$(DIST_DIR)/$(APP_NAME).zip" --keychain-profile "$(NOTARY_PROFILE)" --wait
+	xcrun stapler staple "$(DIST_APP)"
+	@rm -f "$(DIST_DIR)/$(APP_NAME).zip"
+	@cp -R "$(DIST_APP)" "$(DMG_STAGING)/$(APP_NAME).app"
 	@ln -s /Applications "$(DMG_STAGING)/Applications"
 	@hdiutil create -volname "$(APP_NAME)" -srcfolder "$(DMG_STAGING)" -ov -format UDZO "$(DIST_DMG)" >/dev/null
 	@codesign --force --sign "$(DEVELOPER_ID_IDENTITY)" --timestamp "$(DIST_DMG)"
-	@echo "Packaged $(DIST_DMG)"
-
-notarize: dist
 	xcrun notarytool submit "$(DIST_DMG)" --keychain-profile "$(NOTARY_PROFILE)" --wait
 	xcrun stapler staple "$(DIST_DMG)"
-	@echo "Notarized and stapled $(DIST_DMG)"
+	@echo "Notarized and stapled both $(APP_NAME).app and $(DIST_DMG)"
 
 # One-shot release: assumes Info.plist already bumped to $(VERSION) and committed.
 # Notarizes the DMG, tags HEAD, and publishes a GitHub release with the DMG attached.
@@ -96,7 +106,7 @@ release:
 # and pushes. Idempotent: no-op if the cask already matches.
 update-cask:
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make update-cask VERSION=0.1.0"; exit 1; fi
-	@if [ ! -f "$(DIST_DMG)" ]; then echo "ERROR: $(DIST_DMG) not found. Run 'make dist' first."; exit 1; fi
+	@if [ ! -f "$(DIST_DMG)" ]; then echo "ERROR: $(DIST_DMG) not found. Run 'make notarize' first."; exit 1; fi
 	@sha=$$(shasum -a 256 "$(DIST_DMG)" | awk '{print $$1}'); \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
