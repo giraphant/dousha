@@ -416,10 +416,19 @@ final class ByteCounter: @unchecked Sendable {
 
 // MARK: - Entry
 
+let doushaWinVersion = "0.4.0"
+
 @main
 struct DoushaWin {
     static func main() {
         let args = CommandLine.arguments
+        if args.contains("--version") {
+            // Keep in sync with Resources/Info.plist CFBundleShortVersionString
+            // (the Mac side's source of truth). Also the CI packaging smoke:
+            // proves the self-contained zip's exe + DLLs load and run.
+            print("dousha-win \(doushaWinVersion)")
+            exit(0)
+        }
         if args.contains("--doctor") {
             var wavPath: String?
             if let i = args.firstIndex(of: "--wav"), i + 1 < args.count {
