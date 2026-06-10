@@ -1,6 +1,20 @@
 import Cocoa
 import DoubaoASR
 
+enum AboutPanel {
+    static func applicationVersion(bundle: Bundle = .main) -> String {
+        if let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+           !version.isEmpty {
+            return version
+        }
+        if let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+           !build.isEmpty {
+            return build
+        }
+        return ""
+    }
+}
+
 /// Owns the menu-bar status item: its icon, the dropdown menu, and every menu
 /// action (engine / language pick, LLM toggle, Doubao reset, About). Extracted
 /// from `AppDelegate` (QUA-163 Phase 2).
@@ -211,7 +225,7 @@ final class MenuBarController {
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Dousha",
-            .applicationVersion: "1.0",
+            .applicationVersion: AboutPanel.applicationVersion(),
             .credits: NSAttributedString(
                 string: "Hold a modifier key (or tap in toggle mode) to dictate. Release to paste.",
                 attributes: [.foregroundColor: NSColor.secondaryLabelColor])
