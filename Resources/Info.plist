@@ -2,33 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleName</key>
-    <string>Dousha</string>
-    <key>CFBundleDisplayName</key>
-    <string>Dousha</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.dousha.app</string>
-    <key>CFBundleVersion</key>
-    <string>12</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.3.4</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleExecutable</key>
-    <string>Dousha</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Dousha needs microphone access to transcribe your voice into text.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Dousha uses speech recognition to convert what you say into text.</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Dousha</string>
+	<key>CFBundleExecutable</key>
+	<string>Dousha</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.dousha.app</string>
+	<key>CFBundleName</key>
+	<string>Dousha</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.4.0</string>
+	<key>CFBundleVersion</key>
+	<string>13</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Dousha needs microphone access to transcribe your voice into text.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Dousha uses speech recognition to convert what you say into text.</string>
 </dict>
 </plist>
