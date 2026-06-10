@@ -1,6 +1,6 @@
 import XCTest
 import ASRSupport
-import TalkerCommonSync
+import ConcurrencySupport
 @testable import Dousha
 
 /// Records every side effect the controller performs, so transition/lifecycle

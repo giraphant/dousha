@@ -1,5 +1,5 @@
 import XCTest
-import TalkerCommonSync
+import ConcurrencySupport
 
 final class SessionGenerationTests: XCTestCase {
     func testFreshGenerationMatchesLive() {

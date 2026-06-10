@@ -1,5 +1,5 @@
 import XCTest
-import TalkerCommonSync
+import ConcurrencySupport
 
 final class GenerationCloseChannelsTests: XCTestCase {
     // The QUA-130 cross-wakeup: a stale socket's failure callback must wake only
