@@ -17,9 +17,9 @@
 //                 Task — the LL-hook callback must return in milliseconds or
 //                 Windows silently removes the hook.
 //
-// v1 scope (deliberate): no HUD (partials go to dousha.log), no settings UI
-// (config.json next to credentials.json), Doubao only, console subsystem so
-// launching from a terminal shows logs.
+// Windows scope (deliberate): a lightweight HUD + tray settings surface, no
+// full peer Mac UI / preferences stack, Doubao only for now, console subsystem
+// so launching from a terminal shows logs.
 #if os(Windows)
 import WinSDK
 import Foundation
@@ -48,16 +48,29 @@ struct WinConfig: Codable {
 
     var vkCode: UInt32 { Self.vkMap[hotkey.lowercased()] ?? 0xA3 }
 
-    /// `%LOCALAPPDATA%\Dousha\config.json` — same directory the credential
-    /// store already uses. Missing file → defaults are written out so the
-    /// user has something to edit.
-    static func load() -> WinConfig {
+    /// `%LOCALAPPDATA%\Dousha` — same directory the credential store already
+    /// uses. Helpers live here so the tray settings actions and config loader
+    /// agree on paths without growing another preferences layer.
+    static var supportDirectory: URL {
         let support = (try? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
             ?? URL(fileURLWithPath: NSHomeDirectory())
         let dir = support.appendingPathComponent("Dousha", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("config.json")
+        return dir
+    }
+
+    static var configURL: URL { supportDirectory.appendingPathComponent("config.json") }
+
+    static var logsDirectory: URL {
+        let dir = supportDirectory.appendingPathComponent("Logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Missing file → defaults are written out so the user has something to edit.
+    static func load() -> WinConfig {
+        let url = configURL
         if let data = try? Data(contentsOf: url),
            let cfg = try? JSONDecoder().decode(WinConfig.self, from: data) {
             doushaLog("[DoushaWin] config loaded: hotkey=\(cfg.hotkey) swallow=\(cfg.swallowHotkey)")
@@ -158,7 +171,12 @@ nonisolated(unsafe) var gKeyIsDown = false   // UI (hook) thread only — dedups
 
 let WMAPP_TRAY: UINT = 0x8000 + 1       // WM_APP + 1: tray icon callback
 let WMAPP_RECORDING: UINT = 0x8000 + 2  // WM_APP + 2: wParam 1/0 = tooltip swap
-let MENU_QUIT: UINT_PTR = 1
+let MENU_OPEN_CONFIG: UINT_PTR = 1
+let MENU_OPEN_LOGS: UINT_PTR = 2
+let MENU_RELOAD_CONFIG: UINT_PTR = 3
+let MENU_RESET_DOUBAO: UINT_PTR = 4
+let MENU_ABOUT: UINT_PTR = 5
+let MENU_QUIT: UINT_PTR = 99
 
 // MARK: - Tray icon
 
@@ -204,9 +222,15 @@ enum Tray {
     static func showMenu(hwnd: HWND) {
         guard let menu = CreatePopupMenu() else { return }
         defer { DestroyMenu(menu) }
-        "退出 Dousha".withCString(encodedAs: UTF16.self) { label in
-            _ = AppendMenuW(menu, UINT(MF_STRING), MENU_QUIT, label)
-        }
+        appendMenuItem(menu, id: 0, label: "Dousha — 当前热键：\(gConfig.hotkey)", flags: UINT(MF_STRING | MF_DISABLED | MF_GRAYED))
+        AppendMenuW(menu, UINT(MF_SEPARATOR), 0, nil)
+        appendMenuItem(menu, id: MENU_OPEN_CONFIG, label: "打开设置文件…")
+        appendMenuItem(menu, id: MENU_OPEN_LOGS, label: "打开日志文件夹…")
+        appendMenuItem(menu, id: MENU_RELOAD_CONFIG, label: "重新加载设置")
+        appendMenuItem(menu, id: MENU_RESET_DOUBAO, label: "重置豆包凭据…")
+        AppendMenuW(menu, UINT(MF_SEPARATOR), 0, nil)
+        appendMenuItem(menu, id: MENU_ABOUT, label: "关于 Dousha")
+        appendMenuItem(menu, id: MENU_QUIT, label: "退出 Dousha")
         var pt = POINT()
         GetCursorPos(&pt)
         SetForegroundWindow(hwnd)   // required or the menu won't dismiss on outside click
@@ -214,6 +238,92 @@ enum Tray {
         // Swift overlay, which can't carry the command id — the selection
         // arrives as WM_COMMAND in the wndProc instead.
         TrackPopupMenu(menu, UINT(TPM_RIGHTBUTTON), pt.x, pt.y, 0, hwnd, nil)
+    }
+
+    private static func appendMenuItem(_ menu: HMENU?, id: UINT_PTR, label: String,
+                                       flags: UINT = UINT(MF_STRING)) {
+        label.withCString(encodedAs: UTF16.self) { text in
+            _ = AppendMenuW(menu, flags, id, text)
+        }
+    }
+}
+
+// MARK: - Tray settings actions
+
+/// Small Windows-only settings surface: keep it in the shell instead of
+/// inventing a cross-platform preferences layer. All actions are launched from
+/// the tray menu and either open the existing JSON/log files or call already-
+/// public engine diagnostics hooks.
+enum TraySettings {
+    static func openConfig() {
+        let url = WinConfig.configURL
+        _ = shellExecute(operation: "open", file: "notepad.exe", parameters: quoted(url.path))
+    }
+
+    static func openLogs() {
+        let url = WinConfig.logsDirectory
+        _ = shellExecute(operation: "open", file: url.path)
+    }
+
+    static func reloadConfig() {
+        gConfig = WinConfig.load()
+        gKeyIsDown = false
+        Tray.applyRecordingTip(false)
+        HUD.update(recording: false, text: "设置已重新加载：\(gConfig.hotkey)")
+        HUD.dismiss(afterMs: 1400)
+    }
+
+    static func resetDoubao(hwnd: HWND?) {
+        let yes = messageBox(
+            hwnd: hwnd,
+            text: "确定要删除缓存的豆包设备凭据吗？\n下次听写会重新注册。",
+            title: "重置豆包凭据",
+            flags: UINT(MB_YESNO | MB_ICONWARNING)
+        ) == IDYES
+        guard yes else { return }
+        Task {
+            await DoubaoCredentialStore.shared.reset()
+            DoubaoCredentialStore.shared.warmup()
+            HUD.update(recording: false, text: "豆包凭据已重置")
+            HUD.dismiss(afterMs: 1400)
+        }
+    }
+
+    static func showAbout(hwnd: HWND?) {
+        let body = """
+        Dousha for Windows \(doushaWinVersion)
+
+        按住 \(gConfig.hotkey) 说话，松开上屏。
+
+        设置：\(WinConfig.configURL.path)
+        日志：\(WinConfig.logsDirectory.appendingPathComponent("dousha.log").path)
+        """
+        _ = messageBox(hwnd: hwnd, text: body, title: "关于 Dousha", flags: UINT(MB_OK | MB_ICONINFORMATION))
+    }
+
+    @discardableResult
+    private static func shellExecute(operation: String, file: String, parameters: String? = nil) -> HINSTANCE? {
+        operation.withCString(encodedAs: UTF16.self) { op in
+            file.withCString(encodedAs: UTF16.self) { f in
+                if let parameters {
+                    return parameters.withCString(encodedAs: UTF16.self) { p in
+                        ShellExecuteW(nil, op, f, p, nil, SW_SHOWNORMAL)
+                    }
+                }
+                return ShellExecuteW(nil, op, f, nil, nil, SW_SHOWNORMAL)
+            }
+        }
+    }
+
+    private static func quoted(_ s: String) -> String { "\"\(s)\"" }
+
+    @discardableResult
+    private static func messageBox(hwnd: HWND?, text: String, title: String, flags: UINT) -> Int32 {
+        text.withCString(encodedAs: UTF16.self) { body in
+            title.withCString(encodedAs: UTF16.self) { caption in
+                MessageBoxW(hwnd, body, caption, flags)
+            }
+        }
     }
 }
 
@@ -231,8 +341,21 @@ let wndProc: WNDPROC = { hwnd, msg, wParam, lParam in
         Tray.applyRecordingTip(wParam == 1)
         return 0
     case UINT(WM_COMMAND):
-        if UINT_PTR(wParam & 0xFFFF) == MENU_QUIT {
+        switch UINT_PTR(wParam & 0xFFFF) {
+        case MENU_OPEN_CONFIG:
+            TraySettings.openConfig()
+        case MENU_OPEN_LOGS:
+            TraySettings.openLogs()
+        case MENU_RELOAD_CONFIG:
+            TraySettings.reloadConfig()
+        case MENU_RESET_DOUBAO:
+            TraySettings.resetDoubao(hwnd: hwnd)
+        case MENU_ABOUT:
+            TraySettings.showAbout(hwnd: hwnd)
+        case MENU_QUIT:
             PostQuitMessage(0)
+        default:
+            break
         }
         return 0
     case UINT(WM_DESTROY):
