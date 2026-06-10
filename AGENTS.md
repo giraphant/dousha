@@ -1,5 +1,14 @@
 # Agent instructions — Dousha
 
+## Architecture invariants (READ FIRST for pipeline/concurrency changes)
+
+Before touching the recording pipeline, any `@unchecked Sendable` type, the
+ASR clients, or anything that looks like duplicated code worth abstracting,
+read `ARCHITECTURE.md`. It records the load-bearing invariants (three-phase
+start order, generation guards, flag-before-HUD ordering) and the list of
+**deliberately rejected refactors** — do not re-propose those without new
+evidence.
+
 ## Testing workflow (REQUIRED)
 
 This is a menu-bar / accessibility app on macOS. You cannot test changes by running `swift build` or `swift run` directly — TCC permissions (Microphone, Accessibility, Speech Recognition) are bound to the signed bundle at `/Applications/Dousha.app`, and global hotkeys only work for the installed bundle the user already granted permissions to.
