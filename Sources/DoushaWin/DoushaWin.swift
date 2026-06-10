@@ -39,6 +39,7 @@ struct WinConfig: Codable {
 
     static let vkMap: [String: UInt32] = [
         "rightctrl": 0xA3, "leftctrl": 0xA2,
+        "rightshift": 0xA1, "leftshift": 0xA0,
         "rightalt": 0xA5, "leftalt": 0xA4,
         "capslock": 0x14,
         "f8": 0x77, "f9": 0x78, "f10": 0x79,
@@ -81,6 +82,7 @@ struct WinConfig: Codable {
 actor Recorder {
     private let engine = DoubaoASR()
     private var capture: WaveInCapture?
+    private var counter: ByteCounter?
     private var recording = false
 
     func start() async {
@@ -91,7 +93,14 @@ actor Recorder {
             onPartial: { p in doushaLog("[DoushaWin] partial: \(p.combined)") },
             onError: { e in doushaLog("[DoushaWin] engine error: \(e.localizedDescription)") }
         )
-        let cap = WaveInCapture { [engine] pcm in engine.ingest(pcm) }
+        // Per-session level meter: a muted/wrong mic shows up in the log as
+        // peak≈1 instead of a mystery empty transcript (QUA-209 field debug).
+        let meter = ByteCounter()
+        counter = meter
+        let cap = WaveInCapture { [engine] pcm in
+            meter.add(pcm)
+            engine.ingest(pcm)
+        }
         do {
             try cap.start()
         } catch {
@@ -110,6 +119,10 @@ actor Recorder {
         recording = false
         capture?.stop()   // synchronous drain — tail reaches the engine first
         capture = nil
+        if let meter = counter {
+            doushaLog("[DoushaWin] mic session: \(meter.bytes) bytes, peak=\(meter.peak)\(meter.peak < 500 ? " ⚠️ near-silence" : "")")
+        }
+        counter = nil
         engine.stop { result in
             doushaLog("[DoushaWin] final: \(result.text)")
             TextInjector.type(result.text)
@@ -402,6 +415,24 @@ struct DoushaWin {
                 exit(code)
             }
             dispatchMain()
+        }
+
+        // Single instance. Multiple copies each install a keyboard hook and
+        // race the credential store across processes — a quadruple double-
+        // click registered four Doubao devices in 3ms and the surviving
+        // device was rejected server-side (50700000). The mutex is leaked on
+        // purpose: it must live as long as the process.
+        let mutex = "Dousha.SingleInstance".withCString(encodedAs: UTF16.self) {
+            CreateMutexW(nil, true, $0)
+        }
+        if mutex == nil || GetLastError() == DWORD(ERROR_ALREADY_EXISTS) {
+            print("Dousha 已经在运行（看右下角托盘图标）。")
+            "Dousha 已经在运行——看右下角托盘图标。".withCString(encodedAs: UTF16.self) { body in
+                "Dousha".withCString(encodedAs: UTF16.self) { title in
+                    _ = MessageBoxW(nil, body, title, UINT(MB_OK | MB_ICONINFORMATION))
+                }
+            }
+            exit(0)
         }
 
         gConfig = WinConfig.load()
