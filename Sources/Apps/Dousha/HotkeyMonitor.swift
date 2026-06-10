@@ -1,6 +1,6 @@
 import Cocoa
 import CoreGraphics
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Pure mode-aware dispatcher — extracted so it's testable without a real CGEvent tap.
 ///

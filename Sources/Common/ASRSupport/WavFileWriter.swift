@@ -6,7 +6,7 @@
 #if canImport(AVFoundation)
 import Foundation
 import AVFoundation
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Streams mono int16 PCM samples to a WAV file on disk. Uses AVAudioFile under
 /// the hood so we don't have to hand-write the RIFF header / fix up chunk sizes.

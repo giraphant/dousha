@@ -26,7 +26,7 @@ import Foundation
 import Dispatch
 import DoubaoASR
 import ASRSupport
-import TalkerCommonSync
+import ConcurrencySupport
 
 // MARK: - Config
 

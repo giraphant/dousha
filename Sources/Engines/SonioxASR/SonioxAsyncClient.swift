@@ -2,7 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import TalkerCommonSync
+import ConcurrencySupport
 import ASRSupport
 
 /// Pure, `Sendable`, unit-testable parser for the async transcript response.

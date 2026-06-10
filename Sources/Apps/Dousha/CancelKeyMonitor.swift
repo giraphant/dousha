@@ -1,6 +1,6 @@
 import Cocoa
 import CoreGraphics
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// CGEvent-tap-driven listener for the user-configured "cancel recording" key.
 ///

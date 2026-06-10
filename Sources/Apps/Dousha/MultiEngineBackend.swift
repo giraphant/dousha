@@ -1,7 +1,7 @@
 import Foundation
 import ASRSupport
 import SonioxASR
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Runs several engines in parallel during one recording and routes the final
 /// result by language (`LanguageRouter`). Conforms to `SpeechBackend`, so

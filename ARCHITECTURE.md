@@ -9,7 +9,7 @@ the per-line version of this document; both are normative.
 ## 1. Targets & layering
 
 ```
-TalkerCommonSync          concurrency primitives (SessionGeneration, OneShotChannel,
+ConcurrencySupport        concurrency primitives (SessionGeneration, OneShotChannel,
         │                 GenerationCloseChannels, Lock, doushaLog, UncheckedSendable)
         ▼
 ASRSupport                engine-agnostic domain types (PartialTranscript,
@@ -31,7 +31,7 @@ settings        SendInput        Doubao servers
 Platform model (QUA-209): macOS is tier 1 — the product. Windows is a tier-2
 best-effort build for one user; Mac features are NOT ported by default, and
 `DoushaWin` breaking never blocks Mac work. The one hard cross-platform
-constraint: the four shared targets (TalkerCommonSync, ASRSupport, DoubaoASR,
+constraint: the four shared targets (ConcurrencySupport, ASRSupport, DoubaoASR,
 SonioxASR) must keep compiling on Windows — CI enforces it.
 
 Rules:
@@ -47,7 +47,7 @@ Rules:
   (`SonioxBackend`/`DoubaoBackend` snapshot glossary + language in
   `beginSession`). This keeps mid-recording Settings changes from mutating a
   live session, and keeps the libraries testable.
-- All logging goes through `doushaLog` (TalkerCommonSync). Log strings are part
+- All logging goes through `doushaLog` (ConcurrencySupport). Log strings are part
   of the observable surface — field debugging greps for them — so don't reword
   them casually.
 
@@ -215,7 +215,7 @@ property of a layer, not a grouping axis):
 ```
 Sources/
   Common/             bottom of the graph — libraries everything imports
-    TalkerCommonSync/   concurrency utils (no deps)
+    ConcurrencySupport/   concurrency utils (no deps)
     ASRSupport/         shared ASR domain types + TranscriptFormatter
   Engines/            one streaming ASR client per provider
     DoubaoASR/          Doubao WS client (protobuf, opus, reconnect, credentials)

@@ -3,7 +3,7 @@ import Speech
 import AVFoundation
 import DoubaoASR
 import ASRSupport
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Apple on-device speech recognition, driven as a push sink of the shared
 /// `AudioTapHub` (spec §1). It no longer owns an `AVAudioEngine`: native mic

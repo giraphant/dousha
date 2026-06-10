@@ -1,6 +1,6 @@
 import Cocoa
 import CoreGraphics
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Shared lifecycle wrapper around a CGEvent **session** tap added to the
 /// current (main) run loop. Centralizes the `tapCreate` + run-loop-source +

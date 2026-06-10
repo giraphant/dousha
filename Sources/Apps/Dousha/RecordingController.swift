@@ -1,6 +1,6 @@
 import Foundation
 import ASRSupport
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// The side-effect surface a `RecordingController` needs. Built once by
 /// `AppDelegate` (same struct-of-closures pattern as `SettingsActions`); faked

@@ -1,6 +1,6 @@
 import SwiftUI
 import ASRSupport
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Reports the visible HUD card's frame up to FloatingWindow (via the model
 /// callback) so the click-absorbing region can be clamped to exactly the card.

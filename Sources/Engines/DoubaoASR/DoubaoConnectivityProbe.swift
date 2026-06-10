@@ -2,7 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Staged connectivity probe for the Doubao ASR pipeline (QUA-209).
 ///

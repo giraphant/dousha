@@ -1,7 +1,7 @@
 import Cocoa
 import Carbon
 import Carbon.HIToolbox
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Injects text into the currently focused text field by setting the clipboard
 /// and posting ⌘V.

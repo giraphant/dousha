@@ -2,7 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import TalkerCommonSync
+import ConcurrencySupport
 
 struct DeviceCredentials: Codable {
     var deviceId: String

@@ -1,7 +1,7 @@
 import Foundation
 @preconcurrency import AVFoundation
 import ASRSupport
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// The single microphone capture point for a recording (spec §1). Owns the one
 /// `AVAudioEngine` + mic tap and fans the raw audio out to every active engine,

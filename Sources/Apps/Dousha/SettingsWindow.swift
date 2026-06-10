@@ -1,7 +1,7 @@
 import Cocoa
 import CoreGraphics
 import SwiftUI
-import TalkerCommonSync
+import ConcurrencySupport
 import SonioxASR
 
 enum SettingsWindowFactory {

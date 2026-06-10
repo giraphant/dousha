@@ -2,7 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import TalkerCommonSync
+import ConcurrencySupport
 import ASRSupport
 
 /// Streaming Soniox real-time STT client. One recording per instance. Audio is

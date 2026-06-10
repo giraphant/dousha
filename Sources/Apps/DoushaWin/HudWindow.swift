@@ -14,7 +14,7 @@
 #if os(Windows)
 import WinSDK
 import Foundation
-import TalkerCommonSync
+import ConcurrencySupport
 
 // ((HWND)-1) — the macro form doesn't import into Swift. A constant
 // sentinel, not real shared state.

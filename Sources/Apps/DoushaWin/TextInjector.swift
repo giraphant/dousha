@@ -12,7 +12,7 @@
 #if os(Windows)
 import WinSDK
 import Foundation
-import TalkerCommonSync
+import ConcurrencySupport
 
 enum TextInjector {
     static func type(_ text: String) {

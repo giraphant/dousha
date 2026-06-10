@@ -8,7 +8,7 @@ import PackageDescription
 // Windows. Framework links are .when(.macOS)-conditional for the same reason.
 
 var products: [Product] = [
-    .library(name: "TalkerCommonSync", targets: ["TalkerCommonSync"]),
+    .library(name: "ConcurrencySupport", targets: ["ConcurrencySupport"]),
     .library(name: "ASRSupport",       targets: ["ASRSupport"]),
     .library(name: "DoubaoASR",        targets: ["DoubaoASR"]),
     .library(name: "SonioxASR",        targets: ["SonioxASR"]),
@@ -23,10 +23,10 @@ var products: [Product] = [
 //   Sources/Apps/     user-facing shells, one per platform
 //   Sources/Tools/    developer-facing executables, never shipped
 var targets: [Target] = [
-    .target(name: "TalkerCommonSync", path: "Sources/Common/TalkerCommonSync"),
+    .target(name: "ConcurrencySupport", path: "Sources/Common/ConcurrencySupport"),
     .target(
         name: "ASRSupport",
-        dependencies: ["TalkerCommonSync"],
+        dependencies: ["ConcurrencySupport"],
         path: "Sources/Common/ASRSupport",
         linkerSettings: [
             .linkedFramework("AVFoundation", .when(platforms: [.macOS]))
@@ -34,7 +34,7 @@ var targets: [Target] = [
     ),
     .target(
         name: "DoubaoASR",
-        dependencies: ["TalkerCommonSync", "ASRSupport"],
+        dependencies: ["ConcurrencySupport", "ASRSupport"],
         path: "Sources/Engines/DoubaoASR",
         linkerSettings: [
             .linkedFramework("AVFoundation", .when(platforms: [.macOS])),
@@ -44,7 +44,7 @@ var targets: [Target] = [
     // SonioxASR no longer touches AVFoundation (QUA-209) — pure Foundation + WS.
     .target(
         name: "SonioxASR",
-        dependencies: ["TalkerCommonSync", "ASRSupport"],
+        dependencies: ["ConcurrencySupport", "ASRSupport"],
         path: "Sources/Engines/SonioxASR"
     ),
     .executableTarget(
@@ -60,7 +60,7 @@ var targets: [Target] = [
 products.append(.executable(name: "dousha-win", targets: ["DoushaWin"]))
 targets.append(.executableTarget(
     name: "DoushaWin",
-    dependencies: ["DoubaoASR", "ASRSupport", "TalkerCommonSync"],
+    dependencies: ["DoubaoASR", "ASRSupport", "ConcurrencySupport"],
     path: "Sources/Apps/DoushaWin"
 ))
 #else
@@ -83,7 +83,7 @@ targets.append(.executableTarget(
 ))
 targets.append(.testTarget(
     name: "DoushaTests",
-    dependencies: ["Dousha", "DoubaoASR", "SonioxASR", "ASRSupport", "TalkerCommonSync"],
+    dependencies: ["Dousha", "DoubaoASR", "SonioxASR", "ASRSupport", "ConcurrencySupport"],
     path: "Tests/DoushaTests"
 ))
 #endif

@@ -8,7 +8,7 @@ import AVFoundation
 import DoubaoASR
 import SonioxASR
 import ASRSupport
-import TalkerCommonSync
+import ConcurrencySupport
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {

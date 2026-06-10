@@ -1,5 +1,5 @@
 import Foundation
-import TalkerCommonSync
+import ConcurrencySupport
 
 /// Independent, best-effort speech-to-text post-processor. A value type built
 /// per-use from Preferences. On any failure `refine` returns nil so the caller

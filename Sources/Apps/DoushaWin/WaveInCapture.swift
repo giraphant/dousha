@@ -14,7 +14,7 @@
 #if os(Windows)
 import WinSDK
 import Foundation
-import TalkerCommonSync
+import ConcurrencySupport
 
 final class WaveInCapture: @unchecked Sendable {
     struct CaptureError: Error, LocalizedError {

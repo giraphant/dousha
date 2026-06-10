@@ -2,7 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import TalkerCommonSync
+import ConcurrencySupport
 import ASRSupport
 
 /// File-based smoke transcription for the Windows port (QUA-209): WAV in,
