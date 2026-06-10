@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Lightweight connectivity / API-key check for the Settings "测试" button.
 /// Opens a WebSocket, sends the config message, sends an immediate

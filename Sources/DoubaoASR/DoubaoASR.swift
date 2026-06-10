@@ -1,5 +1,7 @@
 import Foundation
-import AVFoundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import TalkerCommonSync
 import ASRSupport
 
@@ -13,7 +15,7 @@ import ASRSupport
 /// Doubao's per-device concurrent quota to fill up after a few fast
 /// sessions; the ~600ms TLS+StartTask cost per call is the price.
 public actor DoubaoASR {
-    private var opusEncoder: OpusEncoder?
+    private var opusEncoder: (any OpusEncoding)?
 
     private var session: URLSession?
     private var ws: URLSessionWebSocketTask?
@@ -255,7 +257,7 @@ public actor DoubaoASR {
         self.deviceId = creds.deviceId
         doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
 
-        self.opusEncoder = try OpusEncoder()
+        self.opusEncoder = try makeOpusEncoder()
         doushaLog("[DoubaoASR] opus encoder ready")
 
         if self.ws == nil {

@@ -1,3 +1,9 @@
+// Darwin-only for now (QUA-209): AVAudioFile does the container work. The
+// Windows port reads WAV (CLI smoke input) rather than writing it; if the
+// Windows shell ever needs capture-to-disk, port this to a pure-Foundation
+// RIFF writer — close() already hand-patches the header, so most of the
+// know-how is below.
+#if canImport(AVFoundation)
 import Foundation
 import AVFoundation
 import TalkerCommonSync
@@ -154,3 +160,4 @@ public final class WavFileWriter {
         }
     }
 }
+#endif
