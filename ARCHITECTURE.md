@@ -14,17 +14,34 @@ TalkerCommonSync          concurrency primitives (SessionGeneration, OneShotChan
         ▼
 ASRSupport                engine-agnostic domain types (PartialTranscript,
         │                 TranscriptionResult, TranscriptFormatter, WavFileWriter,
-        │                 AudioLevel, AudioCapturePaths)
+        │                 AudioLevel, AudioCapturePaths, WavReader)
         ▼
 DoubaoASR    SonioxASR    one streaming WS client each; peers, never import each other
         │         │
         ▼         ▼
-Dousha (app)              UI, hotkeys, capture hub, orchestration, settings
+┌───────────────┬────────────────┬──────────────────┐
+Dousha          DoushaWin        SmokeCLI
+macOS app:      Windows shell    headless smoke
+UI, hotkeys,    (QUA-209):       harness: register /
+capture hub,    tray, hold-to-   ws-probe / transcribe
+orchestration,  talk, waveIn,    against the real
+settings        SendInput        Doubao servers
 ```
+
+Platform model (QUA-209): macOS is tier 1 — the product. Windows is a tier-2
+best-effort build for one user; Mac features are NOT ported by default, and
+`DoushaWin` breaking never blocks Mac work. The one hard cross-platform
+constraint: the four shared targets (TalkerCommonSync, ASRSupport, DoubaoASR,
+SonioxASR) must keep compiling on Windows — CI enforces it.
 
 Rules:
 
-- Lower layers never import higher ones. The two ASR clients are peers.
+- Lower layers never import higher ones. The two ASR clients are peers, and
+  the three entry points never import each other.
+- Shared targets stay platform-neutral via `#if canImport(...)` (capability
+  gates), never `#if os(...)` — the sole exception is the log-directory pick
+  in `Logging.swift`. Platform APIs (AppKit, WinSDK) live only in the entry
+  points under `Apps/` and `Tools/`.
 - Library targets never read `Preferences` (or any app singleton). The app
   snapshots config at recording start and passes it in
   (`SonioxBackend`/`DoubaoBackend` snapshot glossary + language in
@@ -184,19 +201,35 @@ without new evidence.
   size alone.
 - **`MultiEngineBackend`'s helpers stay nested** — they are private to its
   orchestration and their doc comments reference its callback ordering.
+- **`DoushaWin` does not reuse `RecordingController`/`MultiEngineBackend`**
+  (QUA-209). Its ~470-line shell reimplements a much simpler loop on purpose:
+  single engine (Doubao/PCM), no multi-engine routing, no HUD partial router.
+  Extracting a shared cross-platform "app core" buys nothing until Windows
+  needs multiple engines — that day is the trigger to re-evaluate, not before.
 
 ## 6. Directory map & verification discipline
 
+Directories group targets by role, not platform (cross-platform-ness is a
+property of a layer, not a grouping axis):
+
 ```
 Sources/
-  TalkerCommonSync/   concurrency utils (no deps)
-  ASRSupport/         shared ASR domain types + TranscriptFormatter
-  DoubaoASR/          Doubao WS client (protobuf, opus, reconnect, credentials)
-  SonioxASR/          Soniox WS + async-batch client
-  Dousha/             app: AppDelegate wiring, RecordingController,
-                      MultiEngineBackend + AudioTapHub, backends (adapters),
-                      HUD (FloatingHUD*), Settings, hotkey monitors, Preferences
-Tests/DoushaTests/    all tests (one target, @testable imports everything)
+  Common/             bottom of the graph — libraries everything imports
+    TalkerCommonSync/   concurrency utils (no deps)
+    ASRSupport/         shared ASR domain types + TranscriptFormatter
+  Engines/            one streaming ASR client per provider
+    DoubaoASR/          Doubao WS client (protobuf, opus, reconnect, credentials)
+    SonioxASR/          Soniox WS + async-batch client
+  Apps/               user-facing shells, one per platform
+    Dousha/             macOS app: AppDelegate wiring, RecordingController,
+                        MultiEngineBackend + AudioTapHub, backends (adapters),
+                        HUD (FloatingHUD*), Settings, hotkey monitors, Preferences
+    DoushaWin/          Windows shell: tray, hold-to-talk, waveIn, SendInput
+  Tools/              developer-facing executables, never shipped
+    SmokeCLI/           smoke harness — hits the REAL Doubao servers, so it can
+                        never live in Tests/ (suite must stay offline/deterministic)
+Tests/DoushaTests/    all unit tests (one target, @testable imports everything;
+                      macOS-only because it imports the app target)
 ```
 
 Verification for any pipeline change:

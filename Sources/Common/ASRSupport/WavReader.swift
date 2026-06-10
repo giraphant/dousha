@@ -5,7 +5,7 @@ import Foundation
 /// `afconvert`/`ffmpeg`. Pure Foundation so it runs on Windows (WavFileWriter
 /// next door is the AVFoundation-backed, Darwin-only write side).
 ///
-/// Consumers: the Doubao smoke harness (`dousha-cli transcribe`) and the
+/// Consumers: the Doubao smoke harness (`smoke-cli transcribe`) and the
 /// Windows shell's `--doctor --wav` mode, which feeds a WAV through the live
 /// engine when no microphone is available.
 public enum WavReader {

@@ -12,17 +12,22 @@ var products: [Product] = [
     .library(name: "ASRSupport",       targets: ["ASRSupport"]),
     .library(name: "DoubaoASR",        targets: ["DoubaoASR"]),
     .library(name: "SonioxASR",        targets: ["SonioxASR"]),
-    // Headless test harness — builds on every platform; the Windows port's
+    // Headless smoke harness — builds on every platform; the Windows port's
     // smoke-test entry point (QUA-209).
-    .executable(name: "dousha-cli",    targets: ["DoushaCLI"]),
+    .executable(name: "smoke-cli",     targets: ["SmokeCLI"]),
 ]
 
+// Directory layout groups targets by role (not platform):
+//   Sources/Common/   bottom of the graph — libraries everything imports
+//   Sources/Engines/  one streaming ASR client per provider
+//   Sources/Apps/     user-facing shells, one per platform
+//   Sources/Tools/    developer-facing executables, never shipped
 var targets: [Target] = [
-    .target(name: "TalkerCommonSync", path: "Sources/TalkerCommonSync"),
+    .target(name: "TalkerCommonSync", path: "Sources/Common/TalkerCommonSync"),
     .target(
         name: "ASRSupport",
         dependencies: ["TalkerCommonSync"],
-        path: "Sources/ASRSupport",
+        path: "Sources/Common/ASRSupport",
         linkerSettings: [
             .linkedFramework("AVFoundation", .when(platforms: [.macOS]))
         ]
@@ -30,7 +35,7 @@ var targets: [Target] = [
     .target(
         name: "DoubaoASR",
         dependencies: ["TalkerCommonSync", "ASRSupport"],
-        path: "Sources/DoubaoASR",
+        path: "Sources/Engines/DoubaoASR",
         linkerSettings: [
             .linkedFramework("AVFoundation", .when(platforms: [.macOS])),
             .linkedFramework("AudioToolbox", .when(platforms: [.macOS]))
@@ -40,12 +45,12 @@ var targets: [Target] = [
     .target(
         name: "SonioxASR",
         dependencies: ["TalkerCommonSync", "ASRSupport"],
-        path: "Sources/SonioxASR"
+        path: "Sources/Engines/SonioxASR"
     ),
     .executableTarget(
-        name: "DoushaCLI",
+        name: "SmokeCLI",
         dependencies: ["DoubaoASR"],
-        path: "Sources/DoushaCLI"
+        path: "Sources/Tools/SmokeCLI"
     ),
 ]
 
@@ -56,14 +61,14 @@ products.append(.executable(name: "dousha-win", targets: ["DoushaWin"]))
 targets.append(.executableTarget(
     name: "DoushaWin",
     dependencies: ["DoubaoASR", "ASRSupport", "TalkerCommonSync"],
-    path: "Sources/DoushaWin"
+    path: "Sources/Apps/DoushaWin"
 ))
 #else
 products.append(.executable(name: "Dousha", targets: ["Dousha"]))
 targets.append(.executableTarget(
     name: "Dousha",
     dependencies: ["DoubaoASR", "SonioxASR", "ASRSupport"],
-    path: "Sources/Dousha",
+    path: "Sources/Apps/Dousha",
     // dousha (QUA-159): adopts Swift 6 strict concurrency. The UI /
     // controller layer (AppDelegate, FloatingWindow, FloatingHUDModel,
     // AppFocusTracker, the hotkey dispatcher) is @MainActor; the event-tap

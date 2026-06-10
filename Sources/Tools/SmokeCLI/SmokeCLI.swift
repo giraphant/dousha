@@ -1,14 +1,16 @@
 import Foundation
 import DoubaoASR
 
-/// Headless test harness for the Windows port (QUA-209). Not shipped to
-/// end users — exists so the engine pipeline can be exercised on a platform
-/// where the menu-bar app doesn't build yet, over SSH, with no GUI.
+/// Headless smoke harness, born with the Windows port (QUA-209). Not shipped
+/// to end users — exists so the engine pipeline can be exercised on a platform
+/// where the menu-bar app doesn't build yet, over SSH, with no GUI. It hits
+/// the REAL Doubao servers, which is why it lives in Tools/ and not Tests/:
+/// the unit-test suite must stay offline and deterministic.
 ///
 /// Deliberately zero dependencies (no swift-argument-parser): two
 /// subcommands don't justify a package graph change on a brand-new platform.
 @main
-struct DoushaCLI {
+struct SmokeCLI {
     static func main() async {
         let args = Array(CommandLine.arguments.dropFirst())
         switch args.first {
@@ -20,12 +22,12 @@ struct DoushaCLI {
             await transcribe(Array(args.dropFirst()))
         default:
             print("""
-            dousha-cli — headless test harness (QUA-209)
+            smoke-cli — headless smoke harness (QUA-209)
 
             Usage:
-              dousha-cli register                          Acquire/refresh Doubao device credentials.
-              dousha-cli ws-probe                          Connectivity probe: credentials → WebSocket → StartTask ack.
-              dousha-cli transcribe <file.wav> [--format pcm|speech_opus]
+              smoke-cli register                           Acquire/refresh Doubao device credentials.
+              smoke-cli ws-probe                           Connectivity probe: credentials → WebSocket → StartTask ack.
+              smoke-cli transcribe <file.wav> [--format pcm|speech_opus]
                                                            Smoke transcription. WAV must be 16kHz mono s16le.
                                                            --format defaults to speech_opus (needs an encoder, macOS only);
                                                            pcm probes whether the server accepts raw audio.

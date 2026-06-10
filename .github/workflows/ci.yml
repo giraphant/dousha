@@ -1,7 +1,7 @@
 # CI for QUA-209: the Windows dev box is usually powered off, so GitHub
 # Actions is the always-on regression guard for the Windows port.
 #
-# - windows job: core modules + dousha-cli must keep building on Windows.
+# - windows job: core modules + smoke-cli must keep building on Windows.
 #   Package.swift drops the app/test targets on Windows automatically, and
 #   there is no network smoke here — ws-probe/transcribe hit the real Doubao
 #   servers and would register a throwaway device per run.
@@ -28,7 +28,7 @@ jobs:
       - name: Build
         run: swift build
       - name: CLI smoke (usage exits 0, no network)
-        run: .build\debug\dousha-cli.exe
+        run: .build\debug\smoke-cli.exe
 
   macos:
     name: macOS build + tests
