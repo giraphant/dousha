@@ -60,8 +60,8 @@ public final class WavFileWriter {
     /// the writer's internal serial queue.
     ///
     /// Does not throw: write errors (PCM buffer alloc failure, AVAudioFile
-    /// write failure) are logged via `NSLog` and transition the writer into a
-    /// stopped state — subsequent appends are silently swallowed.
+    /// write failure) are logged via `doushaLog` and transition the writer into
+    /// a stopped state — subsequent appends are silently swallowed.
     public func append(int16Samples ptr: UnsafePointer<Int16>, count: Int) {
         // Snapshot synchronously so the caller's buffer can be reused/freed.
         let snapshot = Array(UnsafeBufferPointer(start: ptr, count: count))
