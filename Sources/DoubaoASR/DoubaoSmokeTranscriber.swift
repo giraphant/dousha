@@ -211,13 +211,15 @@ public enum DoubaoSmokeTranscriber {
 /// isn't 16 kHz mono s16le PCM rather than resampling — generate fixtures
 /// with `afconvert`/`ffmpeg`. Pure Foundation so it runs on Windows (the
 /// production WavFileWriter is AVFoundation-backed and Darwin-only).
-enum WavReader {
+/// Public for the Windows shell's `--doctor --wav` mode, which feeds a WAV
+/// through the live engine when no microphone is available.
+public enum WavReader {
     struct WavError: Error, LocalizedError {
         let message: String
         var errorDescription: String? { message }
     }
 
-    static func readPCM(path: String) throws -> Data {
+    public static func readPCM(path: String) throws -> Data {
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         guard data.count > 44,
               data.prefix(4) == Data("RIFF".utf8),

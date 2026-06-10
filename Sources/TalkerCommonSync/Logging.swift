@@ -44,8 +44,17 @@ final class DoushaFileLog: @unchecked Sendable {
     }()
 
     private init() {
+        // macOS: ~/Library/Logs/Dousha. Windows: .libraryDirectory resolves to
+        // nothing useful, so live next to the credential store instead —
+        // %LOCALAPPDATA%\Dousha\Logs (QUA-209).
+        #if os(Windows)
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let dirOrNil = base?.appendingPathComponent("Dousha/Logs", isDirectory: true)
+        #else
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
-        guard let dir = base?.appendingPathComponent("Logs/Dousha", isDirectory: true) else {
+        let dirOrNil = base?.appendingPathComponent("Logs/Dousha", isDirectory: true)
+        #endif
+        guard let dir = dirOrNil else {
             fileURL = nil
             return
         }
