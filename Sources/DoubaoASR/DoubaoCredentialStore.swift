@@ -64,6 +64,12 @@ public actor DoubaoCredentialStore {
     /// diagnostics ("show me where it's stored") and integration tests.
     public nonisolated var fileURLForDiagnostics: URL { fileURL }
 
+    /// Public wrapper for dousha-cli (QUA-209): acquire or refresh
+    /// credentials without exposing the internal `DeviceCredentials` shape.
+    public func ensureCredentialsForDiagnostics() async throws {
+        _ = try await ensureCredentials()
+    }
+
     /// Returns valid credentials, registering and/or refreshing the token as needed.
     ///
     /// Note (QUA-179): the cached `token` is Doubao's opaque ~10-char `app_key`

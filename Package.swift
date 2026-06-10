@@ -12,6 +12,9 @@ var products: [Product] = [
     .library(name: "ASRSupport",       targets: ["ASRSupport"]),
     .library(name: "DoubaoASR",        targets: ["DoubaoASR"]),
     .library(name: "SonioxASR",        targets: ["SonioxASR"]),
+    // Headless test harness — builds on every platform; the Windows port's
+    // smoke-test entry point (QUA-209).
+    .executable(name: "dousha-cli",    targets: ["DoushaCLI"]),
 ]
 
 var targets: [Target] = [
@@ -38,6 +41,11 @@ var targets: [Target] = [
         name: "SonioxASR",
         dependencies: ["TalkerCommonSync", "ASRSupport"],
         path: "Sources/SonioxASR"
+    ),
+    .executableTarget(
+        name: "DoushaCLI",
+        dependencies: ["DoubaoASR"],
+        path: "Sources/DoushaCLI"
     ),
 ]
 
