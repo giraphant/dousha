@@ -89,8 +89,12 @@ actor Recorder {
         guard !recording else { return }
         recording = true
         Tray.setRecording(true)
+        HUD.update(recording: true, text: "正在听…")
         await engine.prepareSession(
-            onPartial: { p in doushaLog("[DoushaWin] partial: \(p.combined)") },
+            onPartial: { p in
+                doushaLog("[DoushaWin] partial: \(p.combined)")
+                HUD.update(recording: true, text: p.combined)
+            },
             onError: { e in doushaLog("[DoushaWin] engine error: \(e.localizedDescription)") }
         )
         // Per-session level meter: a muted/wrong mic shows up in the log as
@@ -108,6 +112,8 @@ actor Recorder {
             engine.cancel()
             recording = false
             Tray.setRecording(false)
+            HUD.update(recording: false, text: "麦克风启动失败")
+            HUD.dismiss(afterMs: 1800)
             return
         }
         capture = cap
@@ -119,14 +125,22 @@ actor Recorder {
         recording = false
         capture?.stop()   // synchronous drain — tail reaches the engine first
         capture = nil
+        let nearSilence = (counter?.peak ?? 0) < 500
         if let meter = counter {
-            doushaLog("[DoushaWin] mic session: \(meter.bytes) bytes, peak=\(meter.peak)\(meter.peak < 500 ? " ⚠️ near-silence" : "")")
+            doushaLog("[DoushaWin] mic session: \(meter.bytes) bytes, peak=\(meter.peak)\(nearSilence ? " ⚠️ near-silence" : "")")
         }
         counter = nil
         engine.stop { result in
             doushaLog("[DoushaWin] final: \(result.text)")
             TextInjector.type(result.text)
             Tray.setRecording(false)
+            if result.text.isEmpty {
+                HUD.update(recording: false,
+                           text: nearSilence ? "没听到声音——检查默认麦克风？" : "（没有识别到内容）")
+            } else {
+                HUD.update(recording: false, text: result.text)
+            }
+            HUD.dismiss(afterMs: 1400)
         }
     }
 }
@@ -274,6 +288,7 @@ func uiThreadMain() {
     gHwnd = hwnd
 
     Tray.add(hwnd: hwnd)
+    HUD.create(hInstance: hInstance)
     let hook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardHook, hInstance, 0)
     if hook == nil {
         doushaLog("[DoushaWin] SetWindowsHookEx failed (\(GetLastError())) — no hotkey!")
