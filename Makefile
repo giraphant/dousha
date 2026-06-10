@@ -43,6 +43,10 @@ build:
 	@cp Resources/AppIcon.icns $(APP_BUNDLE)/Contents/Resources/AppIcon.icns
 	@cp Resources/MenuIcon.png $(APP_BUNDLE)/Contents/Resources/MenuIcon.png
 	@cp -R Resources/*.lproj $(APP_BUNDLE)/Contents/Resources/
+	@# The repo lives under ~/Documents, which iCloud/FileProvider decorates
+	@# with quarantine/provenance/FinderInfo xattrs; cp -R drags them into the
+	@# bundle and codesign rejects such "detritus" (broke the 0.4.0 notarize).
+	@xattr -cr $(APP_BUNDLE)
 	@if security find-identity -v -p codesigning | grep -F "$(CODESIGN_IDENTITY)" >/dev/null 2>&1; then \
 		codesign --force --deep $(CODESIGN_OPTIONS) $(CODESIGN_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(APP_BUNDLE); \
 		echo "Built $(APP_BUNDLE) (signed with: $(CODESIGN_IDENTITY))"; \
