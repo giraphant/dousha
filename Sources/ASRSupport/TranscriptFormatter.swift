@@ -14,12 +14,64 @@ import Foundation
 public enum TranscriptFormatter {
     /// Run the full formatting pipeline. Pure, O(n), idempotent.
     public static func normalize(_ s: String) -> String {
-        // Order: strip stray Chinese-side spaces first, then insert the missing
-        // CJK<->Latin spaces. The two rules key off disjoint character classes
-        // (Chinese punctuation / Han ideographs vs. the CJK<->Latin seam) so they
-        // don't fight, but tidying first keeps the pangu pass reasoning on clean
-        // boundaries.
-        pangu(tightenCJKSpaces(s))
+        // Order: widen stray half-width punctuation first so that, e.g.,
+        // "你好, 世界" becomes "你好， 世界" and the tighten pass then sees a
+        // full-width mark and strips the space. Then strip stray Chinese-side
+        // spaces, then insert the missing CJK<->Latin spaces. The latter two
+        // key off disjoint character classes (Chinese punctuation / Han
+        // ideographs vs. the CJK<->Latin seam) so they don't fight, but tidying
+        // first keeps the pangu pass reasoning on clean boundaries.
+        pangu(tightenCJKSpaces(widenCJKPunctuation(s)))
+    }
+
+    // MARK: - Rule: widen half-width punctuation in Chinese context (QUA-194)
+
+    /// Half-width -> full-width mapping for the sentence marks Soniox sometimes
+    /// emits as ASCII inside Chinese text (its token language-tagging flickers
+    /// at zh/en boundaries).
+    private static let fullWidthPunct: [Character: Character] = [
+        ",": "，", ".": "。", "?": "？", "!": "！", ":": "：", ";": "；",
+    ]
+
+    /// Convert ASCII `, . ? ! : ;` to their full-width forms when they sit in
+    /// Han context — Soniox occasionally returns half-width marks mid-Chinese
+    /// (QUA-194). Deliberately conservative so genuine half-width uses survive:
+    ///   - converts when the previous or next character is a Han ideograph
+    ///     (`你好,世界`, `用Cursor,然后`), so pure English (`Hello, world.`),
+    ///     decimals (`3.5`), thousands separators (`5,000`), and times (`2:30`)
+    ///     are untouched;
+    ///   - `.` additionally requires the next char not be ASCII alphanumeric,
+    ///     so dotted identifiers right after Han (`叫.NET`) keep their dot.
+    /// Han-only context (not kana/Hangul) — those scripts mix with ASCII
+    /// punctuation legitimately.
+    public static func widenCJKPunctuation(_ s: String) -> String {
+        // Fast path: no candidate ASCII punctuation => nothing to widen.
+        // Bytes of , . ? ! : ; in UTF-8 (all single-byte ASCII).
+        let punctBytes: Set<UInt8> = [0x2C, 0x2E, 0x3F, 0x21, 0x3A, 0x3B]
+        guard s.utf8.contains(where: { punctBytes.contains($0) }) else { return s }
+
+        let chars = Array(s)
+        var out = String()
+        out.reserveCapacity(chars.count)
+        for (i, ch) in chars.enumerated() {
+            guard let wide = fullWidthPunct[ch] else {
+                out.append(ch)
+                continue
+            }
+            let prev = i > 0 ? chars[i - 1] : nil
+            let next = i + 1 < chars.count ? chars[i + 1] : nil
+            let prevHan = prev.map(isHan) ?? false
+            let nextHan = next.map(isHan) ?? false
+            let nextAlnum = next.map(isLatinAlnum) ?? false
+            let convert: Bool
+            if ch == "." {
+                convert = nextHan || (prevHan && !nextAlnum)
+            } else {
+                convert = prevHan || nextHan
+            }
+            out.append(convert ? wide : ch)
+        }
+        return out
     }
 
     // MARK: - Rule: strip stray spaces on the Chinese side

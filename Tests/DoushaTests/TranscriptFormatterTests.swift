@@ -62,7 +62,53 @@ final class TranscriptFormatterTests: XCTestCase {
         XCTAssertEqual(TranscriptFormatter.pangu("你好世界"), "你好世界")
     }
 
-    // MARK: - Pipeline: normalize = tighten + pangu
+    // MARK: - Rule: widen half-width punctuation in Han context (QUA-194)
+
+    func test_widensHalfWidthPunctuationAfterHan() {
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("你好,世界"), "你好，世界")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("真的吗?"), "真的吗？")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("好的."), "好的。")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("注意:这里!"), "注意：这里！")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("第一;第二"), "第一；第二")
+    }
+
+    func test_widensPunctuationBeforeHanAfterLatinWord() {
+        // The mark trails a Latin term but the sentence is Chinese.
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("用Cursor,然后写代码"), "用Cursor，然后写代码")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("版本是v2.我觉得可以"), "版本是v2。我觉得可以")
+    }
+
+    func test_widenLeavesPureEnglishAlone() {
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("Hello, world. Really? Yes!"),
+                       "Hello, world. Really? Yes!")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("see: item; done"), "see: item; done")
+    }
+
+    func test_widenLeavesDigitContextAlone() {
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("增长了3.5倍"), "增长了3.5倍")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("写了5,000字"), "写了5,000字")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("时间是2:30吧"), "时间是2:30吧")
+    }
+
+    func test_widenKeepsDotBeforeAsciiIdentifier() {
+        // `.` directly followed by ASCII alnum stays a dot even after Han.
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("我说.NET很好"), "我说.NET很好")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation("去github.com看看"), "去github.com看看")
+    }
+
+    func test_widenIsIdempotent() {
+        let once = TranscriptFormatter.widenCJKPunctuation("你好,世界.")
+        XCTAssertEqual(TranscriptFormatter.widenCJKPunctuation(once), once)
+    }
+
+    func test_normalizeWidensThenStripsTrailingSpace() {
+        // Half-width comma + space after Han: widen first, then the tighten
+        // pass sees a full-width mark and strips the space.
+        XCTAssertEqual(TranscriptFormatter.normalize("你好, 世界"), "你好，世界")
+        XCTAssertEqual(TranscriptFormatter.normalize("可以的. 然后呢?"), "可以的。然后呢？")
+    }
+
+    // MARK: - Pipeline: normalize = widen + tighten + pangu
 
     func test_normalizeStripsBadSpacesAndAddsMissingOnes() {
         // The real reproduced Soniox case: stray space after 。 plus glued strip掉.
