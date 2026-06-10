@@ -16,16 +16,46 @@ struct DoushaCLI {
             await register()
         case "ws-probe":
             await wsProbe()
+        case "transcribe":
+            await transcribe(Array(args.dropFirst()))
         default:
             print("""
             dousha-cli — headless test harness (QUA-209)
 
             Usage:
-              dousha-cli register   Acquire/refresh Doubao device credentials and print the cache path.
-              dousha-cli ws-probe   Full connectivity probe: credentials → WebSocket → StartTask ack.
+              dousha-cli register                          Acquire/refresh Doubao device credentials.
+              dousha-cli ws-probe                          Connectivity probe: credentials → WebSocket → StartTask ack.
+              dousha-cli transcribe <file.wav> [--format pcm|speech_opus]
+                                                           Smoke transcription. WAV must be 16kHz mono s16le.
+                                                           --format defaults to speech_opus (needs an encoder, macOS only);
+                                                           pcm probes whether the server accepts raw audio.
             """)
             exit(args.isEmpty ? 0 : 2)
         }
+    }
+
+    static func transcribe(_ args: [String]) async {
+        var wavPath: String?
+        var format = "speech_opus"
+        var i = 0
+        while i < args.count {
+            if args[i] == "--format", i + 1 < args.count {
+                format = args[i + 1]
+                i += 2
+            } else {
+                wavPath = args[i]
+                i += 1
+            }
+        }
+        guard let wavPath else {
+            print("transcribe: missing <file.wav>")
+            exit(2)
+        }
+        let report = await DoubaoSmokeTranscriber.run(wavPath: wavPath, audioFormat: format) { line in
+            print(line)
+        }
+        print(report.success ? "SMOKE PASSED" : "SMOKE FAILED")
+        exit(report.success ? 0 : 1)
     }
 
     static func register() async {

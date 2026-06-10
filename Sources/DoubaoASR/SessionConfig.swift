@@ -84,6 +84,10 @@ public enum DoubaoExperimentProfile: String, Sendable {
 ///     stable and match the official IME's shape.
 ///   - profile: Hidden QUA-167 ASR tuning profile. Defaults to `.official` so
 ///     existing callers and release behavior are unchanged.
+///   - audioFormat: `audio_info.format` wire value. The production pipeline
+///     always sends `"speech_opus"`; the Windows-port smoke harness (QUA-209)
+///     probes alternative values (e.g. `"pcm"`) to learn whether the server
+///     accepts un-encoded audio — which would make libopus unnecessary.
 ///
 /// `end_smooth_window_ms` and `use_twopass_retry` mirror the official Doubao IME
 /// client's StartSession config in `.official`. The experiment profiles relax
@@ -91,12 +95,13 @@ public enum DoubaoExperimentProfile: String, Sendable {
 public func buildSessionConfigJSON(
     deviceId: String,
     contextHint: String,
-    profile: DoubaoExperimentProfile = .official
+    profile: DoubaoExperimentProfile = .official,
+    audioFormat: String = "speech_opus"
 ) -> String {
     let payload: [String: Any] = [
         "audio_info": [
             "channel": DoubaoConstants.channels,
-            "format": "speech_opus",
+            "format": audioFormat,
             "sample_rate": DoubaoConstants.sampleRate
         ],
         "enable_punctuation": true,
