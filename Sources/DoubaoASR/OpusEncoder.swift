@@ -1,11 +1,35 @@
 import Foundation
+#if canImport(AVFoundation) && canImport(AudioToolbox)
 import AVFoundation
 import AudioToolbox
+#endif
 
+/// Platform seam (QUA-209): all DoubaoASR needs is "one 10ms Int16 PCM frame
+/// in, one Opus packet out". macOS satisfies it below with AVAudioConverter +
+/// AudioToolbox; the Windows port satisfies it with libopus.
+protocol OpusEncoding {
+    func encode(_ pcmFrame: Data) throws -> Data
+}
+
+/// Returns this platform's Opus encoder.
+func makeOpusEncoder() throws -> any OpusEncoding {
+    #if canImport(AVFoundation) && canImport(AudioToolbox)
+    return try OpusEncoder()
+    #else
+    // Windows: replaced by a libopus-backed encoder in the CLI-smoke milestone.
+    throw OpusEncoderUnavailable()
+    #endif
+}
+
+struct OpusEncoderUnavailable: Error, LocalizedError {
+    var errorDescription: String? { "No Opus encoder is implemented for this platform yet (QUA-209)" }
+}
+
+#if canImport(AVFoundation) && canImport(AudioToolbox)
 /// Encodes 16kHz Int16 mono PCM frames (160 samples / 320 bytes per 10ms frame) into Opus packets
 /// using AVAudioConverter + AudioToolbox's native Opus codec. No third-party dependencies.
 /// Frame size is derived from DoubaoConstants.frameDurationMs, so these figures track that constant.
-final class OpusEncoder {
+final class OpusEncoder: OpusEncoding {
     enum OpusError: Error, LocalizedError {
         case formatBuildFailed
         case converterInitFailed
@@ -107,3 +131,4 @@ final class OpusEncoder {
         return Data(bytes: ptr, count: bytes)
     }
 }
+#endif

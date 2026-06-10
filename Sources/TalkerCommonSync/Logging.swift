@@ -1,7 +1,9 @@
 import Foundation
+#if canImport(os)
 import os
 
 private let _doushaLogger = Logger(subsystem: "com.dousha.app", category: "general")
+#endif
 
 /// Logging helper that forces messages public (non-redacted) in macOS
 /// unified logging. Swift string interpolation defaults to private
@@ -16,7 +18,11 @@ private let _doushaLogger = Logger(subsystem: "com.dousha.app", category: "gener
 /// impossible to diagnose. `fusion.log` only records *successful* fusions, so
 /// it never captured a failure either. This file is the durable record.
 public func doushaLog(_ message: String) {
+    // Unified logging is Darwin-only; on other platforms (Windows port,
+    // QUA-209) the persistent file log below is the sole sink.
+    #if canImport(os)
     _doushaLogger.log("\(message, privacy: .public)")
+    #endif
     DoushaFileLog.shared.append(message)
 }
 
@@ -38,8 +44,17 @@ final class DoushaFileLog: @unchecked Sendable {
     }()
 
     private init() {
+        // macOS: ~/Library/Logs/Dousha. Windows: .libraryDirectory resolves to
+        // nothing useful, so live next to the credential store instead —
+        // %LOCALAPPDATA%\Dousha\Logs (QUA-209).
+        #if os(Windows)
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let dirOrNil = base?.appendingPathComponent("Dousha/Logs", isDirectory: true)
+        #else
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
-        guard let dir = base?.appendingPathComponent("Logs/Dousha", isDirectory: true) else {
+        let dirOrNil = base?.appendingPathComponent("Logs/Dousha", isDirectory: true)
+        #endif
+        guard let dir = dirOrNil else {
             fileURL = nil
             return
         }

@@ -1,5 +1,7 @@
 import Foundation
-import AVFoundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import TalkerCommonSync
 import ASRSupport
 

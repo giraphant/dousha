@@ -1,3 +1,9 @@
+// Darwin-only for now (QUA-209): AVAudioFile does the container work. The
+// Windows port reads WAV (CLI smoke input) rather than writing it; if the
+// Windows shell ever needs capture-to-disk, port this to a pure-Foundation
+// RIFF writer — close() already hand-patches the header, so most of the
+// know-how is below.
+#if canImport(AVFoundation)
 import Foundation
 import AVFoundation
 import TalkerCommonSync
@@ -21,7 +27,13 @@ import TalkerCommonSync
 /// writer without calling `close()` leaves the WAV header un-finalised until
 /// the writer's deinit eventually fires (timing depends on whether pending
 /// writes are still in flight on the background queue).
-public final class WavFileWriter {
+/// `@unchecked Sendable`: the threading contract above IS the Sendable
+/// justification — all mutable state (`file`, `stopped`) is confined to the
+/// private serial `queue`, and `close()` barriers it. Production already
+/// relies on cross-thread use (mic-tap appends + close from the stop path);
+/// newer compilers (macOS CI runner) reject the unannotated cross-thread
+/// capture that older ones allowed.
+public final class WavFileWriter: @unchecked Sendable {
     public enum Error: Swift.Error {
         case formatBuildFailed
     }
@@ -154,3 +166,4 @@ public final class WavFileWriter {
         }
     }
 }
+#endif

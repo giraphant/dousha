@@ -1,5 +1,7 @@
 import Foundation
-import AVFoundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import TalkerCommonSync
 import ASRSupport
 
@@ -13,7 +15,7 @@ import ASRSupport
 /// Doubao's per-device concurrent quota to fill up after a few fast
 /// sessions; the ~600ms TLS+StartTask cost per call is the price.
 public actor DoubaoASR {
-    private var opusEncoder: OpusEncoder?
+    private var opusEncoder: (any OpusEncoding)?
 
     private var session: URLSession?
     private var ws: URLSessionWebSocketTask?
@@ -255,8 +257,16 @@ public actor DoubaoASR {
         self.deviceId = creds.deviceId
         doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
 
-        self.opusEncoder = try OpusEncoder()
+        #if canImport(AVFoundation) && canImport(AudioToolbox)
+        self.opusEncoder = try makeOpusEncoder()
         doushaLog("[DoubaoASR] opus encoder ready")
+        #else
+        // QUA-209: no opus encoder on this platform. The server accepts raw
+        // s16le with audio_info.format="pcm" (smoke-verified byte-identical
+        // transcripts on Windows), so we stream PCM instead — ~32KB/s upstream
+        // vs ~3KB/s opus, acceptable for dictation.
+        doushaLog("[DoubaoASR] no opus encoder on this platform — streaming raw PCM (format=\(Self.wireFormat))")
+        #endif
 
         if self.ws == nil {
             try openWebSocket()
@@ -774,8 +784,19 @@ public actor DoubaoASR {
         }
     }
 
+    /// Wire audio format. Darwin encodes 10ms frames to opus (official-client
+    /// parity); platforms without an encoder stream raw s16le PCM, which the
+    /// server transcribes identically (QUA-209).
+    static let wireFormat: String = {
+        #if canImport(AVFoundation) && canImport(AudioToolbox)
+        return "speech_opus"
+        #else
+        return "pcm"
+        #endif
+    }()
+
     private func sessionConfigJSON(deviceId: String) -> String {
-        buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint, profile: experimentProfile)
+        buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint, profile: experimentProfile, audioFormat: Self.wireFormat)
     }
 
     private func sendFinishSession() async throws {
@@ -1093,11 +1114,20 @@ public actor DoubaoASR {
     }
 
     private func encodeAndSend(_ pcmFrame: Data, state: FrameState) async throws {
+        let payload: Data
+        #if canImport(AVFoundation) && canImport(AudioToolbox)
+        // Darwin: opus. The nil-guard semantics are load-bearing — encoder is
+        // always set after establishSession; a nil here means a frame raced a
+        // teardown and must be dropped, not sent raw.
         guard let encoder = opusEncoder else { return }
-        let opus = try encoder.encode(pcmFrame)
+        payload = try encoder.encode(pcmFrame)
+        #else
+        // QUA-209: raw s16le; the session was opened with format="pcm".
+        payload = pcmFrame
+        #endif
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let msg = AsrMessageBuilder.taskRequest(
-            audio: opus,
+            audio: payload,
             requestId: requestId,
             frameState: state,
             timestampMs: now

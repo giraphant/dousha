@@ -5,7 +5,10 @@
 //  Created by feichao on 2024/5/23.
 //
 
-import SwiftUI
+// Combine-only helper (the SwiftUI import was vestigial); Darwin-gated because
+// Combine doesn't exist on Windows (QUA-209) and the sole caller is the app
+// target's FloatingWindow.
+#if canImport(Combine)
 import Combine
 
 extension Task {
@@ -17,3 +20,4 @@ extension Task {
         set = AnyCancellable(cancel)
     }
 }
+#endif
