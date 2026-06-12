@@ -55,13 +55,18 @@ var targets: [Target] = [
 ]
 
 #if os(Windows)
-// The Windows shell (QUA-209): tray + hold-to-talk hook + waveIn + SendInput.
+// The Windows shell (QUA-209): tray + hold-to-talk hook + waveIn + clipboard paste.
 // Windows-only by construction (WinSDK); absent from the graph elsewhere.
 products.append(.executable(name: "dousha-win", targets: ["DoushaWin"]))
 targets.append(.executableTarget(
     name: "DoushaWin",
     dependencies: ["DoubaoASR", "ASRSupport", "ConcurrencySupport"],
     path: "Sources/Apps/DoushaWin"
+))
+targets.append(.testTarget(
+    name: "DoushaWinTests",
+    dependencies: ["DoushaWin"],
+    path: "Tests/DoushaWinTests"
 ))
 #else
 products.append(.executable(name: "Dousha", targets: ["Dousha"]))

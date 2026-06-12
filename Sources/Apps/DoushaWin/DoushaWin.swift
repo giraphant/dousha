@@ -1,5 +1,5 @@
 // Dousha Windows shell (QUA-209): tray icon + hold-to-talk hotkey + waveIn
-// capture + SendInput injection around the cross-platform DoubaoASR engine.
+// capture + clipboard paste insertion around the cross-platform DoubaoASR engine.
 //
 // One cohesive file on purpose (QUA-207 taste): config, recorder
 // orchestration, Win32 plumbing, and the --doctor self-test all read top to
@@ -94,9 +94,14 @@ struct WinConfig: Codable {
 /// stop order: drain capture first, THEN finish the engine.
 actor Recorder {
     private let engine = DoubaoASR()
+    private let textInjector: TextInjector
     private var capture: WaveInCapture?
     private var counter: ByteCounter?
     private var recording = false
+
+    init(textInjector: TextInjector) {
+        self.textInjector = textInjector
+    }
 
     func start() async {
         guard !recording else { return }
@@ -143,9 +148,10 @@ actor Recorder {
             doushaLog("[DoushaWin] mic session: \(meter.bytes) bytes, peak=\(meter.peak)\(nearSilence ? " ⚠️ near-silence" : "")")
         }
         counter = nil
+        let textInjector = textInjector
         engine.stop { result in
             doushaLog("[DoushaWin] final: \(result.text)")
-            TextInjector.type(result.text)
+            textInjector.type(result.text)
             Tray.setRecording(false)
             if result.text.isEmpty {
                 HUD.update(recording: false,
@@ -160,9 +166,9 @@ actor Recorder {
 
 // MARK: - Globals shared with C callbacks
 // Window procs and LL-hook procs are C function pointers — no captures — so
-// the shell state they need lives here. All of it is either set once before
-// the UI thread starts (gConfig, gRecorder) or touched only on the UI thread
-// (gHwnd, gKeyIsDown, the tray data).
+// the shell state they need lives here. gConfig is set before the UI thread
+// starts; gRecorder/gHwnd are initialized once on the UI thread before the
+// hook is installed; the remaining tray and key state stays on that thread.
 
 nonisolated(unsafe) var gConfig = WinConfig()
 nonisolated(unsafe) var gRecorder: Recorder?
@@ -409,6 +415,7 @@ func uiThreadMain() {
         exit(1)
     }
     gHwnd = hwnd
+    gRecorder = Recorder(textInjector: TextInjector(owner: hwnd))
 
     Tray.add(hwnd: hwnd)
     HUD.create(hInstance: hInstance)
@@ -439,7 +446,7 @@ func uiThreadMain() {
 /// `dousha-win --doctor`: staged self-test printing to the console —
 /// network probe, then a real 5-second mic recording through the full
 /// engine path. Run it in an interactive session (audio devices and
-/// SendInput are not available over a bare SSH service session).
+/// clipboard and SendInput are not available over a bare SSH service session).
 ///
 /// `--doctor --wav file.wav` replaces the mic with a 16kHz mono s16le WAV
 /// streamed through the SAME live engine (the actor, not the smoke
@@ -583,7 +590,6 @@ struct DoushaWin {
         }
 
         gConfig = WinConfig.load()
-        gRecorder = Recorder()
         DoubaoCredentialStore.shared.warmup()   // first PTT shouldn't pay registration latency
 
         let ui = Thread { uiThreadMain() }
