@@ -61,7 +61,14 @@ products.append(.executable(name: "dousha-win", targets: ["DoushaWin"]))
 targets.append(.executableTarget(
     name: "DoushaWin",
     dependencies: ["DoubaoASR", "ASRSupport", "ConcurrencySupport"],
-    path: "Sources/Apps/DoushaWin"
+    path: "Sources/Apps/DoushaWin",
+    linkerSettings: [
+        // Precompiled by llvm-rc from Resources/Windows/DoushaWin.rc.
+        // COFF .res files are architecture-neutral and link directly into
+        // the PE, so both local SwiftPM builds and GitHub packaging get the
+        // Explorer/tray icon without a build-tool plugin.
+        .unsafeFlags(["Resources/Windows/DoushaWin.res"])
+    ]
 ))
 targets.append(.testTarget(
     name: "DoushaWinTests",

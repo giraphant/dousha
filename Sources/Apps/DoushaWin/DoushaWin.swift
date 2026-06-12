@@ -183,25 +183,127 @@ let MENU_RELOAD_CONFIG: UINT_PTR = 3
 let MENU_RESET_DOUBAO: UINT_PTR = 4
 let MENU_ABOUT: UINT_PTR = 5
 let MENU_QUIT: UINT_PTR = 99
+let DOUSHA_ICON_RESOURCE_ID = 101 // Keep in sync with Resources/Windows/DoushaWin.rc.
+
+typealias GetDpiForWindowProc = @convention(c) (HWND?) -> UINT
+typealias GetSystemMetricsForDpiProc = @convention(c) (Int32, UINT) -> Int32
+
+/// The notification area lives on Shell_TrayWnd. Querying that window avoids
+/// changing this process's DPI awareness, which would also resize the
+/// fixed-pixel HUD. The APIs are resolved dynamically so older Windows builds
+/// keep the existing system-metric fallback instead of failing at load time.
+func trayIconSize() -> (width: Int32, height: Int32) {
+    let fallback = (
+        width: GetSystemMetrics(SM_CXSMICON),
+        height: GetSystemMetrics(SM_CYSMICON)
+    )
+
+    let user32 = "user32.dll".withCString(encodedAs: UTF16.self) {
+        GetModuleHandleW($0)
+    }
+    let taskbar = "Shell_TrayWnd".withCString(encodedAs: UTF16.self) {
+        FindWindowW($0, nil)
+    }
+    guard let user32, let taskbar else { return fallback }
+
+    let getDpiAddress = "GetDpiForWindow".withCString {
+        GetProcAddress(user32, $0)
+    }
+    let getMetricAddress = "GetSystemMetricsForDpi".withCString {
+        GetProcAddress(user32, $0)
+    }
+    guard let getDpiAddress, let getMetricAddress else { return fallback }
+
+    let getDpi = unsafeBitCast(getDpiAddress, to: GetDpiForWindowProc.self)
+    let getMetric = unsafeBitCast(getMetricAddress, to: GetSystemMetricsForDpiProc.self)
+    let dpi = getDpi(taskbar)
+    guard dpi > 0 else { return fallback }
+
+    let width = getMetric(SM_CXSMICON, dpi)
+    let height = getMetric(SM_CYSMICON, dpi)
+    guard width > 0, height > 0 else { return fallback }
+    doushaLog("[DoushaWin] tray icon: \(width)x\(height) px at taskbar DPI \(dpi)")
+    return (width, height)
+}
+
+/// Loads one size from the executable's multi-image icon resource. The ICO
+/// carries the common tray/window sizes, and Windows selects the best frame
+/// for the current system metrics. LR_SHARED keeps Windows responsible for
+/// the returned handle's lifetime.
+func loadDoushaIcon(hInstance: HMODULE?, width: Int32, height: Int32) -> HICON {
+    if let handle = LoadImageW(
+        hInstance,
+        UnsafePointer<WCHAR>(bitPattern: DOUSHA_ICON_RESOURCE_ID),
+        UINT(IMAGE_ICON),
+        width,
+        height,
+        UINT(LR_DEFAULTCOLOR | LR_SHARED)
+    ), let icon = HICON(bitPattern: Int(bitPattern: handle)) {
+        return icon
+    }
+
+    let resourceError = GetLastError()
+    if let fallback = LoadIconW(nil, UnsafePointer<WCHAR>(bitPattern: 32512)) { // IDI_APPLICATION
+        doushaLog("[DoushaWin] embedded icon load failed (\(resourceError)); using IDI_APPLICATION")
+        return fallback
+    }
+
+    doushaLog("[DoushaWin] application icon load failed (resource=\(resourceError), fallback=\(GetLastError()))")
+    exit(1)
+}
+
+/// Loads a size-specific tray icon without LR_SHARED. The returned HICON is
+/// always owned by the caller and must be released with DestroyIcon.
+func loadDoushaTrayIcon(hInstance: HMODULE?, width: Int32, height: Int32) -> HICON {
+    if let handle = LoadImageW(
+        hInstance,
+        UnsafePointer<WCHAR>(bitPattern: DOUSHA_ICON_RESOURCE_ID),
+        UINT(IMAGE_ICON),
+        width,
+        height,
+        UINT(LR_DEFAULTCOLOR)
+    ), let icon = HICON(bitPattern: Int(bitPattern: handle)) {
+        return icon
+    }
+
+    let resourceError = GetLastError()
+    if let sharedFallback = LoadIconW(nil, UnsafePointer<WCHAR>(bitPattern: 32512)), // IDI_APPLICATION
+       let ownedFallback = CopyIcon(sharedFallback) {
+        doushaLog("[DoushaWin] embedded tray icon load failed (\(resourceError)); using IDI_APPLICATION")
+        return ownedFallback
+    }
+
+    doushaLog("[DoushaWin] tray icon load failed (resource=\(resourceError), fallback=\(GetLastError()))")
+    exit(1)
+}
 
 // MARK: - Tray icon
 
 enum Tray {
     nonisolated(unsafe) static var nid = NOTIFYICONDATAW()
+    nonisolated(unsafe) static var ownedIcon: HICON?
 
-    static func add(hwnd: HWND) {
+    static func add(hwnd: HWND, ownedIcon icon: HICON) {
+        ownedIcon = icon
         nid.cbSize = DWORD(MemoryLayout<NOTIFYICONDATAW>.size)
         nid.hWnd = hwnd
         nid.uID = 1
         nid.uFlags = UINT(NIF_MESSAGE | NIF_ICON | NIF_TIP)
         nid.uCallbackMessage = WMAPP_TRAY
-        nid.hIcon = LoadIconW(nil, UnsafePointer<WCHAR>(bitPattern: 32512)) // IDI_APPLICATION
+        nid.hIcon = icon
         setTip("Dousha — 按住 \(gConfig.hotkey) 说话")
-        Shell_NotifyIconW(DWORD(NIM_ADD), &nid)
+        if !Shell_NotifyIconW(DWORD(NIM_ADD), &nid) {
+            doushaLog("[DoushaWin] Shell_NotifyIcon NIM_ADD failed (\(GetLastError()))")
+        }
     }
 
     static func remove() {
         Shell_NotifyIconW(DWORD(NIM_DELETE), &nid)
+        if let ownedIcon {
+            DestroyIcon(ownedIcon)
+            self.ownedIcon = nil
+            nid.hIcon = nil
+        }
     }
 
     /// Thread-safe: posts to the UI thread; the wndProc does the NIM_MODIFY.
@@ -396,14 +498,27 @@ let keyboardHook: HOOKPROC = { code, wParam, lParam in
 
 func uiThreadMain() {
     let hInstance = GetModuleHandleW(nil)
+    let largeIcon = loadDoushaIcon(
+        hInstance: hInstance,
+        width: GetSystemMetrics(SM_CXICON),
+        height: GetSystemMetrics(SM_CYICON)
+    )
+    let smallIcon = loadDoushaIcon(
+        hInstance: hInstance,
+        width: GetSystemMetrics(SM_CXSMICON),
+        height: GetSystemMetrics(SM_CYSMICON)
+    )
 
-    var wc = WNDCLASSW()
+    var wc = WNDCLASSEXW()
+    wc.cbSize = UINT(MemoryLayout<WNDCLASSEXW>.size)
     wc.lpfnWndProc = wndProc
     wc.hInstance = hInstance
+    wc.hIcon = largeIcon
+    wc.hIconSm = smallIcon
     let hwnd: HWND? = "DoushaWinShell".withCString(encodedAs: UTF16.self) { className -> HWND? in
         wc.lpszClassName = className
-        guard RegisterClassW(&wc) != 0 else {
-            doushaLog("[DoushaWin] RegisterClass failed (\(GetLastError()))")
+        guard RegisterClassExW(&wc) != 0 else {
+            doushaLog("[DoushaWin] RegisterClassEx failed (\(GetLastError()))")
             return nil
         }
         // Hidden top-level window: never shown, exists to receive tray
@@ -417,7 +532,13 @@ func uiThreadMain() {
     gHwnd = hwnd
     gRecorder = Recorder(textInjector: TextInjector(owner: hwnd))
 
-    Tray.add(hwnd: hwnd)
+    let traySize = trayIconSize()
+    let trayIcon = loadDoushaTrayIcon(
+        hInstance: hInstance,
+        width: traySize.width,
+        height: traySize.height
+    )
+    Tray.add(hwnd: hwnd, ownedIcon: trayIcon)
     HUD.create(hInstance: hInstance)
     let hook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardHook, hInstance, 0)
     if hook == nil {

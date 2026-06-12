@@ -1,0 +1,5 @@
+// DoushaWin.ico is generated from Resources/icon.png at
+// 16, 20, 24, 32, 40, 48, 64, 128, and 256 px with alpha preserved.
+#define IDI_DOUSHA 101
+
+IDI_DOUSHA ICON "DoushaWin.ico"
