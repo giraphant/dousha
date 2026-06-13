@@ -55,13 +55,25 @@ var targets: [Target] = [
 ]
 
 #if os(Windows)
-// The Windows shell (QUA-209): tray + hold-to-talk hook + waveIn + SendInput.
+// The Windows shell (QUA-209): tray + hold-to-talk hook + waveIn + clipboard paste.
 // Windows-only by construction (WinSDK); absent from the graph elsewhere.
 products.append(.executable(name: "dousha-win", targets: ["DoushaWin"]))
 targets.append(.executableTarget(
     name: "DoushaWin",
     dependencies: ["DoubaoASR", "ASRSupport", "ConcurrencySupport"],
-    path: "Sources/Apps/DoushaWin"
+    path: "Sources/Apps/DoushaWin",
+    linkerSettings: [
+        // Precompiled by llvm-rc from Resources/Windows/DoushaWin.rc.
+        // COFF .res files are architecture-neutral and link directly into
+        // the PE, so both local SwiftPM builds and GitHub packaging get the
+        // Explorer/tray icon without a build-tool plugin.
+        .unsafeFlags(["Resources/Windows/DoushaWin.res"])
+    ]
+))
+targets.append(.testTarget(
+    name: "DoushaWinTests",
+    dependencies: ["DoushaWin"],
+    path: "Tests/DoushaWinTests"
 ))
 #else
 products.append(.executable(name: "Dousha", targets: ["Dousha"]))

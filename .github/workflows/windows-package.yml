@@ -27,14 +27,44 @@ jobs:
           swift-build: 6.3.2-RELEASE
           cache: true
       - uses: actions/checkout@v4
+      - name: Verify generated Windows resource
+        shell: pwsh
+        run: |
+          $rebuilt = Join-Path $env:RUNNER_TEMP 'DoushaWin.res'
+          Push-Location Resources/Windows
+          try {
+            & llvm-rc /FO $rebuilt DoushaWin.rc
+            if ($LASTEXITCODE -ne 0) { throw "llvm-rc exited $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          $expected = (Get-FileHash Resources/Windows/DoushaWin.res -Algorithm SHA256).Hash
+          $actual = (Get-FileHash $rebuilt -Algorithm SHA256).Hash
+          if ($actual -ne $expected) {
+            throw 'DoushaWin.res differs from DoushaWin.rc + DoushaWin.ico; rebuild and commit it'
+          }
       - name: Build (release)
         run: swift build -c release
+      - name: Verify application icon resource
+        shell: pwsh
+        run: |
+          $bin = swift build -c release --show-bin-path
+          $exe = Join-Path $bin 'dousha-win.exe'
+          $resources = & llvm-readobj --coff-resources $exe
+          if ($LASTEXITCODE -ne 0) { throw "llvm-readobj exited $LASTEXITCODE" }
+          if (-not ($resources -match 'Type: GROUP_ICON \(ID 14\)')) {
+            throw 'dousha-win.exe has no GROUP_ICON resource'
+          }
+          if (-not ($resources -match 'Name: \(ID 101\)')) {
+            throw 'dousha-win.exe is missing application icon resource 101'
+          }
       - name: Pack
         shell: pwsh
         run: |
           $dir = 'pkg/Dousha'
           New-Item -ItemType Directory -Force $dir | Out-Null
-          Copy-Item .build/release/dousha-win.exe $dir
+          $bin = swift build -c release --show-bin-path
+          Copy-Item (Join-Path $bin 'dousha-win.exe') $dir
           # The runtime bin is the PATH entry that carries swiftCore.dll —
           # gha-setup-swift put it there so built exes can run.
           $runtime = ($env:Path -split ';') |
