@@ -13,6 +13,7 @@ import ConcurrencySupport
 
 protocol TextInjectorWindowsAPI: AnyObject {
     func openClipboard(owner: HWND?) -> Bool
+    func sleep(milliseconds: DWORD)
     func closeClipboard()
     func emptyClipboard() -> Bool
     func allocateMovableMemory(byteCount: Int) -> HGLOBAL?
@@ -27,6 +28,9 @@ protocol TextInjectorWindowsAPI: AnyObject {
 /// Sendable because the owner HWND is immutable and remains valid for the
 /// process lifetime; it is passed back to Win32 but never dereferenced.
 struct TextInjector: @unchecked Sendable {
+    private static let openClipboardAttemptCount = 5
+    private static let openClipboardRetryDelayMilliseconds = DWORD(10)
+
     private let owner: HWND?
 
     init(owner: HWND?) {
@@ -73,7 +77,7 @@ struct TextInjector: @unchecked Sendable {
         api: TextInjectorWindowsAPI,
         log: (String) -> Void
     ) -> Bool {
-        guard api.openClipboard(owner: owner) else {
+        guard openClipboard(owner: owner, api: api) else {
             log("[TextInjector] OpenClipboard failed (err=\(api.lastError()))")
             return false
         }
@@ -113,6 +117,18 @@ struct TextInjector: @unchecked Sendable {
         }
         ownsMemory = false
         return true
+    }
+
+    private static func openClipboard(owner: HWND?, api: TextInjectorWindowsAPI) -> Bool {
+        for attempt in 0..<openClipboardAttemptCount {
+            if api.openClipboard(owner: owner) {
+                return true
+            }
+            if attempt + 1 < openClipboardAttemptCount {
+                api.sleep(milliseconds: openClipboardRetryDelayMilliseconds)
+            }
+        }
+        return false
     }
 
     static func pasteInputs() -> [INPUT] {
@@ -157,6 +173,10 @@ struct TextInjector: @unchecked Sendable {
 private final class NativeTextInjectorWindowsAPI: TextInjectorWindowsAPI {
     func openClipboard(owner: HWND?) -> Bool {
         OpenClipboard(owner)
+    }
+
+    func sleep(milliseconds: DWORD) {
+        Sleep(milliseconds)
     }
 
     func closeClipboard() {

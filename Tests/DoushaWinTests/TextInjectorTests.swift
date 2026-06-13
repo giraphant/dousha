@@ -29,7 +29,6 @@ final class TextInjectorTests: XCTestCase {
 
     func testClipboardFailurePathsCleanUpWithoutSendingPaste() {
         let cases: [(FailurePoint, [String], Bool)] = [
-            (.open, ["open"], false),
             (.empty, ["open", "empty", "close"], false),
             (.allocate, ["open", "empty", "allocate", "close"], false),
             (.lock, ["open", "empty", "allocate", "lock", "free", "close"], true),
@@ -82,6 +81,36 @@ final class TextInjectorTests: XCTestCase {
         TextInjector.type("text", owner: owner, api: api, log: { _ in })
 
         XCTAssertEqual(api.openedClipboardOwner, owner)
+    }
+
+    func testOpenClipboardRetriesAfterInitialFailureThenPastes() {
+        let api = FakeTextInjectorWindowsAPI()
+        api.openClipboardResults = [false, true]
+
+        TextInjector.type("text", owner: nil, api: api, log: { _ in })
+
+        XCTAssertEqual(
+            api.events,
+            ["open", "sleep", "open", "empty", "allocate", "lock", "unlock", "setData", "close", "sendInput"]
+        )
+        XCTAssertEqual(api.sleepDurations, [10])
+        XCTAssertEqual(api.sentInputBatches.count, 1)
+    }
+
+    func testOpenClipboardStopsAfterRetryLimitWithoutPasting() {
+        let api = FakeTextInjectorWindowsAPI()
+        api.failurePoint = .open
+        var logs: [String] = []
+
+        TextInjector.type("text", owner: nil, api: api, log: { logs.append($0) })
+
+        XCTAssertEqual(
+            api.events,
+            ["open", "sleep", "open", "sleep", "open", "sleep", "open", "sleep", "open"]
+        )
+        XCTAssertEqual(api.sleepDurations, [10, 10, 10, 10])
+        XCTAssertTrue(api.sentInputBatches.isEmpty)
+        XCTAssertEqual(logs, ["[TextInjector] OpenClipboard failed (err=5)"])
     }
 
     func testZeroPasteEventsSentLogsFailureWithoutCleanupOrRetry() {
@@ -148,6 +177,8 @@ public func __allTests() -> [XCTestCaseEntry] {
             ("testSuccessfulSetClipboardDataTransfersOwnershipWithoutFreeingMemory", TextInjectorTests.testSuccessfulSetClipboardDataTransfersOwnershipWithoutFreeingMemory),
             ("testTextContainingNullIsRejectedBeforeOpeningClipboard", TextInjectorTests.testTextContainingNullIsRejectedBeforeOpeningClipboard),
             ("testClipboardOwnerIsPassedToOpenClipboard", TextInjectorTests.testClipboardOwnerIsPassedToOpenClipboard),
+            ("testOpenClipboardRetriesAfterInitialFailureThenPastes", TextInjectorTests.testOpenClipboardRetriesAfterInitialFailureThenPastes),
+            ("testOpenClipboardStopsAfterRetryLimitWithoutPasting", TextInjectorTests.testOpenClipboardStopsAfterRetryLimitWithoutPasting),
             ("testZeroPasteEventsSentLogsFailureWithoutCleanupOrRetry", TextInjectorTests.testZeroPasteEventsSentLogsFailureWithoutCleanupOrRetry),
             ("testPartialPasteDispatchSendsOnlyNecessaryKeyUpCleanup", TextInjectorTests.testPartialPasteDispatchSendsOnlyNecessaryKeyUpCleanup),
             ("testCleanupFailureLogsImmediateErrorWithoutRetrying", TextInjectorTests.testCleanupFailureLogsImmediateErrorWithoutRetrying),
@@ -182,6 +213,8 @@ private final class FakeTextInjectorWindowsAPI: TextInjectorWindowsAPI {
     var didTransferOwnership = false
     var sendResults: [(sent: UINT, error: DWORD)] = []
     var openedClipboardOwner: HWND?
+    var openClipboardResults: [Bool] = []
+    var sleepDurations: [DWORD] = []
 
     private var allocation: UnsafeMutableRawPointer?
     private var allocatedByteCount = 0
@@ -193,7 +226,15 @@ private final class FakeTextInjectorWindowsAPI: TextInjectorWindowsAPI {
     func openClipboard(owner: HWND?) -> Bool {
         events.append("open")
         openedClipboardOwner = owner
+        if !openClipboardResults.isEmpty {
+            return openClipboardResults.removeFirst()
+        }
         return failurePoint != .open
+    }
+
+    func sleep(milliseconds: DWORD) {
+        events.append("sleep")
+        sleepDurations.append(milliseconds)
     }
 
     func closeClipboard() {
