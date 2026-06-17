@@ -133,12 +133,9 @@ final class FloatingWindow {
     }
 
     private func positionAtBottomCenter() {
-        // Show on the screen the user is actually working on, not the menu-bar
-        // ("main") display. Dousha is LSUIElement (no key window), so NSScreen.main
-        // is just the menu-bar screen — it never tracks focus. The cursor's screen
-        // is the best proxy for "where the user is dictating"; fall back to .main.
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        // Prefer the focused app window's display. The cursor can be parked on a
+        // different monitor while the insertion point lives in the working app.
+        let screen = HUDScreenResolver.preferredScreen()
         guard let screen else { return }
         let visible = screen.visibleFrame
         let size = panel.frame.size
