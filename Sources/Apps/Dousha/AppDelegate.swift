@@ -149,16 +149,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// A menu-bar accessory app (`LSUIElement`) gets no main menu by default, so
-    /// the standard ⌘X/⌘C/⌘V/⌘A editing shortcuts have nothing to route to in the
-    /// responder chain — text fields in the Settings window can't cut/copy/paste/
-    /// select-all from the keyboard. Installing a main menu with the standard Edit
-    /// items wires those key equivalents to the first responder. The menu itself
-    /// stays hidden while the app is an accessory; only its shortcuts are live.
+    /// standard shortcuts have nothing to route to. That breaks both Edit actions
+    /// (⌘X/⌘C/⌘V/⌘A in Settings text fields) and app/window actions (⌘Q / ⌘W).
+    /// Installing a small main menu wires those key equivalents into AppKit's
+    /// normal target/action dispatch. The menu itself stays hidden while the app is
+    /// an accessory; only its shortcuts are live.
     private func installMainMenu() {
         let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu(title: "豆沙")
+        appItem.submenu = appMenu
+        let quit = appMenu.addItem(withTitle: "退出豆沙", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
-
         let editMenu = NSMenu(title: "编辑")
         editItem.submenu = editMenu
 
@@ -169,10 +176,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let redo = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
         redo.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "剪切", action: Selector(("cut:")), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "拷贝", action: Selector(("copy:")), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "粘贴", action: Selector(("paste:")), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "全选", action: Selector(("selectAll:")), keyEquivalent: "a")
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let windowItem = NSMenuItem()
+        mainMenu.addItem(windowItem)
+        let windowMenu = NSMenu(title: "窗口")
+        windowItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
     }
