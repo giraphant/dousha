@@ -28,12 +28,20 @@ actor AudioTapHub {
     /// Consumes the native-format mic buffer (Apple feeds `SFSpeech` directly).
     typealias BufferSink = @Sendable (AVAudioPCMBuffer) -> Void
 
+    private static let captureStartAttempts = 3
+    private static let captureRetryDelayNanoseconds: UInt64 = 100_000_000
+    private static let configurationDebounceNanoseconds: UInt64 = 100_000_000
+
     private let audioEngine = AVAudioEngine()
     private let pcmSinks: [PCMSink]
     private let bufferSinks: [BufferSink]
     private let wantsWAV: Bool
     private var wavWriter: WavFileWriter?
     private var capturing = false
+    private var levelSink: (@Sendable (Float) -> Void)?
+    private var configObserver: NSObjectProtocol?
+    private var restartPending = false
+    private var captureGeneration = 0
 
     /// - Parameters:
     ///   - pcmSinks: int16-PCM consumers (Doubao/Soniox `ingest`).
@@ -49,8 +57,16 @@ actor AudioTapHub {
     /// Opens the shared WAV, installs the mic tap and starts the engine. Must be
     /// called AFTER every engine has reset its session state (PCM arriving before
     /// `isRunning` flips would be dropped → lost opening words).
-    func startCapture(onLevel: @escaping @Sendable (Float) -> Void) throws {
+    ///
+    /// Startup is retried because macOS can briefly reconfigure the default input
+    /// device while another audio app / Bluetooth profile is already active. Each
+    /// attempt re-reads the live input format and rebuilds the converter.
+    func startCapture(onLevel: @escaping @Sendable (Float) -> Void) async throws {
         guard !capturing else { return }
+
+        captureGeneration += 1
+        levelSink = onLevel
+        restartPending = false
 
         if wantsWAV {
             try? FileManager.default.removeItem(at: AudioCapturePaths.sharedWAV)
@@ -64,8 +80,93 @@ actor AudioTapHub {
             }
         }
 
+        registerConfigurationObserver()
+
+        do {
+            let inputFormat = try await startWithRetry(onLevel: onLevel, label: "capture start")
+            capturing = true
+            doushaLog("[AudioTapHub] capture started inputFormat=\(inputFormat) pcmSinks=\(pcmSinks.count) bufferSinks=\(bufferSinks.count) wav=\(wavWriter != nil)")
+        } catch {
+            unregisterConfigurationObserver()
+            levelSink = nil
+            restartPending = false
+            removeTapStopAndReset()
+            closeSharedWAV(deleteFile: true)
+            throw error
+        }
+    }
+
+    /// Removes the tap, then holds a short drain window so the last buffers the
+    /// tap dispatched (the tail the user spoke microseconds before releasing)
+    /// land on the engine actors' `pcmBuffer` before the engines flush + finish.
+    /// Mirrors the old per-actor `stopDrainWindow`; the WAV is closed afterward
+    /// so it's readable immediately (Soniox async upload).
+    func stopCapture() async {
+        guard capturing else { return }
+        capturing = false
+        captureGeneration += 1
+        restartPending = false
+        levelSink = nil
+        unregisterConfigurationObserver()
+        removeTapStopAndReset()
+        // Wall-clock drain: lets the audio thread's last dispatched ingest Tasks
+        // get created + processed on each engine actor. The engines additionally
+        // yield at the top of their finish() to flush their own queue.
+        for _ in 0..<4 { await Task.yield() }
+        try? await Task.sleep(nanoseconds: 50_000_000)  // 50 ms drain window for the tail buffers
+        closeSharedWAV(deleteFile: false)
+        doushaLog("[AudioTapHub] capture stopped + drained")
+    }
+
+    /// Aborts capture and discards the WAV. No drain — the recording is being
+    /// thrown away.
+    func cancelCapture() {
+        captureGeneration += 1
+        capturing = false
+        restartPending = false
+        levelSink = nil
+        unregisterConfigurationObserver()
+        removeTapStopAndReset()
+        closeSharedWAV(deleteFile: true)
+        doushaLog("[AudioTapHub] capture cancelled")
+    }
+
+    private func startWithRetry(onLevel: @escaping @Sendable (Float) -> Void,
+                                label: String,
+                                generation: Int? = nil) async throws -> String {
+        var lastError: Error?
+        for attempt in 1...Self.captureStartAttempts {
+            try ensureCurrent(generation: generation)
+            removeTapStopAndReset()
+            do {
+                let inputFormat = try installTapAndStart(onLevel: onLevel)
+                if attempt > 1 {
+                    doushaLog("[AudioTapHub] \(label) recovered on attempt \(attempt)")
+                }
+                return inputFormat
+            } catch {
+                lastError = error
+                doushaLog("[AudioTapHub] \(label) attempt \(attempt) failed: \(error.localizedDescription)")
+                removeTapStopAndReset()
+                guard attempt < Self.captureStartAttempts else { break }
+                try ensureCurrent(generation: generation)
+                try? await Task.sleep(nanoseconds: Self.captureRetryDelayNanoseconds)
+            }
+        }
+        try ensureCurrent(generation: generation)
+        throw lastError ?? NSError(domain: "AudioTapHub", code: -2,
+                                   userInfo: [NSLocalizedDescriptionKey: "Failed to start mic capture"])
+    }
+
+    private func installTapAndStart(onLevel: @escaping @Sendable (Float) -> Void) throws -> String {
         let inputNode = audioEngine.inputNode
         let inFormat = inputNode.outputFormat(forBus: 0)
+        let inputDescription = describe(format: inFormat)
+
+        guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
+            throw NSError(domain: "AudioTapHub", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid mic input format: \(inputDescription)"])
+        }
 
         guard let target = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                          sampleRate: 16_000, channels: 1,
@@ -130,41 +231,81 @@ actor AudioTapHub {
 
         audioEngine.prepare()
         try audioEngine.start()
-        capturing = true
-        doushaLog("[AudioTapHub] capture started pcmSinks=\(pcmSinks.count) bufferSinks=\(bufferSinks.count) wav=\(capturedWAV != nil)")
+        return inputDescription
     }
 
-    /// Removes the tap, then holds a short drain window so the last buffers the
-    /// tap dispatched (the tail the user spoke microseconds before releasing)
-    /// land on the engine actors' `pcmBuffer` before the engines flush + finish.
-    /// Mirrors the old per-actor `stopDrainWindow`; the WAV is closed afterward
-    /// so it's readable immediately (Soniox async upload).
-    func stopCapture() async {
+    private func registerConfigurationObserver() {
+        unregisterConfigurationObserver()
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: nil
+        ) { [weak self] _ in
+            Task { await self?.handleConfigurationChange() }
+        }
+    }
+
+    private func unregisterConfigurationObserver() {
+        if let configObserver {
+            NotificationCenter.default.removeObserver(configObserver)
+            self.configObserver = nil
+        }
+    }
+
+    private func handleConfigurationChange() async {
         guard capturing else { return }
-        capturing = false
-        if audioEngine.isRunning {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            audioEngine.stop()
+        guard !restartPending else { return }
+        restartPending = true
+        let generation = captureGeneration
+        doushaLog("[AudioTapHub] engine configuration changed — scheduling capture restart")
+
+        try? await Task.sleep(nanoseconds: Self.configurationDebounceNanoseconds)
+
+        guard capturing, generation == captureGeneration, let onLevel = levelSink else {
+            if generation == captureGeneration { restartPending = false }
+            return
         }
-        // Wall-clock drain: lets the audio thread's last dispatched ingest Tasks
-        // get created + processed on each engine actor. The engines additionally
-        // yield at the top of their finish() to flush their own queue.
-        for _ in 0..<4 { await Task.yield() }
-        try? await Task.sleep(nanoseconds: 50_000_000)  // 50 ms drain window for the tail buffers
-        if let wav = wavWriter { try? wav.close(); wavWriter = nil }
-        doushaLog("[AudioTapHub] capture stopped + drained")
+
+        do {
+            let inputFormat = try await startWithRetry(onLevel: onLevel,
+                                                       label: "capture restart",
+                                                       generation: generation)
+            if capturing, generation == captureGeneration {
+                doushaLog("[AudioTapHub] capture restart succeeded inputFormat=\(inputFormat)")
+            }
+        } catch is CancellationError {
+            // Stop/cancel won the race while the debounced restart was pending.
+        } catch {
+            if capturing, generation == captureGeneration {
+                doushaLog("[AudioTapHub] capture restart failed: \(error.localizedDescription)")
+            }
+        }
+
+        if generation == captureGeneration { restartPending = false }
     }
 
-    /// Aborts capture and discards the WAV. No drain — the recording is being
-    /// thrown away.
-    func cancelCapture() {
-        if capturing, audioEngine.isRunning {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            audioEngine.stop()
+    private func ensureCurrent(generation: Int?) throws {
+        guard let generation else { return }
+        guard capturing, generation == captureGeneration else { throw CancellationError() }
+    }
+
+    private func removeTapStopAndReset() {
+        audioEngine.inputNode.removeTap(onBus: 0)
+        if audioEngine.isRunning { audioEngine.stop() }
+        audioEngine.reset()
+    }
+
+    private func closeSharedWAV(deleteFile: Bool) {
+        if let wav = wavWriter {
+            try? wav.close()
+            wavWriter = nil
         }
-        capturing = false
-        if let wav = wavWriter { try? wav.close(); wavWriter = nil }
-        try? FileManager.default.removeItem(at: AudioCapturePaths.sharedWAV)
-        doushaLog("[AudioTapHub] capture cancelled")
+        if deleteFile {
+            try? FileManager.default.removeItem(at: AudioCapturePaths.sharedWAV)
+        }
+    }
+
+    private func describe(format: AVAudioFormat) -> String {
+        "sampleRate=\(Int(format.sampleRate)) channels=\(format.channelCount) commonFormat=\(format.commonFormat) interleaved=\(format.isInterleaved)"
     }
 }
