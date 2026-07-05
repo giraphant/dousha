@@ -233,7 +233,21 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             }
         }
         let wantsWAV = prefs.sonioxMode == .async && entries.contains { $0.engine == .soniox }
-        let hub = AudioTapHub(pcmSinks: pcmSinks, bufferSinks: bufferSinks, wantsWAV: wantsWAV)
+        let audioControls = RecordingAudioControls(
+            muteSystemAudio: prefs.muteSystemAudioDuringRecording,
+            pauseMedia: prefs.pauseMediaDuringRecording
+        )
+        let hub = AudioTapHub(pcmSinks: pcmSinks,
+                              bufferSinks: bufferSinks,
+                              wantsWAV: wantsWAV,
+                              // The AVAudioEngine Voice Processing route is known-broken
+                              // on real macOS setups with virtual/aggregate audio devices:
+                              // it can switch capture to multi-channel or system playback.
+                              // Keep the plumbing for future lower-level experiments, but
+                              // never enable it from persisted user defaults in production.
+                              voiceProcessingEnabled: false,
+                              microphoneSelection: prefs.microphoneSelection,
+                              audioControls: audioControls)
 
         return MultiEngineBackend(entries: entries, primary: primary, router: router, hub: hub)
     }

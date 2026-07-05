@@ -68,6 +68,14 @@ final class Preferences: @unchecked Sendable {
         static let refineMode                = "refineMode"
         static let showDockIcon              = "showDockIcon"
         static let showMenuBarIcon           = "showMenuBarIcon"
+        static let voiceProcessingEnabled    = "voiceProcessingEnabled"
+        // 麦克风选择：useSystemDefault=true 时沿用 macOS 默认输入设备；否则按
+        // priorityUIDs 的顺序挑选第一个可用设备，找不到再退回推荐排序。
+        static let microphoneUseSystemDefault = "microphoneUseSystemDefault"
+        static let microphonePriorityUIDs     = "microphonePriorityUIDs"
+        // 录音时背景音频控制：静音系统输出 / 暂停媒体。
+        static let muteSystemAudioDuringRecording = "muteSystemAudioDuringRecording"
+        static let pauseMediaDuringRecording      = "pauseMediaDuringRecording"
     }
 
     /// Stored value used to represent a disabled cancel hotkey. Picked because
@@ -92,7 +100,17 @@ final class Preferences: @unchecked Sendable {
             Keys.refineMode:               RefineMode.immediate.rawValue,
             // Menu-bar accessory app by default: no Dock icon, status item shown.
             Keys.showDockIcon:             false,
-            Keys.showMenuBarIcon:          true
+            Keys.showMenuBarIcon:          true,
+            // Experimental: Apple's Voice Processing can switch macOS onto a
+            // hidden aggregate device on some setups, so keep raw mic capture as
+            // the safe default.
+            Keys.voiceProcessingEnabled:   false,
+            Keys.microphoneUseSystemDefault: true,
+            Keys.microphonePriorityUIDs:     [String](),
+            // Spokenly-style background-audio controls. Muting is a safe default for
+            // dictation; media pause is opt-in because it sends a global media key.
+            Keys.muteSystemAudioDuringRecording: true,
+            Keys.pauseMediaDuringRecording:      false
         ])
     }
 
@@ -104,6 +122,37 @@ final class Preferences: @unchecked Sendable {
     var showMenuBarIcon: Bool {
         get { defaults.bool(forKey: Keys.showMenuBarIcon) }
         set { defaults.set(newValue, forKey: Keys.showMenuBarIcon) }
+    }
+
+    var voiceProcessingEnabled: Bool {
+        // Deprecated / disabled: the AVAudioEngine Voice Processing path can route
+        // capture to hidden aggregate/system-playback devices. Ignore stale stored
+        // `true` values so an older build's setting cannot re-enable it.
+        get { false }
+        set { defaults.set(false, forKey: Keys.voiceProcessingEnabled) }
+    }
+
+    var microphoneSelection: MicrophoneSelectionPreference {
+        get {
+            MicrophoneSelectionPreference(
+                useSystemDefault: defaults.bool(forKey: Keys.microphoneUseSystemDefault),
+                priorityUIDs: defaults.stringArray(forKey: Keys.microphonePriorityUIDs) ?? []
+            )
+        }
+        set {
+            defaults.set(newValue.useSystemDefault, forKey: Keys.microphoneUseSystemDefault)
+            defaults.set(newValue.priorityUIDs, forKey: Keys.microphonePriorityUIDs)
+        }
+    }
+
+    var muteSystemAudioDuringRecording: Bool {
+        get { defaults.bool(forKey: Keys.muteSystemAudioDuringRecording) }
+        set { defaults.set(newValue, forKey: Keys.muteSystemAudioDuringRecording) }
+    }
+
+    var pauseMediaDuringRecording: Bool {
+        get { defaults.bool(forKey: Keys.pauseMediaDuringRecording) }
+        set { defaults.set(newValue, forKey: Keys.pauseMediaDuringRecording) }
     }
 
     var language: String {

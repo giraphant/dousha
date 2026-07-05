@@ -29,6 +29,7 @@ enum SettingsWindowFactory {
 /// the menu bar; these panes are pure configuration.
 private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case general
+    case audio
     case model
     case glossary
     case enhance
@@ -38,6 +39,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     var title: String {
         switch self {
         case .general:  return "常规设置"
+        case .audio:    return "音频设置"
         case .model:    return "听写模型"
         case .glossary: return "个性词库"
         case .enhance:  return "智能增强"
@@ -47,6 +49,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     var symbol: String {
         switch self {
         case .general:  return "gearshape"
+        case .audio:    return "mic"
         case .model:    return "waveform"
         case .glossary: return "character.book.closed"
         case .enhance:  return "sparkles"
@@ -93,6 +96,15 @@ struct SettingsView: View {
     @State private var sonioxStatusIsError: Bool = false
     @State private var isTestingSoniox: Bool = false
 
+    // 音频设置 — 麦克风选择
+    @State private var microphoneUseSystemDefault: Bool = Preferences.shared.microphoneSelection.useSystemDefault
+    @State private var microphonePriorityUIDs: [String] = Preferences.shared.microphoneSelection.priorityUIDs
+    @State private var availableMicrophones: [AudioInputDevice] = []
+
+    // 音频设置 — 录音时背景音频控制
+    @State private var muteSystemAudioDuringRecording: Bool = Preferences.shared.muteSystemAudioDuringRecording
+    @State private var pauseMediaDuringRecording: Bool = Preferences.shared.pauseMediaDuringRecording
+
     // 听写模型 — 多引擎路由 (QUA-145). The parallel-active set is derived as the
     // union of these three slots, so there's no separate "active" control.
     @State private var chineseEngine: Engine = Preferences.shared.chineseEngine
@@ -135,6 +147,7 @@ struct SettingsView: View {
     private var detail: some View {
         switch selectedPane ?? .general {
         case .general:  generalPane
+        case .audio:    audioPane
         case .model:    modelPane
         case .glossary: glossaryPane
         case .enhance:  enhancePane
@@ -242,6 +255,128 @@ struct SettingsView: View {
         }
         Preferences.shared.activeEngines = active
         NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
+    }
+
+    // MARK: - 麦克风选择
+
+    /// Devices merged with the stored priority list: known devices ordered by
+    /// the saved UIDs, then any remaining devices by the recommended sort. A
+    /// saved UID whose device has since vanished is kept as a placeholder so the
+    /// user's ordering survives a device being unplugged mid-session.
+    private var orderedMicrophones: [AudioInputDevice] {
+        AudioInputDevices.orderedInputDevices(availableMicrophones,
+                                              priorityUIDs: microphonePriorityUIDs)
+    }
+
+    /// The device the next recording will actually open, for the "当前" hint.
+    private var activeMicrophoneName: String? {
+        guard !microphoneUseSystemDefault else {
+            return availableMicrophones.first(where: { $0.isDefaultInput })?.name ?? "系统默认"
+        }
+        return orderedMicrophones.first?.name
+    }
+
+    private func refreshMicrophones() {
+        availableMicrophones = AudioInputDevices.currentInputDevices()
+    }
+
+    private func persistMicrophoneSelection() {
+        Preferences.shared.microphoneSelection = MicrophoneSelectionPreference(
+            useSystemDefault: microphoneUseSystemDefault,
+            priorityUIDs: microphonePriorityUIDs
+        )
+        refreshMicrophones()
+    }
+
+    private func moveMicrophone(_ device: AudioInputDevice, delta: Int) {
+        guard !microphoneUseSystemDefault else { return }
+        var uids = microphonePriorityUIDs
+        // Rebuild the full ordered UID list (priority UIDs first, then the rest)
+        // so a move works even when the row was implicitly added by sort.
+        let ordered = orderedMicrophones.map(\.uid)
+        uids = ordered
+        guard let index = uids.firstIndex(of: device.uid) else { return }
+        let newIndex = index + delta
+        guard newIndex >= 0, newIndex < uids.count else { return }
+        uids.swapAt(index, newIndex)
+        microphonePriorityUIDs = uids
+        persistMicrophoneSelection()
+    }
+
+    @ViewBuilder
+    private func microphoneRow(_ device: AudioInputDevice) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(device.isDefaultInput ? Color.green : Color.gray.opacity(0.3))
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(device.name)
+                Text("\(device.transportDescription) · \(device.inputChannelCount) 通道")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(action: { moveMicrophone(device, delta: -1) }) {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.borderless)
+            .help("上移")
+            Button(action: { moveMicrophone(device, delta: 1) }) {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.borderless)
+            .help("下移")
+        }
+    }
+
+    private var audioPane: some View {
+        Form {
+            Section("麦克风") {
+                Toggle("使用系统默认", isOn: $microphoneUseSystemDefault)
+                    .onChange(of: microphoneUseSystemDefault) { _, _ in persistMicrophoneSelection() }
+
+                if orderedMicrophones.isEmpty {
+                    Text("未找到可用麦克风。")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(orderedMicrophones) { device in
+                        microphoneRow(device)
+                    }
+                    .disabled(microphoneUseSystemDefault)
+                }
+
+                HStack {
+                    Button("刷新设备") { refreshMicrophones() }
+                    Spacer()
+                    if let active = activeMicrophoneName {
+                        Text("当前：\(active)")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text("关闭「使用系统默认」后，豆沙会按上方顺序尝试麦克风；内建或外接麦克风会优先尝试。下一次录音起生效。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section("音频和反馈") {
+                Toggle("录音时静音", isOn: $muteSystemAudioDuringRecording)
+                    .onChange(of: muteSystemAudioDuringRecording) { _, newValue in
+                        Preferences.shared.muteSystemAudioDuringRecording = newValue
+                    }
+                Toggle("录音时暂停媒体", isOn: $pauseMediaDuringRecording)
+                    .onChange(of: pauseMediaDuringRecording) { _, newValue in
+                        Preferences.shared.pauseMediaDuringRecording = newValue
+                    }
+                Text("录音时静音会临时静音系统输出并在结束后恢复；暂停媒体会发送一次全局播放/暂停键。系统语音隔离当前不作为可用选项暴露，避免再次切到系统播放/多通道输入。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+        .task { refreshMicrophones() }
     }
 
     private var modelPane: some View {
