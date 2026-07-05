@@ -36,6 +36,9 @@ actor AudioTapHub {
     private let pcmSinks: [PCMSink]
     private let bufferSinks: [BufferSink]
     private let wantsWAV: Bool
+    private let voiceProcessingEnabled: Bool
+    private let microphoneSelection: MicrophoneSelectionPreference
+    private let audioControls: RecordingAudioControls?
     private var wavWriter: WavFileWriter?
     private var capturing = false
     private var levelSink: (@Sendable (Float) -> Void)?
@@ -48,10 +51,27 @@ actor AudioTapHub {
     ///   - bufferSinks: native-buffer consumers (Apple `ingest`).
     ///   - wantsWAV: write the shared WAV (true whenever a PCM engine is active;
     ///     the WAV is the Soniox-async upload payload).
-    init(pcmSinks: [PCMSink], bufferSinks: [BufferSink], wantsWAV: Bool) {
+    ///   - voiceProcessingEnabled: use Apple's Voice Processing input path when
+    ///     available (noise suppression, echo cancellation, automatic gain).
+    ///   - microphoneSelection: per-recording mic route preference. When the user
+    ///     has pinned a specific device, it is pushed onto the input node's HAL
+    ///     AudioUnit before capture starts, so AVAudioEngine no longer follows
+    ///     whatever device the system default / hidden aggregate resolves to.
+    ///   - audioControls: optional background-audio controls (mute system output /
+    ///     pause media). Held for the lifetime of a recording and restored on stop
+    ///     and cancel regardless of which path tears the capture down.
+    init(pcmSinks: [PCMSink],
+         bufferSinks: [BufferSink],
+         wantsWAV: Bool,
+         voiceProcessingEnabled: Bool = false,
+         microphoneSelection: MicrophoneSelectionPreference = .systemDefault,
+         audioControls: RecordingAudioControls? = nil) {
         self.pcmSinks = pcmSinks
         self.bufferSinks = bufferSinks
         self.wantsWAV = wantsWAV
+        self.voiceProcessingEnabled = voiceProcessingEnabled
+        self.microphoneSelection = microphoneSelection
+        self.audioControls = audioControls
     }
 
     /// Opens the shared WAV, installs the mic tap and starts the engine. Must be
@@ -81,12 +101,14 @@ actor AudioTapHub {
         }
 
         registerConfigurationObserver()
+        audioControls?.begin()
 
         do {
             let inputFormat = try await startWithRetry(onLevel: onLevel, label: "capture start")
             capturing = true
             doushaLog("[AudioTapHub] capture started inputFormat=\(inputFormat) pcmSinks=\(pcmSinks.count) bufferSinks=\(bufferSinks.count) wav=\(wavWriter != nil)")
         } catch {
+            audioControls?.end()
             unregisterConfigurationObserver()
             levelSink = nil
             restartPending = false
@@ -109,6 +131,7 @@ actor AudioTapHub {
         levelSink = nil
         unregisterConfigurationObserver()
         removeTapStopAndReset()
+        audioControls?.end()
         // Wall-clock drain: lets the audio thread's last dispatched ingest Tasks
         // get created + processed on each engine actor. The engines additionally
         // yield at the top of their finish() to flush their own queue.
@@ -127,6 +150,7 @@ actor AudioTapHub {
         levelSink = nil
         unregisterConfigurationObserver()
         removeTapStopAndReset()
+        audioControls?.end()
         closeSharedWAV(deleteFile: true)
         doushaLog("[AudioTapHub] capture cancelled")
     }
@@ -160,7 +184,47 @@ actor AudioTapHub {
 
     private func installTapAndStart(onLevel: @escaping @Sendable (Float) -> Void) throws -> String {
         let inputNode = audioEngine.inputNode
-        let inFormat = inputNode.outputFormat(forBus: 0)
+
+        // Resolve the microphone route BEFORE reading any format or enabling Voice
+        // Processing. Pushing a chosen HAL device onto the input AudioUnit pins
+        // AVAudioEngine to that physical device, so the system default (and any
+        // hidden aggregate / virtual adapter it might otherwise have expanded to)
+        // can no longer change what the tap hears mid-recording. Best-effort: a
+        // failure here falls through to AVAudioEngine's default routing.
+        let micSelection = AudioInputDevices.resolve(microphoneSelection)
+        doushaLog("[AudioTapHub] microphone route resolved \(micSelection.logDescription)")
+        if micSelection.shouldApplyToAudioUnit, micSelection.device != nil {
+            do {
+                try AudioInputDevices.apply(micSelection, to: inputNode)
+            } catch {
+                doushaLog("[AudioTapHub] explicit device apply failed: \(error.localizedDescription) — using AVAudioEngine default routing")
+            }
+        }
+
+        var voiceProcessingActive = false
+        if voiceProcessingEnabled {
+            do {
+                try inputNode.setVoiceProcessingEnabled(true)
+                voiceProcessingActive = true
+                doushaLog("[AudioTapHub] voice processing enabled")
+            } catch {
+                doushaLog("[AudioTapHub] voice processing enable failed: \(error.localizedDescription) — continuing without it")
+            }
+        }
+        // Voice Processing may change the input node format, so sample it only
+        // after the enable attempt and build the converter from that format.
+        var inFormat = inputNode.outputFormat(forBus: 0)
+        if voiceProcessingActive, inFormat.channelCount != 1 {
+            let voiceProcessingFormat = describe(format: inFormat)
+            doushaLog("[AudioTapHub] voice processing produced unsupported format=\(voiceProcessingFormat) — falling back to raw input")
+            do {
+                try inputNode.setVoiceProcessingEnabled(false)
+                voiceProcessingActive = false
+                inFormat = inputNode.outputFormat(forBus: 0)
+            } catch {
+                doushaLog("[AudioTapHub] voice processing disable failed: \(error.localizedDescription) — continuing with format=\(voiceProcessingFormat)")
+            }
+        }
         let inputDescription = describe(format: inFormat)
 
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
@@ -231,7 +295,7 @@ actor AudioTapHub {
 
         audioEngine.prepare()
         try audioEngine.start()
-        return inputDescription
+        return "\(inputDescription) mic={\(micSelection.logDescription)} voiceProcessingEnabled=\(voiceProcessingEnabled) voiceProcessingActive=\(voiceProcessingActive)"
     }
 
     private func registerConfigurationObserver() {

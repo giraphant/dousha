@@ -220,4 +220,50 @@ final class PreferencesTests: XCTestCase {
 
         XCTAssertFalse(fresh.showMenuBarIcon)
     }
+
+    // MARK: - Audio processing
+
+    func testVoiceProcessing_defaultsToDisabled() {
+        XCTAssertFalse(prefs.voiceProcessingEnabled)
+    }
+
+    func testVoiceProcessing_ignoresStaleEnabledValue() {
+        defaults.set(true, forKey: "voiceProcessingEnabled")
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertFalse(fresh.voiceProcessingEnabled)
+    }
+
+    func testMicrophoneSelection_defaultsToSystemDefault() {
+        XCTAssertEqual(prefs.microphoneSelection, .systemDefault)
+    }
+
+    func testMicrophoneSelection_persistsPriorityListAcrossInstances() {
+        prefs.microphoneSelection = MicrophoneSelectionPreference(
+            useSystemDefault: false,
+            priorityUIDs: ["builtin", "usb"]
+        )
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertEqual(fresh.microphoneSelection,
+                       MicrophoneSelectionPreference(useSystemDefault: false,
+                                                     priorityUIDs: ["builtin", "usb"]))
+    }
+
+    func testRecordingAudioControls_defaultMuteButDoNotPauseMedia() {
+        XCTAssertTrue(prefs.muteSystemAudioDuringRecording)
+        XCTAssertFalse(prefs.pauseMediaDuringRecording)
+    }
+
+    func testRecordingAudioControls_persistAcrossInstances() {
+        prefs.muteSystemAudioDuringRecording = false
+        prefs.pauseMediaDuringRecording = true
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertFalse(fresh.muteSystemAudioDuringRecording)
+        XCTAssertTrue(fresh.pauseMediaDuringRecording)
+    }
 }

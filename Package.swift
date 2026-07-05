@@ -87,10 +87,13 @@ targets.append(.executableTarget(
     // monitors are main-runloop-confined @unchecked Sendable; Preferences
     // is UserDefaults-backed @unchecked Sendable. No more .v5 fallback.
     linkerSettings: [
+        .linkedFramework("AudioToolbox"),
+        .linkedFramework("AVFoundation"),
         .linkedFramework("Carbon"),
         .linkedFramework("Cocoa"),
-        .linkedFramework("Speech"),
-        .linkedFramework("AVFoundation")
+        .linkedFramework("CoreAudio"),
+        .linkedFramework("IOKit"),
+        .linkedFramework("Speech")
     ]
 ))
 targets.append(.testTarget(
