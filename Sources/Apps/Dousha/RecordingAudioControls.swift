@@ -1,6 +1,7 @@
 import Cocoa
 @preconcurrency import AudioToolbox
 @preconcurrency import CoreAudio
+import Darwin
 import IOKit.hidsystem
 import ConcurrencySupport
 
@@ -8,15 +9,26 @@ import ConcurrencySupport
 /// recording. The snapshot is owned by the recording hub and restored on both stop
 /// and cancel.
 final class RecordingAudioControls: @unchecked Sendable {
+    typealias MediaPlaybackState = @Sendable () -> Bool?
+    typealias MediaKeyAction = @Sendable () -> Bool
+
     private let muteSystemAudio: Bool
     private let pauseMedia: Bool
+    private let mediaPlaybackState: MediaPlaybackState
+    private let mediaKeySender: MediaKeyAction
     private let lock = NSLock()
     private var active = false
     private var outputSnapshot: OutputAudioSnapshot?
+    private var didPauseMedia = false
 
-    init(muteSystemAudio: Bool, pauseMedia: Bool) {
+    init(muteSystemAudio: Bool,
+         pauseMedia: Bool,
+         mediaPlaybackState: @escaping MediaPlaybackState = { SystemMediaPlaybackState.isPlaying() },
+         mediaKeySender: @escaping MediaKeyAction = { MediaKeySender.postPlayPause() }) {
         self.muteSystemAudio = muteSystemAudio
         self.pauseMedia = pauseMedia
+        self.mediaPlaybackState = mediaPlaybackState
+        self.mediaKeySender = mediaKeySender
     }
 
     func begin() {
@@ -26,14 +38,27 @@ final class RecordingAudioControls: @unchecked Sendable {
         active = true
         lock.unlock()
 
+        var didPauseMedia = false
         if pauseMedia {
-            MediaKeySender.postPlayPause()
-            doushaLog("[RecordingAudioControls] media pause requested")
+            switch mediaPlaybackState() {
+            case .some(true):
+                didPauseMedia = mediaKeySender()
+                if didPauseMedia {
+                    doushaLog("[RecordingAudioControls] media pause requested")
+                } else {
+                    doushaLog("[RecordingAudioControls] media pause failed")
+                }
+            case .some(false):
+                doushaLog("[RecordingAudioControls] media pause skipped (nothing playing)")
+            case .none:
+                doushaLog("[RecordingAudioControls] media pause skipped (playback state unknown)")
+            }
         }
         let snapshot = muteSystemAudio ? SystemOutputAudio.muteDefaultOutput() : nil
 
         lock.lock()
         outputSnapshot = snapshot
+        self.didPauseMedia = didPauseMedia
         lock.unlock()
     }
 
@@ -42,11 +67,20 @@ final class RecordingAudioControls: @unchecked Sendable {
         guard active else { lock.unlock(); return }
         active = false
         let snapshot = outputSnapshot
+        let shouldResumeMedia = didPauseMedia
         outputSnapshot = nil
+        didPauseMedia = false
         lock.unlock()
 
         if let snapshot {
             SystemOutputAudio.restore(snapshot)
+        }
+        if shouldResumeMedia {
+            if mediaKeySender() {
+                doushaLog("[RecordingAudioControls] media resume requested")
+            } else {
+                doushaLog("[RecordingAudioControls] media resume failed")
+            }
         }
     }
 }
@@ -250,27 +284,97 @@ private enum SystemOutputAudio {
     }
 }
 
-private enum MediaKeySender {
-    static func postPlayPause() {
-        post(key: Int32(NX_KEYTYPE_PLAY), down: true)
-        post(key: Int32(NX_KEYTYPE_PLAY), down: false)
+private enum SystemMediaPlaybackState {
+    static func isPlaying() -> Bool? {
+        MediaRemotePlaybackProbe.shared.isPlaying()
     }
+}
 
-    private static func post(key: Int32, down: Bool) {
-        let keyState: Int32 = down ? 0xA : 0xB
-        let data1 = Int((key << 16) | (keyState << 8))
-        guard let event = NSEvent.otherEvent(with: .systemDefined,
-                                             location: .zero,
-                                             modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(keyState << 8)),
-                                             timestamp: 0,
-                                             windowNumber: 0,
-                                             context: nil,
-                                             subtype: 8,
-                                             data1: data1,
-                                             data2: -1)?.cgEvent else {
-            doushaLog("[RecordingAudioControls] media key event creation failed")
+/// Best-effort bridge to the system Now Playing state. macOS does not expose a
+/// public process-wide "is media playing" API; MediaRemote is what Control Center
+/// uses. Load it dynamically and fail closed so we never fall back to the old blind
+/// Play/Pause toggle that could start idle media.
+private final class MediaRemotePlaybackProbe: @unchecked Sendable {
+    static let shared = MediaRemotePlaybackProbe()
+
+    private typealias IsPlayingCallback = @convention(block) (Bool) -> Void
+    private typealias GetIsPlaying = @convention(c) (DispatchQueue, @escaping IsPlayingCallback) -> Void
+
+    private let getIsPlaying: GetIsPlaying?
+    private let callbackQueue = DispatchQueue(label: "com.dousha.media-remote.playback-state")
+
+    private init() {
+        let path = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+        guard let handle = dlopen(path, RTLD_LAZY) else {
+            getIsPlaying = nil
             return
         }
-        event.post(tap: .cghidEventTap)
+        guard let symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying") else {
+            dlclose(handle)
+            getIsPlaying = nil
+            return
+        }
+        getIsPlaying = unsafeBitCast(symbol, to: GetIsPlaying.self)
+    }
+
+    func isPlaying() -> Bool? {
+        guard let getIsPlaying else { return nil }
+
+        let result = MediaPlaybackResultBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        getIsPlaying(callbackQueue) { isPlaying in
+            result.set(isPlaying)
+            semaphore.signal()
+        }
+
+        guard semaphore.wait(timeout: .now() + .milliseconds(250)) == .success else {
+            doushaLog("[RecordingAudioControls] media playback state timed out")
+            return nil
+        }
+        return result.value
+    }
+}
+
+private final class MediaPlaybackResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Bool?
+
+    func set(_ value: Bool) {
+        lock.lock()
+        storedValue = value
+        lock.unlock()
+    }
+
+    var value: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+}
+
+private enum MediaKeySender {
+    static func postPlayPause() -> Bool {
+        guard let down = event(key: Int32(NX_KEYTYPE_PLAY), down: true),
+              let up = event(key: Int32(NX_KEYTYPE_PLAY), down: false) else {
+            doushaLog("[RecordingAudioControls] media key event creation failed")
+            return false
+        }
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
+    }
+
+    private static func event(key: Int32, down: Bool) -> CGEvent? {
+        let keyState: Int32 = down ? 0xA : 0xB
+        let data1 = Int((key << 16) | (keyState << 8))
+        return NSEvent.otherEvent(with: .systemDefined,
+                                  location: .zero,
+                                  modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(keyState << 8)),
+                                  timestamp: 0,
+                                  windowNumber: 0,
+                                  context: nil,
+                                  subtype: 8,
+                                  data1: data1,
+                                  data2: -1)?.cgEvent
     }
 }
