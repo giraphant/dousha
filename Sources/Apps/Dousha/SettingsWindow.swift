@@ -369,7 +369,7 @@ struct SettingsView: View {
                     .onChange(of: pauseMediaDuringRecording) { _, newValue in
                         Preferences.shared.pauseMediaDuringRecording = newValue
                     }
-                Text("录音时静音会临时静音系统输出并在结束后恢复；暂停媒体会发送一次全局播放/暂停键。系统语音隔离当前不作为可用选项暴露，避免再次切到系统播放/多通道输入。")
+                Text("录音时静音会临时静音系统输出并在结束后恢复；暂停媒体会在系统 Now Playing 显示正在播放时暂停，并在录音结束后恢复，未播放时不会启动媒体。少数不发布 Now Playing 状态的应用或网页可能不会被暂停，可同时开启录音时静音作为兜底。系统语音隔离当前不作为可用选项暴露，避免再次切到系统播放/多通道输入。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
