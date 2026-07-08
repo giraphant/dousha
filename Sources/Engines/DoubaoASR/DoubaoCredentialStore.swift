@@ -4,13 +4,13 @@ import FoundationNetworking
 #endif
 import ConcurrencySupport
 
-struct DeviceCredentials: Codable {
-    var deviceId: String
-    var installId: String
-    var cdid: String
-    var openudid: String
-    var clientudid: String
-    var token: String
+@_spi(SmokeCLI) public struct DeviceCredentials: Codable, Sendable {
+    public var deviceId: String
+    public var installId: String
+    public var cdid: String
+    public var openudid: String
+    public var clientudid: String
+    public var token: String
 }
 
 /// Manages the anonymous device registration + JWT that Doubao requires
@@ -79,7 +79,7 @@ public actor DoubaoCredentialStore {
     /// `DoubaoASR.establishSession` calls `reset()` and re-registers when the WS
     /// handshake is rejected, so an invalidated app_key self-heals on the next
     /// recording rather than failing forever until a manual reset.
-    func ensureCredentials() async throws -> DeviceCredentials {
+    @_spi(SmokeCLI) public func ensureCredentials() async throws -> DeviceCredentials {
         if var existing = cached, !existing.deviceId.isEmpty {
             if existing.token.isEmpty || Self.isJWTExpired(existing.token) {
                 existing.token = try await fetchToken(deviceId: existing.deviceId, cdid: existing.cdid)

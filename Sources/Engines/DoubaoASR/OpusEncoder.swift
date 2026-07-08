@@ -7,12 +7,12 @@ import AudioToolbox
 /// Platform seam (QUA-209): all DoubaoASR needs is "one 10ms Int16 PCM frame
 /// in, one Opus packet out". macOS satisfies it below with AVAudioConverter +
 /// AudioToolbox; the Windows port satisfies it with libopus.
-protocol OpusEncoding {
+@_spi(SmokeCLI) public protocol OpusEncoding {
     func encode(_ pcmFrame: Data) throws -> Data
 }
 
 /// Returns this platform's Opus encoder.
-func makeOpusEncoder() throws -> any OpusEncoding {
+@_spi(SmokeCLI) public func makeOpusEncoder() throws -> any OpusEncoding {
     #if canImport(AVFoundation) && canImport(AudioToolbox)
     return try OpusEncoder()
     #else

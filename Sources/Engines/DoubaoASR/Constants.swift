@@ -1,12 +1,12 @@
 import Foundation
 
-enum DoubaoConstants {
+@_spi(SmokeCLI) public enum DoubaoConstants {
     static let registerURL = URL(string: "https://log.snssdk.com/service/2/device_register/")!
     static let settingsURL = URL(string: "https://is.snssdk.com/service/settings/v3/")!
-    static let websocketURL = "wss://frontier-audio-ime-ws.doubao.com/ocean/api/v1/ws"
-    static let aid = 401734
+    public static let websocketURL = "wss://frontier-audio-ime-ws.doubao.com/ocean/api/v1/ws"
+    public static let aid = 401734
 
-    static let userAgent = "com.bytedance.android.doubaoime/100102018 (Linux; U; Android 16; en_US; Pixel 7 Pro; Build/BP2A.250605.031.A2; Cronet/TTNetVersion:94cf429a 2025-11-17 QuicVersion:1f89f732 2025-05-08)"
+    public static let userAgent = "com.bytedance.android.doubaoime/100102018 (Linux; U; Android 16; en_US; Pixel 7 Pro; Build/BP2A.250605.031.A2; Cronet/TTNetVersion:94cf429a 2025-11-17 QuicVersion:1f89f732 2025-05-08)"
 
     // `nonisolated(unsafe)`: these dictionaries are read-only after init and only
     // ever read (never mutated) from the ASR pipeline. Under Swift 6's strict
@@ -41,16 +41,16 @@ enum DoubaoConstants {
     ]
 
     // Audio
-    static let sampleRate = 16000
-    static let channels = 1
+    public static let sampleRate = 16000
+    public static let channels = 1
     // 10ms frames to match the official Doubao IME client
     // (SAMICoreAsrContextCreateParameter.frame_time_ms = 10, SdkImpl.java:763).
     // We previously used 20ms; the server's VAD/partial-result cadence is tuned
     // around the official 10ms input, so finer frames track short utterances and
     // the leading edge more faithfully.
-    static let frameDurationMs = 10
-    static var samplesPerFrame: Int { sampleRate * frameDurationMs / 1000 }   // 160
-    static var bytesPerFrame: Int { samplesPerFrame * 2 }                     // 320 (Int16)
+    public static let frameDurationMs = 10
+    public static var samplesPerFrame: Int { sampleRate * frameDurationMs / 1000 }   // 160
+    public static var bytesPerFrame: Int { samplesPerFrame * 2 }                     // 320 (Int16)
 
     // Trailing silence appended on stop() before FinishSession. Was 2s, tuned
     // back when there was no explicit end-of-audio signal and the server's VAD

@@ -2,8 +2,8 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import ConcurrencySupport
 import ASRSupport
+@_spi(SmokeCLI) import DoubaoASR
 
 /// File-based smoke transcription for the Windows port (QUA-209): WAV in,
 /// final transcript out, over the same wire protocol as the live engine.
@@ -27,11 +27,14 @@ public enum DoubaoSmokeTranscriber {
         public var transcript: String = ""
         public var success: Bool = false
         public var failure: String?
+        public var observedDiagnosticKeys: [String] = []
+        public var rawResultJsonSamples: [String] = []
     }
 
     public static func run(
         wavPath: String,
         audioFormat: String = "speech_opus",
+        profile: DoubaoExperimentProfile = .official,
         timeout: TimeInterval = 60.0,
         progress: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> Report {
@@ -122,8 +125,8 @@ public enum DoubaoSmokeTranscriber {
             }
             stage("starttask: ok code=\(r1.statusCode)")
 
-            // Stage 4 — StartSession (this is where audio_info.format is judged).
-            let config = buildSessionConfigJSON(deviceId: creds.deviceId, contextHint: "", audioFormat: audioFormat)
+            // Stage 4 — StartSession (this is where audio_info.format and hidden profiles are judged).
+            let config = buildSessionConfigJSON(deviceId: creds.deviceId, contextHint: "", profile: profile, audioFormat: audioFormat)
             try await ws.send(.data(AsrMessageBuilder.startSession(requestId: requestId, token: creds.token, configJSON: config)))
             let r2 = try await awaitResponse(Date().addingTimeInterval(10)) {
                 ["SessionStarted", "TaskFailed", "SessionFailed"].contains($0.messageType)
@@ -131,7 +134,7 @@ public enum DoubaoSmokeTranscriber {
             guard r2.messageType == "SessionStarted" else {
                 return fail("startsession: FAILED — \(r2.messageType) code=\(r2.statusCode) msg=\(r2.statusMessage) (format=\(audioFormat))")
             }
-            stage("startsession: ok format=\(audioFormat) code=\(r2.statusCode)")
+            stage("startsession: ok format=\(audioFormat) profile=\(profile.rawValue) code=\(r2.statusCode)")
 
             // Stage 5 — burst the audio frames.
             let frameSize = DoubaoConstants.bytesPerFrame
@@ -158,6 +161,8 @@ public enum DoubaoSmokeTranscriber {
 
             var segments: [String] = []
             var interim = ""
+            var observedDiagnosticKeys = Set<String>()
+            var rawResultJsonSamples: [String] = []
             let deadline = Date().addingTimeInterval(timeout)
             drain: while Date() < deadline {
                 let msg = try await ws.receive()
@@ -176,8 +181,12 @@ public enum DoubaoSmokeTranscriber {
                 // utterance carries its own cumulative text; commit on the
                 // finalization signal, keep the rest as the rolling interim.
                 guard !resp.resultJson.isEmpty,
-                      let rj = try? JSONSerialization.jsonObject(with: Data(resp.resultJson.utf8)) as? [String: Any],
-                      let results = rj["results"] as? [[String: Any]], !results.isEmpty else { continue }
+                      let rj = try? JSONSerialization.jsonObject(with: Data(resp.resultJson.utf8)) as? [String: Any] else { continue }
+                if rawResultJsonSamples.count < 3 {
+                    rawResultJsonSamples.append(resp.resultJson)
+                }
+                collectDiagnosticKeys(from: rj, into: &observedDiagnosticKeys)
+                guard let results = rj["results"] as? [[String: Any]], !results.isEmpty else { continue }
                 var text = ""
                 var isInterim = true
                 var vadFinished = false
@@ -198,12 +207,30 @@ public enum DoubaoSmokeTranscriber {
             var transcript = segments.joined()
             if !interim.isEmpty { transcript += interim }
             report.transcript = transcript
+            report.observedDiagnosticKeys = observedDiagnosticKeys.sorted()
+            report.rawResultJsonSamples = rawResultJsonSamples
             stage("transcript: \(transcript.isEmpty ? "(empty)" : transcript)")
             report.success = !transcript.isEmpty
             if transcript.isEmpty { report.failure = "transcript: empty" }
             return report
         } catch {
             return fail("session: FAILED — \(error.localizedDescription)")
+        }
+    }
+
+    private static func collectDiagnosticKeys(from value: Any, into keys: inout Set<String>) {
+        if let dict = value as? [String: Any] {
+            for (key, nestedValue) in dict {
+                let lowered = key.lowercased()
+                if lowered.contains("speaker") || lowered == "speaker_id" || lowered.contains("spk") || lowered.contains("diar") || lowered.contains("vad") || lowered == "is_vad_finished" || lowered.contains("full_vad") {
+                    keys.insert(key)
+                }
+                collectDiagnosticKeys(from: nestedValue, into: &keys)
+            }
+        } else if let array = value as? [Any] {
+            for item in array {
+                collectDiagnosticKeys(from: item, into: &keys)
+            }
         }
     }
 }
