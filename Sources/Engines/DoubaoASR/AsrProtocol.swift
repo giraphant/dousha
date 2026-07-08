@@ -3,7 +3,7 @@ import Foundation
 /// Mirrors `asr.proto`. Field tags:
 ///   AsrRequest:  token=2 service_name=3 method_name=5 payload=6 audio_data=7 request_id=8 frame_state=9
 ///   AsrResponse: request_id=1 task_id=2 service_name=3 message_type=4 status_code=5 status_message=6 result_json=7
-enum FrameState: Int32 {
+@_spi(SmokeCLI) public enum FrameState: Int32, Sendable {
     case unspecified = 0
     case first = 1
     case middle = 3
@@ -32,16 +32,16 @@ struct AsrRequest {
     }
 }
 
-struct AsrResponse {
-    var requestId: String = ""
-    var taskId: String = ""
-    var serviceName: String = ""
-    var messageType: String = ""
-    var statusCode: Int32 = 0
-    var statusMessage: String = ""
-    var resultJson: String = ""
+@_spi(SmokeCLI) public struct AsrResponse: Sendable {
+    public var requestId: String = ""
+    public var taskId: String = ""
+    public var serviceName: String = ""
+    public var messageType: String = ""
+    public var statusCode: Int32 = 0
+    public var statusMessage: String = ""
+    public var resultJson: String = ""
 
-    static func decode(_ data: Data) throws -> AsrResponse {
+    public static func decode(_ data: Data) throws -> AsrResponse {
         let fields = try Wire.decodeFields(data)
         var r = AsrResponse()
         if case let .length(d) = fields[1] ?? .varint(0) { r.requestId     = String(data: d, encoding: .utf8) ?? "" }
@@ -55,8 +55,8 @@ struct AsrResponse {
     }
 }
 
-enum AsrMessageBuilder {
-    static func startTask(requestId: String, token: String) -> Data {
+@_spi(SmokeCLI) public enum AsrMessageBuilder {
+    public static func startTask(requestId: String, token: String) -> Data {
         var r = AsrRequest()
         r.token = token
         r.serviceName = "ASR"
@@ -65,7 +65,7 @@ enum AsrMessageBuilder {
         return r.encode()
     }
 
-    static func startSession(requestId: String, token: String, configJSON: String) -> Data {
+    public static func startSession(requestId: String, token: String, configJSON: String) -> Data {
         var r = AsrRequest()
         r.token = token
         r.serviceName = "ASR"
@@ -75,7 +75,7 @@ enum AsrMessageBuilder {
         return r.encode()
     }
 
-    static func finishSession(requestId: String, token: String) -> Data {
+    public static func finishSession(requestId: String, token: String) -> Data {
         var r = AsrRequest()
         r.token = token
         r.serviceName = "ASR"
@@ -84,7 +84,7 @@ enum AsrMessageBuilder {
         return r.encode()
     }
 
-    static func taskRequest(audio: Data, requestId: String, frameState: FrameState, timestampMs: Int64) -> Data {
+    public static func taskRequest(audio: Data, requestId: String, frameState: FrameState, timestampMs: Int64) -> Data {
         // The official Android client signals end-of-audio via `finish_audio: true`
         // in the per-block extra JSON in addition to the protobuf frame_state.
         // Without this hint, the server's VAD has been observed to leave the

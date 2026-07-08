@@ -47,10 +47,20 @@ var targets: [Target] = [
         dependencies: ["ConcurrencySupport", "ASRSupport"],
         path: "Sources/Engines/SonioxASR"
     ),
+    .target(
+        name: "SmokeCLISupport",
+        dependencies: ["ASRSupport", "DoubaoASR"],
+        path: "Sources/Tools/SmokeCLISupport"
+    ),
     .executableTarget(
         name: "SmokeCLI",
-        dependencies: ["DoubaoASR"],
+        dependencies: ["DoubaoASR", "SmokeCLISupport"],
         path: "Sources/Tools/SmokeCLI"
+    ),
+    .testTarget(
+        name: "SmokeCLITests",
+        dependencies: ["SmokeCLISupport"],
+        path: "Tests/SmokeCLITests"
     ),
 ]
 
