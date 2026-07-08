@@ -137,8 +137,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the settings window back. This is the recovery path when the user has
     /// hidden both the Dock and menu-bar icons.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if Self.currentOpenApplicationEventWasLoginItemLaunch() {
+            doushaLog("[Dousha] suppress Settings window for login-item launch")
+            return false
+        }
+
         openSettings()
         return true
+    }
+
+    /// macOS marks the initial `kAEOpenApplication` Apple event with this
+    /// keyword when the app is launched as a login item. In that path we should
+    /// behave like a background menu-bar helper, not as if the user explicitly
+    /// reopened the app.
+    private static func currentOpenApplicationEventWasLoginItemLaunch() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventClass == AEEventClass(kCoreEventClass),
+              event.eventID == AEEventID(kAEOpenApplication) else {
+            return false
+        }
+        return event.paramDescriptor(forKeyword: keyAELaunchedAsLogInItem) != nil
     }
 
     // MARK: - System toggles (Dock icon / menu-bar icon)
