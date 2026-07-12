@@ -334,7 +334,8 @@ struct FloatingHUDView: View {
         HUDChrome(
             cornerRadius: cornerRadius,
             glowColor: model.status.glowColor,
-            beamOpacity: isExpandedNow ? 0.92 : 0.72
+            beamOpacity: isExpandedNow ? 0.92 : 0.72,
+            animateBeam: canExpand
         ) {
             ZStack {
                 cardContent
@@ -467,7 +468,8 @@ struct FloatingHUDView: View {
             opacity: opacity,
             minHeight: minHeight,
             maxHeight: maxHeight,
-            isProcessing: isProcessing
+            isProcessing: isProcessing,
+            isVisible: model.status.isVisible
         )
     }
 
@@ -579,6 +581,7 @@ private struct HUDChrome<Content: View>: View {
     let cornerRadius: CGFloat
     let glowColor: Color?
     let beamOpacity: Double
+    let animateBeam: Bool
     let content: Content
 
     private var shape: RoundedRectangle {
@@ -589,11 +592,13 @@ private struct HUDChrome<Content: View>: View {
         cornerRadius: CGFloat,
         glowColor: Color?,
         beamOpacity: Double,
+        animateBeam: Bool,
         @ViewBuilder content: () -> Content
     ) {
         self.cornerRadius = cornerRadius
         self.glowColor = glowColor
         self.beamOpacity = beamOpacity
+        self.animateBeam = animateBeam
         self.content = content()
     }
 
@@ -611,6 +616,7 @@ private struct HUDChrome<Content: View>: View {
                 HUDBorderBeam(
                     cornerRadius: cornerRadius,
                     baseColor: glowColor,
+                    isPaused: !animateBeam,
                     lineWidth: FloatingHUDView.borderBeamLineWidth,
                     glowRadius: FloatingHUDView.borderBeamGlowRadius,
                     duration: 2.45
@@ -667,11 +673,12 @@ private struct HUDLevelMeter: View {
     let minHeight: CGFloat
     let maxHeight: CGFloat
     let isProcessing: Bool
+    let isVisible: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: false)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: !isVisible || reduceMotion)) { timeline in
             Canvas(opaque: false, rendersAsynchronously: true) { context, size in
                 let phase = reduceMotion
                     ? 1

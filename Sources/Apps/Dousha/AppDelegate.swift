@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let focusTracker = AppFocusTracker(selfBundleId: "com.dousha.app")
 
     private var recording: RecordingController!
+    private var hotkeyRetryDelay: TimeInterval = 3
+    private var cancelKeyRetryDelay: TimeInterval = 3
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         doushaLog("[Dousha] HUD layout revision: \(FloatingHUDView.layoutRevision)")
@@ -41,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setHUDVisible: { [weak self] visible in
                 if visible { self?.floatingWindow?.show() } else { self?.floatingWindow?.hide() }
             },
+            setCancelKeyEnabled: { [weak self] enabled in self?.cancelKey?.setEnabled(enabled) },
             forceDispatcherIdle: { [weak self] in self?.hotkey?.forceDispatcherIdle() },
             resetHUDLevels: { [hudModel] in hudModel.resetLevels() },
             resetHUDTranscript: { [hudModel] in hudModel.resetTranscript() },
@@ -268,14 +271,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onStop:  { [weak self] in self?.recording.stop() }
         )
         if !monitor.start() {
-            doushaLog("[Dousha] AppDelegate.startHotkeyMonitor: monitor.start() returned false — will retry in 3s")
-            // Most likely Accessibility permission isn't granted yet. Retry so
-            // the user can grant it without restarting the app.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            let delay = hotkeyRetryDelay
+            // ponytail: capped backoff keeps permission recovery without idle 3s polling.
+            hotkeyRetryDelay = min(delay * 2, 60)
+            doushaLog("[Dousha] AppDelegate.startHotkeyMonitor: monitor.start() returned false — will retry in \(Int(delay))s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 MainActor.assumeIsolated { self?.startHotkeyMonitor() }
             }
             return
         }
+        hotkeyRetryDelay = 3
         hotkey = monitor
         doushaLog("[Dousha] AppDelegate.startHotkeyMonitor: monitor installed successfully")
     }
@@ -316,13 +321,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             shouldFire: { flag.value() },
             onFire: { [weak self] in self?.recording.cancel() }
         )
+        monitor.setEnabled(flag.value())
         if !monitor.start() {
-            doushaLog("[Dousha] CancelKeyMonitor: start() failed — retrying in 3s")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            let delay = cancelKeyRetryDelay
+            cancelKeyRetryDelay = min(delay * 2, 60)
+            doushaLog("[Dousha] CancelKeyMonitor: start() failed — retrying in \(Int(delay))s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 MainActor.assumeIsolated { self?.startCancelKeyMonitor() }
             }
             return
         }
+        cancelKeyRetryDelay = 3
         cancelKey = monitor
         doushaLog("[Dousha] CancelKeyMonitor installed for kc=\(kc)")
     }

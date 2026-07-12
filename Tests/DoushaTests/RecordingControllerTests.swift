@@ -9,6 +9,7 @@ import ConcurrencySupport
 final class RecordingSpy {
     var statusLog: [RecordingStatus] = []        // applyStatusToHUD calls, in order
     var visibleLog: [Bool] = []                  // setHUDVisible calls
+    var cancelKeyEnabledLog: [Bool] = []
     var forceIdleCount = 0
     var resetLevelsCount = 0
     var resetTranscriptCount = 0
@@ -86,6 +87,7 @@ func makeSUT(backend: MockSpeechBackend = MockSpeechBackend())
         makeBackend: { spy.madeBackends.append(backend); return backend },
         applyStatusToHUD: { spy.statusLog.append($0) },
         setHUDVisible: { spy.visibleLog.append($0) },
+        setCancelKeyEnabled: { spy.cancelKeyEnabledLog.append($0) },
         forceDispatcherIdle: { spy.forceIdleCount += 1 },
         resetHUDLevels: { spy.resetLevelsCount += 1 },
         resetHUDTranscript: { spy.resetTranscriptCount += 1 },
@@ -152,6 +154,15 @@ final class RecordingControllerTransitionTests: XCTestCase {
         c.testHook_transition(to: .transcribing)
         c.testHook_transition(to: .injecting)
         XCTAssertEqual(spy.visibleLog, [true])
+    }
+
+    func testCancelKeyTap_enabledOnlyWhileRecording() {
+        let (c, spy, _) = makeSUT()
+        c.testHook_transition(to: .recording)
+        c.testHook_transition(to: .transcribing)
+        c.testHook_transition(to: .injecting)
+        c.testHook_transition(to: .idle)
+        XCTAssertEqual(spy.cancelKeyEnabledLog, [true, false, false, false])
     }
 }
 
@@ -327,8 +338,10 @@ final class RecordingControllerCancelTests: XCTestCase {
         let backend = MockSpeechBackend()
         let (c, _, _) = makeSUT(backend: backend)
         c.start()
+        XCTAssertTrue(c.testHook_hasBackend)
         c.cancel()
         XCTAssertTrue(backend.cancelCalled)
+        XCTAssertFalse(c.testHook_hasBackend)
         XCTAssertEqual(c.status, .idle)
     }
 
