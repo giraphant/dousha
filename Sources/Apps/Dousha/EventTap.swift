@@ -29,6 +29,7 @@ final class EventTap: @unchecked Sendable {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var handler: Handler?
+    private var deliveryEnabled = true
 
     /// Whether a tap is currently installed.
     var isInstalled: Bool { eventTap != nil }
@@ -65,8 +66,14 @@ final class EventTap: @unchecked Sendable {
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        CGEvent.tapEnable(tap: tap, enable: deliveryEnabled)
         return true
+    }
+
+    /// Enables or disables event delivery without rebuilding the tap.
+    func setEnabled(_ enabled: Bool) {
+        deliveryEnabled = enabled
+        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: enabled) }
     }
 
     /// Removes the run-loop source, disables the tap, and drops the handler.
@@ -88,7 +95,7 @@ final class EventTap: @unchecked Sendable {
     /// events to the owner's handler.
     private func dispatch(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+            if deliveryEnabled, let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
         return handler?(type, event) ?? Unmanaged.passUnretained(event)

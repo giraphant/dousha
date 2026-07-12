@@ -13,6 +13,8 @@ struct RecordingEnvironment {
     var applyStatusToHUD: (RecordingStatus) -> Void
     /// Show (true) / hide (false) the floating HUD window.
     var setHUDVisible: (Bool) -> Void
+    /// Enable cancel-key event delivery only while cancellation is valid.
+    var setCancelKeyEnabled: (Bool) -> Void
     /// Reset the hotkey dispatcher to "no session active".
     var forceDispatcherIdle: () -> Void
     /// Clear the HUD audio-level history (start of a recording).
@@ -84,7 +86,9 @@ final class RecordingController {
     private func transition(to next: RecordingStatus) {
         let old = status
         // 1. Mirror FIRST (cancel-key tap reads this; must never be stale).
-        recordingFlag.setValue(next == .recording)
+        let isRecording = next == .recording
+        recordingFlag.setValue(isRecording)
+        env.setCancelKeyEnabled(isRecording)
         // 2. Commit + drive HUD glow/content.
         status = next
         env.applyStatusToHUD(next)
@@ -96,6 +100,7 @@ final class RecordingController {
         if old.isVisible != next.isVisible {
             env.setHUDVisible(next.isVisible)
         }
+        if next == .idle { backend = nil }
     }
 
     // MARK: - Lifecycle
@@ -225,6 +230,7 @@ final class RecordingController {
     // Test-only seam to exercise `transition` directly.
     #if DEBUG
     func testHook_transition(to next: RecordingStatus) { transition(to: next) }
+    var testHook_hasBackend: Bool { backend != nil }
     #endif
 
     private func isErrorStatus(_ s: RecordingStatus) -> Bool {

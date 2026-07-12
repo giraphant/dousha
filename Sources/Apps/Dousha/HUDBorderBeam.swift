@@ -3,6 +3,7 @@ import SwiftUI
 struct HUDBorderBeam: View {
     let cornerRadius: CGFloat
     let baseColor: Color
+    let isPaused: Bool
     var lineWidth: CGFloat = 0.9
     var glowRadius: CGFloat = 15.0
     var duration: TimeInterval = 2.45
@@ -27,7 +28,7 @@ struct HUDBorderBeam: View {
             if reduceMotion {
                 beamLayer(rotation: 30)
             } else {
-                TimelineView(.animation) { context in
+                TimelineView(.animation(paused: isPaused)) { context in
                     beamLayer(rotation: rotation(at: context.date))
                 }
             }

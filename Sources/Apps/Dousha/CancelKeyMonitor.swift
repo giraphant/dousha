@@ -62,6 +62,10 @@ final class CancelKeyMonitor: @unchecked Sendable {
         return true
     }
 
+    func setEnabled(_ enabled: Bool) {
+        tap.setEnabled(enabled)
+    }
+
     func stop() {
         tap.teardown()
     }
