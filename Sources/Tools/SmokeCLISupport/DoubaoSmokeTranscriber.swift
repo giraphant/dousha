@@ -159,8 +159,7 @@ public enum DoubaoSmokeTranscriber {
             // Stage 6 — FinishSession, then drain results to SessionFinished.
             try await ws.send(.data(AsrMessageBuilder.finishSession(requestId: requestId, token: creds.token)))
 
-            var segments: [String] = []
-            var interim = ""
+            var resultState = DoubaoResultState()
             var observedDiagnosticKeys = Set<String>()
             var rawResultJsonSamples: [String] = []
             let deadline = Date().addingTimeInterval(timeout)
@@ -177,35 +176,16 @@ public enum DoubaoSmokeTranscriber {
                 default:
                     break
                 }
-                // Minimal mirror of DoubaoASR's segment logic: each VAD-bounded
-                // utterance carries its own cumulative text; commit on the
-                // finalization signal, keep the rest as the rolling interim.
                 guard !resp.resultJson.isEmpty,
                       let rj = try? JSONSerialization.jsonObject(with: Data(resp.resultJson.utf8)) as? [String: Any] else { continue }
                 if rawResultJsonSamples.count < 3 {
                     rawResultJsonSamples.append(resp.resultJson)
                 }
                 collectDiagnosticKeys(from: rj, into: &observedDiagnosticKeys)
-                guard let results = rj["results"] as? [[String: Any]], !results.isEmpty else { continue }
-                var text = ""
-                var isInterim = true
-                var vadFinished = false
-                for r in results {
-                    if let t = r["text"] as? String, !t.isEmpty { text = t }
-                    if let i = r["is_interim"] as? Bool, i == false { isInterim = false }
-                    if let v = r["is_vad_finished"] as? Bool, v { vadFinished = true }
-                }
-                guard !text.isEmpty else { continue }
-                if !isInterim && vadFinished {
-                    segments.append(text)
-                    interim = ""
-                } else {
-                    interim = text
-                }
+                resultState.ingest(object: rj)
             }
 
-            var transcript = segments.joined()
-            if !interim.isEmpty { transcript += interim }
+            let transcript = resultState.rawText
             report.transcript = transcript
             report.observedDiagnosticKeys = observedDiagnosticKeys.sorted()
             report.rawResultJsonSamples = rawResultJsonSamples

@@ -34,10 +34,7 @@ public actor DoubaoASR {
     private var pcmBuffer = Data()
     private var didSendFirstFrame = false
     private var canSendAudio = false
-    /// VAD-finalized utterances within this recording session, in order.
-    private var committedSegments: [String] = []
-    /// Latest interim text for the *current* (not-yet-finalized) utterance.
-    private var currentInterim: String = ""
+    private var resultState = DoubaoResultState()
     private var isRunning = false
 
     /// Fresh channel per session — recreated in _start() so signals from
@@ -177,8 +174,7 @@ public actor DoubaoASR {
         self.experimentProfile = DoubaoExperimentProfile.resolve()
         self.onPartial = onPartial
         self.onError = onError
-        self.committedSegments = []
-        self.currentInterim = ""
+        self.resultState = DoubaoResultState()
         self.segmentCommittedAt = []
         self.pcmBuffer = Data()
         self.didSendFirstFrame = false
@@ -332,8 +328,7 @@ public actor DoubaoASR {
         requestId = UUID().uuidString.lowercased()
         taskStarted = false
         didSendFirstFrame = false
-        committedSegments = []
-        currentInterim = ""
+        resultState = DoubaoResultState()
         segmentCommittedAt = []
 
         // Move retained audio to the front of the send buffer so the fresh session
@@ -544,7 +539,7 @@ public actor DoubaoASR {
         if outcomeStr != "signaled" {
             let partialLen = assembledText().count
             let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
-            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms SessionFinished missing (outcome=\(outcomeStr)); returning empty result partial.len=\(partialLen) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
+            doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms SessionFinished missing (outcome=\(outcomeStr)); returning empty result partial.len=\(partialLen) segments=\(resultState.committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
             detachAndCloseWebSocketInBackground()
             return TranscriptionResult(
                 text: "",
@@ -558,7 +553,7 @@ public actor DoubaoASR {
 
         let final = assembledText()
         let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
-        doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stop final text.len=\(final.count) segments=\(committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
+        doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stop final text.len=\(final.count) segments=\(resultState.committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
 
         let result = currentResult()
         // Close the WebSocket after every session (see class doc), but off the
@@ -924,77 +919,26 @@ public actor DoubaoASR {
             break
         }
 
-        // Parse result_json (per asr.py:589-684)
-        guard !resp.resultJson.isEmpty,
-              let rj = try? JSONSerialization.jsonObject(with: Data(resp.resultJson.utf8)) as? [String: Any] else {
-            return
-        }
-        guard let results = rj["results"] as? [[String: Any]], !results.isEmpty else {
-            return  // heartbeat
-        }
+        guard let update = resultState.ingest(resultJson: resp.resultJson) else { return }
+        self.lastTranscriptAt = Date()
 
-        var text = ""
-        var isInterim = true
-        var vadFinished = false
-        var nonstreamResult = false
-        for r in results {
-            if let t = r["text"] as? String, !t.isEmpty { text = t }
-            if let i = r["is_interim"] as? Bool, i == false { isInterim = false }
-            if let v = r["is_vad_finished"] as? Bool, v { vadFinished = true }
-            if let extra = r["extra"] as? [String: Any], let n = extra["nonstream_result"] as? Bool, n {
-                nonstreamResult = true
-            }
+        let preview = update.text.prefix(40).replacingOccurrences(of: "\n", with: " ")
+        let stopDelta = stopStartedAt.map { " stop+\(elapsedMs(since: $0))ms" } ?? ""
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms\(stopDelta) result isInterim=\(update.isInterim) vadFinished=\(update.vadFinished) nonstream=\(update.nonstreamResult) textLen=\(update.text.count) currentInterimLen=\(update.previousInterimLength) newUtterance=\(update.looksLikeNewUtterance) preview=\(preview)")
+
+        switch update.commit {
+        case .rescued(let rescued):
+            segmentCommittedAt.append(Date())
+            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment rescued index=\(resultState.committedSegments.count) text.len=\(rescued.count) newText.len=\(update.text.count)")
+        case .final(let text):
+            segmentCommittedAt.append(Date())
+            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment final index=\(resultState.committedSegments.count) text.len=\(text.count)")
+        case nil:
+            break
         }
 
-        if !text.isEmpty {
-            self.lastTranscriptAt = Date()
-
-            // Doubao chunks long audio into VAD-bounded utterances. Each utterance has its
-            // own cumulative `text` field that does NOT include prior utterances. So when
-            // is_vad_finished=true && !is_interim, we commit `text` as a finalized
-            // segment; the next utterance's interims start from empty again. The HUD and
-            // final paste join all committed segments + the in-progress interim.
-            //
-            // Heuristic rescue: in long recordings Doubao has been observed to start
-            // a new utterance WITHOUT first sending is_vad_finished=true for the
-            // previous one. We detect this as a dramatic text-shrinkage relative
-            // to the current interim and commit the previous interim as a segment
-            // before adopting the new text. Without this, multi-minute recordings
-            // lose every utterance except the last one (the only one that gets the
-            // explicit finalization signal at session-end).
-            let isVadCommit = (!isInterim && vadFinished) || nonstreamResult
-            let looksLikeNewUtterance = !isVadCommit
-                && !currentInterim.isEmpty
-                && text.count * 2 < currentInterim.count
-                && !currentInterim.hasPrefix(text)
-
-            let preview = text.prefix(40).replacingOccurrences(of: "\n", with: " ")
-            let stopDelta = stopStartedAt.map { " stop+\(elapsedMs(since: $0))ms" } ?? ""
-            doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms\(stopDelta) result isInterim=\(isInterim) vadFinished=\(vadFinished) nonstream=\(nonstreamResult) textLen=\(text.count) currentInterimLen=\(currentInterim.count) newUtterance=\(looksLikeNewUtterance) preview=\(preview)")
-
-            if looksLikeNewUtterance {
-                let rescued = currentInterim
-                committedSegments.append(rescued)
-                segmentCommittedAt.append(Date())
-                currentInterim = text
-                doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment rescued index=\(committedSegments.count) text.len=\(rescued.count) newText.len=\(text.count)")
-                // Note: deliberately did NOT also commit `text` here — it's the
-                // new utterance's in-progress interim, not a finalized segment.
-            } else if isVadCommit {
-                committedSegments.append(text)
-                segmentCommittedAt.append(Date())
-                currentInterim = ""
-                doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment final index=\(committedSegments.count) text.len=\(text.count)")
-            } else {
-                currentInterim = text
-            }
-            let partial = PartialTranscript(
-                finalText: TranscriptFormatter.normalize(committedSegments.joined()),
-                interimText: TranscriptFormatter.normalize(currentInterim)
-            )
-            let cb = onPartial
-            DispatchQueue.main.async { cb?(partial) }
-        }
+        let cb = onPartial
+        DispatchQueue.main.async { cb?(update.partial) }
     }
 
     private var streamReady: Bool {
@@ -1002,9 +946,7 @@ public actor DoubaoASR {
     }
 
     private func assembledText() -> String {
-        // Route through the shared formatter so Doubao output gets the same
-        // CJK/Latin spacing normalisation as Soniox (QUA-173).
-        TranscriptFormatter.normalize(committedSegments.joined() + currentInterim)
+        resultState.displayText
     }
 
     /// The transcript to hand back: the longer of the live session text and any
