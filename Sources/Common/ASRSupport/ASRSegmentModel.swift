@@ -1,5 +1,17 @@
 import Foundation
 
+/// Shared heuristics over streaming ASR hypotheses.
+public enum ASRHypothesis {
+    /// True when a new cumulative hypothesis is too short to be a revision of
+    /// the previous one — the engine silently moved on to a new utterance
+    /// without finalizing the prior one. The single definition shared by
+    /// `ASRSegmentModel.observePartial` and `DoubaoResultState.ingest`, so the
+    /// two rescue paths can never drift.
+    public static func looksLikeNewUtterance(previous: String, candidate: String) -> Bool {
+        candidate.count * 2 < previous.count && !previous.hasPrefix(candidate)
+    }
+}
+
 /// A local, vendor-neutral, VAD-like segment model layered above the ASR
 /// engines (QUA-265).
 ///
@@ -149,8 +161,7 @@ public struct ASRSegmentModel: Sendable, Equatable {
         // its own engine final, so rescue it as locally finalized — leaving it
         // unresolved would misroute the NEW utterance's final onto it.
         let previous = segments[tail].text
-        let looksLikeNewUtterance = text.count * 2 < previous.count && !previous.hasPrefix(text)
-        if looksLikeNewUtterance {
+        if ASRHypothesis.looksLikeNewUtterance(previous: previous, candidate: text) {
             segments[tail].state = .recentlyFinalized
             segments[tail].finalizedAt = now
             segments.append(Segment(text: text, state: .active, lastChangeAt: now,
