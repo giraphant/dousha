@@ -38,10 +38,11 @@ import Foundation
 ///
 /// Engine mapping (adapters own this; the model stays engine-neutral):
 /// - Doubao: each cumulative hypothesis → `observePartial`; a VAD-final
-///   commit → `observeFinal`; a `nonstream_result` re-recognition →
-///   `observeRevision`, falling back to `observeFinal` when it returns
-///   false and the utterance never streamed (Doubao can emit a standalone
-///   nonstream commit with no preceding hypotheses or VAD final).
+///   commit → `observeFinal`. A `nonstream_result` is also `observeFinal`
+///   whenever the current utterance is still unresolved (it acts as that
+///   utterance's only commit — including the standalone case with no
+///   preceding hypotheses); only a nonstream re-recognition arriving AFTER
+///   the same utterance's VAD final is `observeRevision`.
 /// - Soniox: the growing non-final token tail → `observePartial`; the
 ///   utterance text at an `<end>` endpoint marker → `observeFinal`.
 public struct ASRSegmentModel: Sendable, Equatable {
