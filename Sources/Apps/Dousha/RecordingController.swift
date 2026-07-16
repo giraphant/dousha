@@ -27,6 +27,12 @@ struct RecordingEnvironment {
     var pushHUDLevel: (Float) -> Void
     /// Final transcript shown just before inject.
     var setFinalTranscript: (String) -> Void
+    /// Builds the local deterministic correction pass (QUA-264) applied to the
+    /// final transcript before it reaches the HUD / refiner / injector. Called
+    /// once per start() so the correction config is snapshotted when recording
+    /// begins — the same rule the engines follow for the glossary; a Settings
+    /// change mid-recording must not mutate a live session's result.
+    var makeCorrector: () -> (String) -> String
     /// Paste text into the focused field.
     var inject: (String) -> Void
     /// Whether LLM refinement is enabled AND configured.
@@ -74,6 +80,10 @@ final class RecordingController {
 
     /// Earliest time the next start() may call into the backend after a cancel.
     private var nextStartAllowedAt: Date?
+
+    /// The correction pass snapshotted by the current session's start()
+    /// (QUA-264). Identity until the first start so a stray final can't crash.
+    private var sessionCorrect: (String) -> String = { $0 }
 
     init(environment: RecordingEnvironment) {
         self.env = environment
@@ -123,6 +133,7 @@ final class RecordingController {
 
         let backend = env.makeBackend()
         self.backend = backend
+        sessionCorrect = env.makeCorrector()   // config snapshot at start (QUA-264)
         transition(to: .recording)
         backend.setLanguage(env.language())
         env.resetHUDLevels()
@@ -202,8 +213,13 @@ final class RecordingController {
         }
         let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { transition(to: .idle); return }
-        env.setFinalTranscript(text)
-        refineAndInject(text)
+        // QUA-264: local correction runs before the HUD final so what the user
+        // sees is what gets injected. A correction that empties the text (e.g.
+        // a filler-word deletion rule ate everything) ends the session quietly.
+        let corrected = sessionCorrect(text)
+        guard !corrected.isEmpty else { transition(to: .idle); return }
+        env.setFinalTranscript(corrected)
+        refineAndInject(corrected)
     }
 
     private func refineAndInject(_ text: String) {

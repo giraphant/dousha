@@ -18,6 +18,13 @@ final class RecordingSpy {
     var finalTranscripts: [String] = []
     var injected: [String] = []
     var clipboardWrites: [String] = []
+    /// QUA-264 correction seam: inputs seen, and the transform applied (identity
+    /// by default so unrelated tests are unaffected). The transform is captured
+    /// by makeCorrector at start(), mirroring production's config snapshot.
+    var correctionInputs: [String] = []
+    var correctionTransform: (String) -> String = { $0 }
+    /// Text handed to refineImmediate (to assert the refiner sees corrected text).
+    var refineInputs: [String] = []
     var refineEnabled = false
     var refineMode: RefineMode = .immediate
     /// When set, immediate-refine returns this; nil means refine "failed" → raw kept.
@@ -94,10 +101,15 @@ func makeSUT(backend: MockSpeechBackend = MockSpeechBackend())
         updateHUDTranscript: { spy.partials.append($0) },
         pushHUDLevel: { spy.levels.append($0) },
         setFinalTranscript: { spy.finalTranscripts.append($0) },
+        makeCorrector: {
+            let transform = spy.correctionTransform   // snapshot, like production
+            return { spy.correctionInputs.append($0); return transform($0) }
+        },
         inject: { spy.injected.append($0) },
         isRefineEnabled: { spy.refineEnabled },
         refineMode: { spy.refineMode },
         refineImmediate: { text, done in
+            spy.refineInputs.append(text)
             if let r = spy.refineResult { done(r) } else { done(nil) }
         },
         refineLater: { text in if let r = spy.refineResult ?? nil { spy.clipboardWrites.append(r) } },
@@ -290,6 +302,57 @@ final class RecordingControllerStopTests: XCTestCase {
         XCTAssertEqual(c.status, .injecting)
         sched.advance(by: 0.25)
         XCTAssertEqual(c.status, .idle)
+    }
+
+    func testStop_correctionAppliesBeforeHUDFinalAndInject() async {
+        // QUA-264: the corrected text (not the raw final) must reach both the
+        // HUD final transcript and the injector, and the refiner sees it too.
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        spy.correctionTransform = { $0.replacingOccurrences(of: "json", with: "JSON") }
+        c.start(); c.stop()
+        backend.emitFinal(result(text: "check the json"))
+        await expectEventually({ spy.injected == ["check the JSON"] }, "corrected text injected")
+        XCTAssertEqual(spy.correctionInputs, ["check the json"])
+        XCTAssertEqual(spy.finalTranscripts, ["check the JSON"])
+    }
+
+    func testStop_refinerReceivesCorrectedText() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        spy.refineEnabled = true; spy.refineMode = .immediate
+        spy.refineResult = .some(nil)   // refine "fails" → corrected text injected
+        spy.correctionTransform = { $0.uppercased() }
+        c.start(); c.stop()
+        backend.emitFinal(result(text: "raw"))
+        await expectEventually({ spy.injected == ["RAW"] }, "corrected text injected on refine failure")
+        XCTAssertEqual(spy.refineInputs, ["RAW"])   // refiner saw corrected, not raw
+    }
+
+    func testStop_correctionConfigIsSnapshottedAtStart() async {
+        // Changing the correction config mid-recording must not affect the live
+        // session — same invariant as the engines' glossary snapshot.
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        spy.correctionTransform = { _ in "from-start-config" }
+        c.start()
+        spy.correctionTransform = { _ in "from-mid-recording-config" }
+        c.stop()
+        backend.emitFinal(result(text: "raw"))
+        await expectEventually({ spy.injected == ["from-start-config"] },
+                               "start-time correction config used")
+    }
+
+    func testStop_correctionEmptiesText_returnsToIdle_noInject() async {
+        // A rule set that deletes the whole utterance ends the session quietly.
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        spy.correctionTransform = { _ in "" }
+        c.start(); c.stop()
+        backend.emitFinal(result(text: "嗯"))
+        await expectEventually({ c.status == .idle }, "emptied result returns to idle")
+        XCTAssertTrue(spy.injected.isEmpty)
+        XCTAssertTrue(spy.finalTranscripts.isEmpty)
     }
 
     func testStop_immediateRefine_injectsRefinedText() async {
