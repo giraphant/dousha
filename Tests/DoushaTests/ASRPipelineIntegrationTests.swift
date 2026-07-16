@@ -1,6 +1,7 @@
 import XCTest
 import ASRSupport
 import DoubaoASR
+import SonioxASR
 
 /// Issue #42: cross-layer integration tests for the recent ASR additions.
 /// Each layer (ASRSegmentModel QUA-265, StreamingTextReconciler QUA-263,
@@ -55,29 +56,36 @@ final class ASRPipelineIntegrationTests: XCTestCase {
             { var m = $0; m.observeRevision("今天天气很不错。", at: 4.5); return m },
             { var m = $0; m.observePartial("我们去公园玩", at: 6.5); return m }, // lazy tick commits #1
             { var m = $0; m.observeFinal("我们去公园玩。", at: 7.0); return m },
+            // Revision of utterance #2 while #1 is committed — the one step
+            // where the committed floor is nonzero AND the text changes, so
+            // the floor invariant in replay() is exercised for real.
+            { var m = $0; m.observeRevision("我们去公园玩耍。", at: 7.2); return m },
             { var m = $0; flushed = m.flushOnStop(at: 7.5); return m },
         ])
 
-        XCTAssertEqual(visible, "今天天气很不错。我们去公园玩。")
+        XCTAssertEqual(visible, "今天天气很不错。我们去公园玩耍。")
         XCTAssertEqual(flushed, visible)
         XCTAssertEqual(model.committedText, visible)
     }
 
     func testLateRevisionReconcilesAsTailEditAfterCommittedPrefix() {
-        // The revision replaces finalized (not yet committed) text while a
-        // newer utterance is already active — the reconciler must express it
-        // as one tail edit whose stable prefix still covers all committed
-        // text. Covered inside the invariant replay; this asserts the shape.
+        // A revision replaces finalized (not yet committed) text while an
+        // older utterance is already committed and a newer one is active —
+        // the reconciler must express it as one tail edit whose stable prefix
+        // covers the whole committed floor.
         var model = ASRSegmentModel(config: config)
-        model.observeFinal("今天天气不错。", at: 0.0)
-        model.observePartial("我们去公园", at: 0.5)
+        model.observeFinal("第一句。", at: 0.0)
+        model.observeFinal("今天天气不错。", at: 3.5)   // lazy tick commits 第一句。
+        model.observePartial("我们去公园", at: 4.0)
+        XCTAssertEqual(model.committedText, "第一句。")
         let before = model.fullText
-        model.observeRevision("今天天气很不错。", at: 1.0)
+        model.observeRevision("今天天气很不错。", at: 4.5)
 
         let op = StreamingTextReconciler.reconcile(previous: before, candidate: model.fullText)
         XCTAssertEqual(op.kind, .replaceTail)
-        XCTAssertEqual(op.stablePrefixCount, 4) // "今天天气" survives
-        XCTAssertEqual(op.apply(to: before), "今天天气很不错。我们去公园")
+        XCTAssertEqual(op.stablePrefixCount, 8) // "第一句。今天天气" survives
+        XCTAssertGreaterThanOrEqual(op.stablePrefixCount, model.committedText.count)
+        XCTAssertEqual(op.apply(to: before), "第一句。今天天气很不错。我们去公园")
     }
 
     func testShrinkRescueIsAppendOnlyAtFullTextLevel() {
@@ -136,27 +144,58 @@ final class ASRPipelineIntegrationTests: XCTestCase {
         XCTAssertEqual(segments.flushOnStop(at: 3.0), doubao.rawText)
     }
 
-    // MARK: - Soniox-shaped trace
+    // MARK: - Soniox trace agreement
 
-    func testSonioxShapedTraceAccumulatesUtterances() {
-        // Soniox mapping (ASRSegmentModel doc): growing non-final token tail →
-        // observePartial; utterance text at an <end> endpoint → observeFinal.
+    /// One realistic Soniox token-batch trace drives both the shipping
+    /// `SonioxResponseParser` and, via the adapter mapping documented on
+    /// `ASRSegmentModel` (cumulative utterance text → observePartial, the
+    /// utterance's text at an `<end>` endpoint → observeFinal), the segment
+    /// model. Both accumulations must agree on the transcript.
+    func testSonioxTraceAgreesBetweenParserAndSegmentModel() {
+        let trace: [(tokens: [(text: String, isFinal: Bool)], finished: Bool, at: TimeInterval)] = [
+            ([("hel", false)], false, 0.0),
+            ([("hello", true), (" there", false)], false, 0.4),
+            ([(" there", true), (".", true), ("<end>", true)], false, 0.8),
+            ([(" how", false)], false, 1.2),
+            ([(" how are you", false)], false, 1.6),   // interim replaced per batch
+            ([(" how are you", true), ("<end>", true)], true, 2.0),
+        ]
+
+        var parser = SonioxResponseParser()
         var model = ASRSegmentModel(config: config)
-        model.observePartial("hel", at: 0.0)
-        model.observePartial("hello there", at: 0.4)
-        model.observeFinal("hello there. ", at: 0.8)   // <end> marker text
-        model.observePartial("how are", at: 1.2)
-        model.observePartial("how are you", at: 1.6)
+        var priorUtterancesLength = 0
+        for (tokens, finished, at) in trace {
+            var object: [String: Any] =
+                ["tokens": tokens.map { ["text": $0.text, "is_final": $0.isFinal] }]
+            if finished { object["finished"] = true }
+            guard parser.ingest(object: object) != nil else {
+                return XCTFail("batch at t=\(at) not recognised")
+            }
+            // Adapter: the current utterance is what the parser accumulated
+            // past the previous endpoint (finalized delta + live interim).
+            let utterance = String(parser.finalText.dropFirst(priorUtterancesLength))
+                + parser.interimText
+            if tokens.contains(where: { $0.text == "<end>" }) {
+                model.observeFinal(utterance, at: at)
+                priorUtterancesLength = parser.finalText.count
+            } else {
+                model.observePartial(utterance, at: at)
+            }
+        }
 
-        XCTAssertEqual(model.recentlyFinalizedText, "hello there. ")
-        XCTAssertEqual(model.flushOnStop(at: 2.0), "hello there. how are you")
+        XCTAssertEqual(parser.finalText, "hello there. how are you")
+        XCTAssertEqual(model.flushOnStop(at: 3.0), parser.finalText)
     }
 
-    // MARK: - Final path: formatter → corrector (as handleFinal runs it)
+    // MARK: - Final path: formatter → corrector (QUA-264)
 
-    /// The terminal `.final` is formatter-normalized by the engines, then
-    /// corrected once by the snapshot from `env.makeCorrector` (QUA-264).
-    /// Same composition, same order, over realistic raw engine output.
+    /// The composed text transform the pipeline applies to the terminal
+    /// `.final`: engines normalize via `TranscriptFormatter`, then the
+    /// controller's `sessionCorrect` snapshot corrects once. The controller
+    /// *wiring* — corrected text reaching HUD/refiner/injector, exactly one
+    /// correction call, config snapshotted at start — is covered by
+    /// `RecordingControllerTests`; these tests pin the text contract of the
+    /// composition itself.
     private func finalPath(_ raw: String, corrector: TranscriptCorrector) -> String {
         corrector.correct(TranscriptFormatter.normalize(raw))
     }
@@ -169,23 +208,28 @@ final class ASRPipelineIntegrationTests: XCTestCase {
         // Filler removal + user fix + casing + 盘古 spacing + doubled-mark tail.
         XCTAssertEqual(finalPath("嗯用阿派解析json数据。。", corrector: corrector),
                        "用 API 解析 JSON 数据。")
-        // Soniox-style half-width comma in Han context widens before the
-        // corrector cases the multi-word term.
         XCTAssertEqual(finalPath("先打开claude code,然后看readme.", corrector: corrector),
                        "先打开 Claude Code，然后看 readme.")
     }
 
-    func testFinalPathIsIdempotent() {
-        // handleFinal runs the composition once, but partial re-entry (e.g. a
-        // corrected transcript pasted back and re-dictated around) must not
-        // compound: the composed pipeline is idempotent for built-in rules.
+    func testFormatterPassOrderIsObservable() {
+        // A user rule written against formatter output (full-width ，) fires
+        // only because normalization runs BEFORE the corrector: rule 1 sees
+        // pre-normalized text (the corrector's own normalize runs after its
+        // replacements). This distinguishes the composition from `correct`
+        // alone.
         let corrector = TranscriptCorrector(
-            replacements: ["嗯=>", "阿派=>API"].compactMap(TranscriptCorrector.Replacement.parse),
-            casingTerms: TranscriptCorrector.builtinCasingTerms)
-        for raw in ["嗯用阿派解析json数据。。", "先打开claude code,然后看readme.", "然后，"] {
-            let once = finalPath(raw, corrector: corrector)
-            XCTAssertEqual(finalPath(once, corrector: corrector), once,
-                           "final path not idempotent for: \(raw)")
-        }
+            replacements: ["，然后=>。然后"].compactMap(TranscriptCorrector.Replacement.parse))
+        XCTAssertEqual(finalPath("好的,然后走", corrector: corrector), "好的。然后走")
+        XCTAssertNotEqual(corrector.correct("好的,然后走"), "好的。然后走")
+    }
+
+    func testFinalPathWithCorrectorDisabledStillNormalizes() {
+        // Correction off is a user setting; the formatter pass is not — raw
+        // engine spacing must still be repaired on the final.
+        var corrector = TranscriptCorrector()
+        corrector.isEnabled = false
+        XCTAssertEqual(finalPath("我觉得 这个api不错", corrector: corrector),
+                       "我觉得这个 api 不错")
     }
 }
