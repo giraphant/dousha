@@ -44,6 +44,22 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(fresh.sonioxAPIKey, "soniox-secret")
     }
 
+    func testLocalCorrection_defaultsOnWithNoRules() {
+        // QUA-264: the layer ships enabled but rule-less (built-ins only).
+        XCTAssertTrue(prefs.localCorrectionEnabled)
+        XCTAssertEqual(prefs.localCorrectionRules, [])
+    }
+
+    func testLocalCorrection_persistsAcrossInstances() {
+        prefs.localCorrectionEnabled = false
+        prefs.localCorrectionRules = ["阿派=>API"]
+
+        let fresh = Preferences(defaults: defaults)
+
+        XCTAssertFalse(fresh.localCorrectionEnabled)
+        XCTAssertEqual(fresh.localCorrectionRules, ["阿派=>API"])
+    }
+
     func testSonioxMode_defaultsToRealtime() {
         XCTAssertEqual(prefs.sonioxMode, .realtime)
     }

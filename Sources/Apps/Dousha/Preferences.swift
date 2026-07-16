@@ -58,6 +58,12 @@ final class Preferences: @unchecked Sendable {
         // the feature applies to both Doubao and Soniox.
         static let glossaryEnabled           = "doubaoGlossaryEnabled"
         static let glossaryTerms             = "doubaoGlossaryTerms"
+        // QUA-264 local correction layer. No UI yet (deliberately out of scope);
+        // both keys are reachable via `defaults write com.dousha.app …` so the
+        // layer can be bypassed or extended in the field.
+        static let localCorrectionEnabled    = "localCorrectionEnabled"
+        // User replacement rules, one "wrong=>right" string per element.
+        static let localCorrectionRules      = "localCorrectionRules"
         static let hotkeyKeyCode             = "hotkey.keyCode"
         static let hotkeyMode                = "hotkey.mode"
         // Sentinel: -1 stored under `cancelHotkey.keyCode` means "disabled".
@@ -94,6 +100,8 @@ final class Preferences: @unchecked Sendable {
             Keys.sonioxMode:               SonioxMode.realtime.rawValue,
             Keys.glossaryEnabled:          false,
             Keys.glossaryTerms:            [String](),
+            Keys.localCorrectionEnabled:   true,
+            Keys.localCorrectionRules:     [String](),
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
             Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
             Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode),
@@ -276,6 +284,16 @@ final class Preferences: @unchecked Sendable {
     var glossaryTerms: [String] {
         get { defaults.stringArray(forKey: Keys.glossaryTerms) ?? [] }
         set { defaults.set(newValue, forKey: Keys.glossaryTerms) }
+    }
+
+    var localCorrectionEnabled: Bool {
+        get { defaults.bool(forKey: Keys.localCorrectionEnabled) }
+        set { defaults.set(newValue, forKey: Keys.localCorrectionEnabled) }
+    }
+
+    var localCorrectionRules: [String] {
+        get { defaults.stringArray(forKey: Keys.localCorrectionRules) ?? [] }
+        set { defaults.set(newValue, forKey: Keys.localCorrectionRules) }
     }
 
     var hotkey: HotkeyConfig {

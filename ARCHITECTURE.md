@@ -13,8 +13,9 @@ ConcurrencySupport        concurrency primitives (SessionGeneration, OneShotChan
         │                 GenerationCloseChannels, Lock, doushaLog, UncheckedSendable)
         ▼
 ASRSupport                engine-agnostic domain types (PartialTranscript,
-        │                 TranscriptionResult, TranscriptFormatter, WavFileWriter,
-        │                 AudioLevel, AudioCapturePaths, WavReader)
+        │                 TranscriptionResult, TranscriptFormatter,
+        │                 TranscriptCorrector, WavFileWriter, AudioLevel,
+        │                 AudioCapturePaths, WavReader)
         ▼
 DoubaoASR    SonioxASR    one streaming WS client each; peers, never import each other
         │         │
@@ -86,7 +87,13 @@ stop():
   FinalResultCollector     ← QUA-153 routing: online language signal (classifier
                              partials seen during recording) > classifier final >
                              primary > first non-empty; fires completion exactly once
-  → TranscriptFormatter (QUA-173 spacing, QUA-194 punct width) → optional TextRefiner
+  → TranscriptFormatter (QUA-173 spacing, QUA-194 punct width)
+  → TranscriptCorrector (QUA-264 local-only correction: user replacements,
+                         term casing, spacing repair, tail punctuation —
+                         snapshotted by env.makeCorrector at start(), applied
+                         in handleFinal before the HUD final; no network, no
+                         persistence)
+  → optional TextRefiner
   → TextInjector (clipboard + ⌘V)
 ```
 

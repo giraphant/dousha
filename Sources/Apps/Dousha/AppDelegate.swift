@@ -50,6 +50,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateHUDTranscript: { [hudModel] partial in hudModel.updateTranscript(partial) },
             pushHUDLevel: { [hudModel] level in hudModel.pushLevel(level) },
             setFinalTranscript: { [hudModel] text in hudModel.setFinalTranscript(text) },
+            makeCorrector: { [prefs] in
+                // QUA-264: snapshot the correction config NOW (recording start),
+                // matching the engines' glossary-snapshot rule. Glossary terms
+                // lead the casing list so a user's own casing beats a built-in;
+                // they only join in when the glossary feature is on, mirroring
+                // what the engines were sent.
+                let corrector = TranscriptCorrector(
+                    isEnabled: prefs.localCorrectionEnabled,
+                    replacements: prefs.localCorrectionRules
+                        .compactMap(TranscriptCorrector.Replacement.parse),
+                    casingTerms: (prefs.glossaryEnabled ? prefs.glossaryTerms : [])
+                        + TranscriptCorrector.builtinCasingTerms
+                )
+                return { text in
+                    let corrected = corrector.correct(text)
+                    if corrected != text {
+                        doushaLog("[Dousha] local correction changed final (len \(text.count) -> \(corrected.count))")
+                    }
+                    return corrected
+                }
+            },
             inject: { [injector] text in injector.inject(text) },
             isRefineEnabled: { [prefs] in
                 prefs.llmEnabled && TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
