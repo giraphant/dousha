@@ -58,14 +58,26 @@ final class ASRSegmentModelTests: XCTestCase {
         XCTAssertEqual(model.segments.count, 1)
     }
 
-    func testDramaticShrinkStartsNewSegmentAndParksPrevious() {
+    func testDramaticShrinkRescuesPreviousAsLocallyFinalized() {
         var model = ASRSegmentModel(config: config)
         model.observePartial("this is a much longer first utterance", at: 0.0)
         model.observePartial("next", at: 0.5)
 
-        XCTAssertEqual(model.pendingText, "this is a much longer first utterance")
+        // The engine abandoned the first utterance (no final will ever come),
+        // so the rescue finalizes it locally rather than leaving it pending.
+        XCTAssertEqual(model.recentlyFinalizedText, "this is a much longer first utterance")
         XCTAssertEqual(model.activeText, "next")
         XCTAssertEqual(model.segments.count, 2)
+    }
+
+    func testIdenticalHypothesisDoesNotReactivateParkedSegment() {
+        var model = ASRSegmentModel(config: config)
+        model.observePartial("parked", at: 0.0)
+        model.tick(at: 2.0) // parked as pending
+        model.observePartial("parked", at: 2.5) // engine re-sends during silence
+
+        XCTAssertEqual(model.pendingText, "parked")
+        XCTAssertEqual(model.activeText, "")
     }
 
     // MARK: Final events
@@ -89,16 +101,16 @@ final class ASRSegmentModelTests: XCTestCase {
         XCTAssertEqual(model.committedText, "done.")
     }
 
-    func testFinalsResolveEarliestUnresolvedSegmentFirst() {
+    func testFinalAfterShrinkRescueRoutesToTheNewActiveSegment() {
         var model = ASRSegmentModel(config: config)
         model.observePartial("this is a much longer first utterance", at: 0.0)
-        model.observePartial("next", at: 0.5) // shrink: first parked pending
-        model.observeFinal("this is a much longer first utterance.", at: 1.0)
-        model.observeFinal("next one.", at: 2.0)
+        model.observePartial("next", at: 0.5) // shrink: first rescued as finalized
+        model.observeFinal("next.", at: 1.0)
 
         XCTAssertEqual(model.recentlyFinalizedText,
-                       "this is a much longer first utterance." + "next one.")
+                       "this is a much longer first utterance" + "next.")
         XCTAssertEqual(model.activeText, "")
+        XCTAssertEqual(model.fullText, "this is a much longer first utterancenext.")
     }
 
     func testEmptyFinalResolvesPendingWithLocalText() {

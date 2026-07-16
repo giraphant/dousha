@@ -39,7 +39,9 @@ import Foundation
 /// Engine mapping (adapters own this; the model stays engine-neutral):
 /// - Doubao: each cumulative hypothesis → `observePartial`; a VAD-final
 ///   commit → `observeFinal`; a `nonstream_result` re-recognition →
-///   `observeRevision`.
+///   `observeRevision`, falling back to `observeFinal` when it returns
+///   false and the utterance never streamed (Doubao can emit a standalone
+///   nonstream commit with no preceding hypotheses or VAD final).
 /// - Soniox: the growing non-final token tail → `observePartial`; the
 ///   utterance text at an `<end>` endpoint marker → `observeFinal`.
 public struct ASRSegmentModel: Sendable, Equatable {
@@ -78,8 +80,8 @@ public struct ASRSegmentModel: Sendable, Equatable {
     }
 
     public let config: Config
-    /// All segments in utterance order. States are monotone along the array:
-    /// committed*, (recentlyFinalized|pending)*, active?.
+    /// All segments in utterance order. At most one segment is unresolved
+    /// (`.pending` or `.active`), and it is always the last one.
     public private(set) var segments: [Segment] = []
 
     public init(config: Config = Config()) {
@@ -142,19 +144,24 @@ public struct ASRSegmentModel: Sendable, Equatable {
 
         // A dramatic hypothesis shrink means the engine silently moved on to a
         // new utterance without finalizing the prior one (same heuristic as
-        // DoubaoResultState's rescue): park the old text, start fresh.
+        // DoubaoResultState's rescue). The abandoned utterance will never get
+        // its own engine final, so rescue it as locally finalized — leaving it
+        // unresolved would misroute the NEW utterance's final onto it.
         let previous = segments[tail].text
         let looksLikeNewUtterance = text.count * 2 < previous.count && !previous.hasPrefix(text)
         if looksLikeNewUtterance {
-            segments[tail].state = .pending
+            segments[tail].state = .recentlyFinalized
+            segments[tail].finalizedAt = now
             segments.append(Segment(text: text, state: .active, lastChangeAt: now,
                                     finalizedAt: nil))
             return
         }
 
-        // Same utterance continuing — re-activates a pause-parked segment.
-        segments[tail].state = .active
+        // Same utterance continuing. Only an actual hypothesis change
+        // re-activates a pause-parked segment — a re-sent identical
+        // hypothesis is more silence, not resumed speech.
         if text != previous {
+            segments[tail].state = .active
             segments[tail].text = text
             segments[tail].lastChangeAt = now
         }
