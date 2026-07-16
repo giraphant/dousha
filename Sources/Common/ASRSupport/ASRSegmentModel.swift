@@ -71,7 +71,6 @@ public struct ASRSegmentModel: Sendable, Equatable {
         /// `TranscriptFormatter`; this model never normalizes.
         public internal(set) var text: String
         public internal(set) var state: State
-        public let startedAt: TimeInterval
         /// Last time `text` actually changed. A re-sent identical hypothesis
         /// does not refresh this — that is what makes a pause observable.
         public internal(set) var lastChangeAt: TimeInterval
@@ -136,8 +135,8 @@ public struct ASRSegmentModel: Sendable, Equatable {
 
         guard let tail = segments.indices.last,
               segments[tail].state == .active || segments[tail].state == .pending else {
-            segments.append(Segment(text: text, state: .active, startedAt: now,
-                                    lastChangeAt: now, finalizedAt: nil))
+            segments.append(Segment(text: text, state: .active, lastChangeAt: now,
+                                    finalizedAt: nil))
             return
         }
 
@@ -148,8 +147,8 @@ public struct ASRSegmentModel: Sendable, Equatable {
         let looksLikeNewUtterance = text.count * 2 < previous.count && !previous.hasPrefix(text)
         if looksLikeNewUtterance {
             segments[tail].state = .pending
-            segments.append(Segment(text: text, state: .active, startedAt: now,
-                                    lastChangeAt: now, finalizedAt: nil))
+            segments.append(Segment(text: text, state: .active, lastChangeAt: now,
+                                    finalizedAt: nil))
             return
         }
 
@@ -179,8 +178,8 @@ public struct ASRSegmentModel: Sendable, Equatable {
             return
         }
         guard !text.isEmpty else { return }
-        segments.append(Segment(text: text, state: .recentlyFinalized, startedAt: now,
-                                lastChangeAt: now, finalizedAt: now))
+        segments.append(Segment(text: text, state: .recentlyFinalized, lastChangeAt: now,
+                                finalizedAt: now))
     }
 
     /// Ingest a late revision (e.g. a second-pass re-recognition of the last
