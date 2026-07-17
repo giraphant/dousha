@@ -264,8 +264,8 @@ below fires, and do not add new callers without that trigger.
 
 - **`ASRSegmentModel`** overlaps the shipping segmentation
   (`DoubaoResultState`, `SonioxResponseParser`). Its differentiator —
-  `revisionWindow`, for Doubao `nonstream_result` second-pass revisions — has
-  never fired in production: across two log files (~2.9k streamed results)
+  `revisionWindow`, for Doubao `nonstream_result` second-pass revisions — was
+  not observed across two production log files (~2.9k streamed results):
   `nonstream_result=true` appeared **0 times**. Its `pauseBoundary` has no
   consumer. Wiring it just to "use" it duplicates live logic. Re-evaluate
   when: `nonstream_result` late revisions are observed in production, a third

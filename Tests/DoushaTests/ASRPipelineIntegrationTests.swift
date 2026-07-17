@@ -189,13 +189,16 @@ final class ASRPipelineIntegrationTests: XCTestCase {
 
     // MARK: - Final path: formatter → corrector (QUA-264)
 
-    /// The composed text transform the pipeline applies to the terminal
-    /// `.final`: engines normalize via `TranscriptFormatter`, then the
-    /// controller's `sessionCorrect` snapshot corrects once. The controller
-    /// *wiring* — corrected text reaching HUD/refiner/injector, exactly one
-    /// correction call, config snapshotted at start — is covered by
-    /// `RecordingControllerTests`; these tests pin the text contract of the
-    /// composition itself.
+    /// The composed text transform applied to a Doubao/Soniox terminal
+    /// `.final`: those engines pre-normalize via `TranscriptFormatter`, then
+    /// `handleFinal` runs the snapshotted `sessionCorrect` once. The
+    /// controller *wiring* (corrected text → HUD/refiner/injector, one call,
+    /// config snapshotted at start) is covered by `RecordingControllerTests`;
+    /// these tests pin the text contract of the composition.
+    ///
+    /// Caveat: this is NOT the Apple Speech path — Apple passes raw text and
+    /// `handleFinal` only trims + corrects, so with correction *disabled* an
+    /// Apple final is NOT normalized. Do not assert that here.
     private func finalPath(_ raw: String, corrector: TranscriptCorrector) -> String {
         corrector.correct(TranscriptFormatter.normalize(raw))
     }
@@ -222,14 +225,5 @@ final class ASRPipelineIntegrationTests: XCTestCase {
             replacements: ["，然后=>。然后"].compactMap(TranscriptCorrector.Replacement.parse))
         XCTAssertEqual(finalPath("好的,然后走", corrector: corrector), "好的。然后走")
         XCTAssertNotEqual(corrector.correct("好的,然后走"), "好的。然后走")
-    }
-
-    func testFinalPathWithCorrectorDisabledStillNormalizes() {
-        // Correction off is a user setting; the formatter pass is not — raw
-        // engine spacing must still be repaired on the final.
-        var corrector = TranscriptCorrector()
-        corrector.isEnabled = false
-        XCTAssertEqual(finalPath("我觉得 这个api不错", corrector: corrector),
-                       "我觉得这个 api 不错")
     }
 }

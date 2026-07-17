@@ -19,7 +19,7 @@ public enum ASRHypothesis {
 /// > the recording pipeline. It overlaps the shipping segmentation
 /// > (`DoubaoResultState`, `SonioxResponseParser`), and its differentiator
 /// > (`revisionWindow`, for Doubao `nonstream_result` second-pass revisions)
-/// > has never fired in production: `nonstream_result=true` appeared **0 of
+/// > was not observed in production: `nonstream_result=true` appeared **0 of
 /// > 2935** streamed results across two log files. Its `pauseBoundary` has no
 /// > consumer either. Do not wire it just to "use" it — that duplicates live
 /// > logic. Re-evaluate when: nonstream late revisions are observed in
