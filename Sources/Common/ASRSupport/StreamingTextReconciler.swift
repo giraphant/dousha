@@ -1,6 +1,15 @@
 /// A local, deterministic text reconciler for streaming ASR snapshots
 /// (QUA-263).
 ///
+/// > **Status: reserved, not wired.** Pure logic + tests only — NOT part of
+/// > the recording pipeline. Its output (`Operation`: stable-prefix /
+/// > delete / insert) targets a typewriter-style insertion path.
+/// > `TextInjector` is clipboard+⌘V by design (ARCHITECTURE.md §5) and the
+/// > HUD's reveal animation already keeps the stable prefix stable, so there
+/// > is no consumer of the `Operation` today. Re-evaluate only if injection
+/// > becomes incremental (per-key backspace + retype). See
+/// > `ARCHITECTURE.md` §7.
+///
 /// Streaming ASR revises the tail of a sentence as it refines its hypothesis.
 /// Replacing the whole visible transcript on every snapshot causes visible
 /// text jumps and target-app churn; this component instead converts two

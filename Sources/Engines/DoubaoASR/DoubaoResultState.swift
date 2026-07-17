@@ -70,8 +70,7 @@ public struct DoubaoResultState: Sendable {
         // the new utterance; otherwise long recordings lose all but the last one.
         let looksLikeNewUtterance = !isVadCommit
             && !interimText.isEmpty
-            && text.count * 2 < interimText.count
-            && !interimText.hasPrefix(text)
+            && ASRHypothesis.looksLikeNewUtterance(previous: interimText, candidate: text)
 
         let commit: Commit?
         if looksLikeNewUtterance {

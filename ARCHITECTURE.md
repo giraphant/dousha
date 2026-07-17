@@ -252,3 +252,31 @@ Verification for any pipeline change:
    - toggle Wi-Fi off/on mid-recording (QUA-193 reconnect + replay — grep the
      log for reconnect outcome);
    - rapid back-to-back recordings (detached close / concurrent-quota path).
+
+## 7. Reserved, not-yet-wired components
+
+`ASRSegmentModel` (QUA-265) and `StreamingTextReconciler` (QUA-263), both in
+`Sources/Common/ASRSupport/`, are pure, fully-tested logic that is **not**
+part of the recording pipeline. They were written ahead of the features that
+would consume them and are load-bearing nowhere today. They are kept as
+tested design assets, not deleted — but treat them as cold until a trigger
+below fires, and do not add new callers without that trigger.
+
+- **`ASRSegmentModel`** overlaps the shipping segmentation
+  (`DoubaoResultState`, `SonioxResponseParser`). Its differentiator —
+  `revisionWindow`, for Doubao `nonstream_result` second-pass revisions — was
+  not observed across two production log files (~2.9k streamed results):
+  `nonstream_result=true` appeared **0 times**. Its `pauseBoundary` has no
+  consumer. Wiring it just to "use" it duplicates live logic. Re-evaluate
+  when: `nonstream_result` late revisions are observed in production, a third
+  engine needs a shared segmentation layer, or pause-aware utterance
+  boundaries become a product feature.
+- **`StreamingTextReconciler`** computes a tail edit (`Operation`) for a
+  typewriter-style insertion path. `TextInjector` is clipboard+⌘V by design
+  (§5) and the HUD reveal animation already preserves the stable prefix, so
+  nothing consumes the `Operation`. Re-evaluate only if injection becomes
+  incremental (per-key backspace + retype).
+
+`TranscriptCorrector` (QUA-264) is the exception in this group: it IS wired —
+`RecordingController.handleFinal` applies it once per dictation. The other
+two are not, and should not be wired without the triggers above.
