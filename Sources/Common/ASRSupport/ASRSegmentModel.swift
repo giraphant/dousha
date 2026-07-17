@@ -15,6 +15,18 @@ public enum ASRHypothesis {
 /// A local, vendor-neutral, VAD-like segment model layered above the ASR
 /// engines (QUA-265).
 ///
+/// > **Status: reserved, not wired.** Pure logic + tests only — NOT part of
+/// > the recording pipeline. It overlaps the shipping segmentation
+/// > (`DoubaoResultState`, `SonioxResponseParser`), and its differentiator
+/// > (`revisionWindow`, for Doubao `nonstream_result` second-pass revisions)
+/// > has never fired in production: `nonstream_result=true` appeared **0 of
+/// > 2935** streamed results across two log files. Its `pauseBoundary` has no
+/// > consumer either. Do not wire it just to "use" it — that duplicates live
+/// > logic. Re-evaluate when: nonstream late revisions are observed in
+/// > production, a third engine needs a shared segmentation layer, or
+/// > pause-aware utterance boundaries become a product feature. See
+/// > `ARCHITECTURE.md` §7.
+///
 /// Dictation is modelled as an ordered sequence of utterance segments moving
 /// through a one-way lifecycle:
 ///
