@@ -157,9 +157,8 @@ public enum DoubaoExperimentProfile: String, Sendable {
 ///   - profile: Hidden QUA-167 ASR tuning profile. Defaults to `.official` so
 ///     existing callers and release behavior are unchanged.
 ///   - audioFormat: `audio_info.format` wire value. The production pipeline
-///     always sends `"speech_opus"`; the Windows-port smoke harness (QUA-209)
-///     probes alternative values (e.g. `"pcm"`) to learn whether the server
-///     accepts un-encoded audio — which would make libopus unnecessary.
+///     always sends `"speech_opus"`; the smoke harness probes alternative
+///     values (e.g. `"pcm"`).
 ///
 /// `end_smooth_window_ms` and `use_twopass_retry` mirror the official Doubao IME
 /// client's StartSession config in `.official`. The experiment profiles relax

@@ -390,7 +390,7 @@ final class RecordingControllerStopTests: XCTestCase {
     }
 
     private func result(text: String) -> TranscriptionResult {
-        TranscriptionResult(text: text, audioDuration: 1, lastResponseAge: nil, lastTranscriptAge: nil)
+        TranscriptionResult(text: text)
     }
 }
 

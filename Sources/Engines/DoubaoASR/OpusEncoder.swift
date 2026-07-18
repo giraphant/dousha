@@ -1,35 +1,11 @@
 import Foundation
-#if canImport(AVFoundation) && canImport(AudioToolbox)
 import AVFoundation
 import AudioToolbox
-#endif
 
-/// Platform seam (QUA-209): all DoubaoASR needs is "one 10ms Int16 PCM frame
-/// in, one Opus packet out". macOS satisfies it below with AVAudioConverter +
-/// AudioToolbox; the Windows port satisfies it with libopus.
-@_spi(SmokeCLI) public protocol OpusEncoding {
-    func encode(_ pcmFrame: Data) throws -> Data
-}
-
-/// Returns this platform's Opus encoder.
-@_spi(SmokeCLI) public func makeOpusEncoder() throws -> any OpusEncoding {
-    #if canImport(AVFoundation) && canImport(AudioToolbox)
-    return try OpusEncoder()
-    #else
-    // Windows: replaced by a libopus-backed encoder in the CLI-smoke milestone.
-    throw OpusEncoderUnavailable()
-    #endif
-}
-
-struct OpusEncoderUnavailable: Error, LocalizedError {
-    var errorDescription: String? { "No Opus encoder is implemented for this platform yet (QUA-209)" }
-}
-
-#if canImport(AVFoundation) && canImport(AudioToolbox)
 /// Encodes 16kHz Int16 mono PCM frames (160 samples / 320 bytes per 10ms frame) into Opus packets
 /// using AVAudioConverter + AudioToolbox's native Opus codec. No third-party dependencies.
 /// Frame size is derived from DoubaoConstants.frameDurationMs, so these figures track that constant.
-final class OpusEncoder: OpusEncoding {
+@_spi(SmokeCLI) public final class OpusEncoder {
     enum OpusError: Error, LocalizedError {
         case formatBuildFailed
         case converterInitFailed
@@ -51,9 +27,9 @@ final class OpusEncoder: OpusEncoding {
     private let converter: AVAudioConverter
     private let framesPerPacket: AVAudioFrameCount
 
-    init(sampleRate: Int = DoubaoConstants.sampleRate,
-         channels: Int = DoubaoConstants.channels,
-         frameDurationMs: Int = DoubaoConstants.frameDurationMs) throws {
+    public init(sampleRate: Int = DoubaoConstants.sampleRate,
+                channels: Int = DoubaoConstants.channels,
+                frameDurationMs: Int = DoubaoConstants.frameDurationMs) throws {
 
         let frames = AVAudioFrameCount(sampleRate * frameDurationMs / 1000)
         self.framesPerPacket = frames
@@ -91,7 +67,7 @@ final class OpusEncoder: OpusEncoding {
     }
 
     /// Encodes one 10ms PCM Int16 frame (`bytesPerFrame` bytes) into an Opus packet.
-    func encode(_ pcmFrame: Data) throws -> Data {
+    public func encode(_ pcmFrame: Data) throws -> Data {
         precondition(pcmFrame.count == DoubaoConstants.bytesPerFrame,
                      "OpusEncoder expected \(DoubaoConstants.bytesPerFrame) bytes, got \(pcmFrame.count)")
 
@@ -107,7 +83,10 @@ final class OpusEncoder: OpusEncoding {
         }
 
         let outBuf = AVAudioCompressedBuffer(format: outputFormat, packetCapacity: 1, maximumPacketSize: 1500)
-        var fed = false
+        // Synchronous: the converter input block runs inline within
+        // convert(to:error:), never concurrently.
+        nonisolated(unsafe) var fed = false
+        nonisolated(unsafe) let input = inBuf
         var convError: NSError?
         let status = converter.convert(to: outBuf, error: &convError) { _, outStatus in
             if fed {
@@ -116,7 +95,7 @@ final class OpusEncoder: OpusEncoding {
             }
             fed = true
             outStatus.pointee = .haveData
-            return inBuf
+            return input
         }
 
         if let err = convError {
@@ -131,4 +110,3 @@ final class OpusEncoder: OpusEncoding {
         return Data(bytes: ptr, count: bytes)
     }
 }
-#endif

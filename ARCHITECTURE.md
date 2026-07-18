@@ -20,29 +20,26 @@ ASRSupport                engine-agnostic domain types (PartialTranscript,
 DoubaoASR    SonioxASR    one streaming WS client each; peers, never import each other
         │         │
         ▼         ▼
-┌───────────────┬────────────────┬──────────────────┐
-Dousha          DoushaWin        SmokeCLI
-macOS app:      Windows shell    headless smoke
-UI, hotkeys,    (QUA-209):       harness: register /
-capture hub,    tray, hold-to-   ws-probe / transcribe
-orchestration,  talk, waveIn,    against the real
-settings        SendInput        Doubao servers
+┌───────────────┬──────────────────┐
+Dousha                   SmokeCLI
+macOS app:               headless smoke
+UI, hotkeys,             harness: register /
+capture hub,             ws-probe / transcribe
+orchestration,           against the real
+settings                 Doubao servers
 ```
 
-Platform model (QUA-209): macOS is tier 1 — the product. Windows is a tier-2
-best-effort build for one user; Mac features are NOT ported by default, and
-`DoushaWin` breaking never blocks Mac work. The one hard cross-platform
-constraint: the four shared targets (ConcurrencySupport, ASRSupport, DoubaoASR,
-SonioxASR) must keep compiling on Windows — CI enforces it.
+macOS-only. (A tier-2 Windows shell, `DoushaWin`, existed under QUA-209; it
+was removed in 2026-07 when its one user stopped using it — its platform
+gates, the hand-rolled `InsecureMD5`, and the `OpusEncoding` seam went with
+it. Resurrect from git history if a port is ever needed again.)
 
 Rules:
 
 - Lower layers never import higher ones. The two ASR clients are peers, and
-  the three entry points never import each other.
-- Shared targets stay platform-neutral via `#if canImport(...)` (capability
-  gates), never `#if os(...)` — the sole exception is the log-directory pick
-  in `Logging.swift`. Platform APIs (AppKit, WinSDK) live only in the entry
-  points under `Apps/` and `Tools/`.
+  the two entry points never import each other.
+- Platform APIs (AppKit) live only in the entry points under `Apps/` and
+  `Tools/`.
 - Library targets never read `Preferences` (or any app singleton). The app
   snapshots config at recording start and passes it in
   (`SonioxBackend`/`DoubaoBackend` snapshot glossary + language in
@@ -208,16 +205,10 @@ without new evidence.
   size alone.
 - **`MultiEngineBackend`'s helpers stay nested** — they are private to its
   orchestration and their doc comments reference its callback ordering.
-- **`DoushaWin` does not reuse `RecordingController`/`MultiEngineBackend`**
-  (QUA-209). Its ~470-line shell reimplements a much simpler loop on purpose:
-  single engine (Doubao/PCM), no multi-engine routing, no HUD partial router.
-  Extracting a shared cross-platform "app core" buys nothing until Windows
-  needs multiple engines — that day is the trigger to re-evaluate, not before.
 
 ## 6. Directory map & verification discipline
 
-Directories group targets by role, not platform (cross-platform-ness is a
-property of a layer, not a grouping axis):
+Directories group targets by role:
 
 ```
 Sources/
@@ -227,11 +218,10 @@ Sources/
   Engines/            one streaming ASR client per provider
     DoubaoASR/          Doubao WS client (protobuf, opus, reconnect, credentials)
     SonioxASR/          Soniox WS + async-batch client
-  Apps/               user-facing shells, one per platform
+  Apps/
     Dousha/             macOS app: AppDelegate wiring, RecordingController,
                         MultiEngineBackend + AudioTapHub, backends (adapters),
                         HUD (FloatingHUD*), Settings, hotkey monitors, Preferences
-    DoushaWin/          Windows shell: tray, hold-to-talk, waveIn, SendInput
   Tools/              developer-facing executables, never shipped
     SmokeCLI/           smoke harness — hits the REAL Doubao servers, so it can
                         never live in Tests/ (suite must stay offline/deterministic)
@@ -247,8 +237,7 @@ Verification for any pipeline change:
    back to ad-hoc and resets TCC grants.
 3. Real-device regression set for engine/network changes:
    - short dictation round-trip;
-   - 3+ minute dictation with mid-sentence pauses (ping keepalive +
-     segment-gap detection);
+   - 3+ minute dictation with mid-sentence pauses (ping keepalive);
    - toggle Wi-Fi off/on mid-recording (QUA-193 reconnect + replay — grep the
      log for reconnect outcome);
    - rapid back-to-back recordings (detached close / concurrent-quota path).

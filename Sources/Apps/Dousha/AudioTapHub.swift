@@ -243,8 +243,6 @@ actor AudioTapHub {
         // Snapshots for the audio-thread closure — it must not touch actor state.
         let pcmSinks = self.pcmSinks
         let bufferSinks = self.bufferSinks
-        let capturedConverter = UncheckedSendable(converter)
-        let capturedTarget = UncheckedSendable(target)
         let capturedWAV = self.wavWriter
         // Only do the int16 conversion if someone actually consumes it (a PCM
         // engine or the WAV). Apple-only recordings skip it entirely.
@@ -261,8 +259,6 @@ actor AudioTapHub {
 
             guard needPCM else { return }
 
-            let converter = capturedConverter.value
-            let target = capturedTarget.value
             let ratio = target.sampleRate / buffer.format.sampleRate
             let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 1024)
             guard let outBuf = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }

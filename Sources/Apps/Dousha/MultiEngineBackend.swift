@@ -477,9 +477,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                 let ms = timings[e].map { Int($0 * 1000) } ?? -1
                 return "\(e.rawValue)(\(len)ch,\(ms)ms\(e == primary ? ",P" : "")\(e == classifier ? ",CLS" : ""))"
             }.joined(separator: " ")
-            let result = results[engine] ?? TranscriptionResult(
-                text: "", audioDuration: 0, lastResponseAge: nil,
-                lastTranscriptAge: nil)
+            let result = results[engine] ?? TranscriptionResult(text: "")
             let onlineTag = onlineChosen.map { "online=\($0.rawValue)" } ?? "online=none"
             doushaLog("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | \(onlineTag) | picked=\(engine.rawValue) len=\(result.text.count)")
             // Yielding to the AsyncStream is thread-safe from any thread; the

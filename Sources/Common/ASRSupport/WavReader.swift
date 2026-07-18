@@ -1,13 +1,9 @@
 import Foundation
 
-/// Minimal RIFF/WAVE reader (QUA-209): rejects anything that isn't the
-/// expected PCM shape rather than resampling — generate fixtures with
-/// `afconvert`/`ffmpeg`. Pure Foundation so it runs on Windows (WavFileWriter
-/// next door is the AVFoundation-backed, Darwin-only write side).
+/// Minimal RIFF/WAVE reader: rejects anything that isn't the expected PCM
+/// shape rather than resampling — generate fixtures with `afconvert`/`ffmpeg`.
 ///
-/// Consumers: the Doubao smoke harness (`smoke-cli transcribe`) and the
-/// Windows shell's `--doctor --wav` mode, which feeds a WAV through the live
-/// engine when no microphone is available.
+/// Consumer: the Doubao smoke harness (`smoke-cli transcribe`).
 public enum WavReader {
     struct WavError: Error, LocalizedError {
         let message: String

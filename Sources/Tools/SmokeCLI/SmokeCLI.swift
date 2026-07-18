@@ -2,14 +2,13 @@ import Foundation
 import DoubaoASR
 import SmokeCLISupport
 
-/// Headless smoke harness, born with the Windows port (QUA-209). Not shipped
-/// to end users — exists so the engine pipeline can be exercised on a platform
-/// where the menu-bar app doesn't build yet, over SSH, with no GUI. It hits
-/// the REAL Doubao servers, which is why it lives in Tools/ and not Tests/:
-/// the unit-test suite must stay offline and deterministic.
+/// Headless smoke harness. Not shipped to end users — exists so the engine
+/// pipeline can be exercised over SSH, with no GUI. It hits the REAL Doubao
+/// servers, which is why it lives in Tools/ and not Tests/: the unit-test
+/// suite must stay offline and deterministic.
 ///
 /// Deliberately zero dependencies (no swift-argument-parser): two
-/// subcommands don't justify a package graph change on a brand-new platform.
+/// subcommands don't justify a package graph change.
 @main
 struct SmokeCLI {
     static func main() async {

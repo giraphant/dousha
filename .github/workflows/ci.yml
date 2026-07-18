@@ -1,10 +1,5 @@
-# CI for QUA-209: the Windows dev box is usually powered off, so GitHub
-# Actions is the always-on regression guard for the Windows port.
-#
-# - windows job: core modules, DoushaWin, smoke-cli, and Windows tests.
-#   There is no network smoke here: ws-probe/transcribe hit the real Doubao
-#   servers and would register a throwaway device per run.
-# - macos job: full build + test suite guards the production side.
+# macOS build + full test suite. No network smoke here: ws-probe/transcribe
+# hit the real Doubao servers and would register a throwaway device per run.
 name: CI
 
 on:
@@ -14,23 +9,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  windows:
-    name: Windows build + tests
-    runs-on: windows-latest
-    steps:
-      - uses: compnerd/gha-setup-swift@main
-        with:
-          swift-version: swift-6.3.2-release
-          swift-build: 6.3.2-RELEASE
-          cache: true
-      - uses: actions/checkout@v4
-      - name: Build
-        run: swift build
-      - name: Test
-        run: swift test
-      - name: CLI smoke (usage exits 0, no network)
-        run: .build\debug\smoke-cli.exe
-
   macos:
     name: macOS build + tests
     runs-on: macos-latest

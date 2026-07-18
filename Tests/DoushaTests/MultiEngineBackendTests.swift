@@ -21,8 +21,7 @@ final class MultiEngineBackendTests: XCTestCase {
 
         init(text: String, errorOnStart: Error? = nil, stopDelay: TimeInterval = 0,
              partialOnStart: String? = nil) {
-            self.result = TranscriptionResult(text: text, audioDuration: 1,
-                                              lastResponseAge: nil, lastTranscriptAge: nil)
+            self.result = TranscriptionResult(text: text)
             self.errorOnStart = errorOnStart
             self.stopDelay = stopDelay
             self.partialOnStart = partialOnStart
@@ -67,8 +66,7 @@ final class MultiEngineBackendTests: XCTestCase {
         for await event in stream {
             if case .final(let r) = event { return r }
         }
-        return TranscriptionResult(text: "<no final>", audioDuration: 0,
-                                   lastResponseAge: nil, lastTranscriptAge: nil)
+        return TranscriptionResult(text: "<no final>")
     }
 
     /// Polls `cond` until true or timeout (non-MainActor; for the cancel test).

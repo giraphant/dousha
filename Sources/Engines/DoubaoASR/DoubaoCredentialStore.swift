@@ -1,12 +1,9 @@
+import CryptoKit
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ConcurrencySupport
 
 @_spi(SmokeCLI) public struct DeviceCredentials: Codable, Sendable {
     public var deviceId: String
-    public var installId: String
     public var cdid: String
     public var openudid: String
     public var clientudid: String
@@ -186,18 +183,9 @@ public actor DoubaoCredentialStore {
             throw DoubaoError.registrationFailed("missing or zero device_id in response: \(json)")
         }
         doushaLog("[DoubaoASR] registered device_id=\(deviceId)")
-        let installId: String
-        if let s = json["install_id_str"] as? String, !s.isEmpty {
-            installId = s
-        } else if let n = json["install_id"] as? NSNumber {
-            installId = n.stringValue
-        } else {
-            installId = ""
-        }
 
         return DeviceCredentials(
             deviceId: deviceId,
-            installId: installId,
             cdid: cdid,
             openudid: openudid,
             clientudid: clientudid,
@@ -225,7 +213,9 @@ public actor DoubaoCredentialStore {
 
         let bodyStr = "body=null"
         let bodyData = Data(bodyStr.utf8)
-        let stub = InsecureMD5.hexUpper(bodyData)
+        // `x-ss-stub` is a protocol checksum (uppercase MD5 hex of the body),
+        // not a security boundary.
+        let stub = Insecure.MD5.hash(data: bodyData).map { String(format: "%02X", $0) }.joined()
 
         var req = URLRequest(url: components.url!)
         req.httpMethod = "POST"

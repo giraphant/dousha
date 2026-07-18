@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ConcurrencySupport
 import ASRSupport
 
@@ -73,13 +70,6 @@ public actor SonioxASR {
 
     private var totalPcmBytesOut: Int = 0
 
-    /// When audio capture began for this session. Set in `prepareSession`
-    /// (the mic + shared WAV are owned by the `AudioTapHub`); drives the
-    /// reported `audioDuration`.
-    private var audioStartedAt: Date?
-    private var lastResponseAt: Date?
-    private var lastTranscriptAt: Date?
-
     /// Creates an idle recognizer. No mic, network, or key validation happens
     /// until `prepareSession()` / `openStream()`. `mode` picks real-time
     /// WebSocket streaming or async (batch) upload-on-stop.
@@ -117,9 +107,6 @@ public actor SonioxASR {
         self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
         self.finishedChannel = OneShotChannel<Void>()
-        self.audioStartedAt = Date()
-        self.lastResponseAt = nil
-        self.lastTranscriptAt = nil
         doushaLog("[SonioxASR] traceId=\(requestId) prepareSession mode=\(mode.rawValue) (capture owned by AudioTapHub)")
     }
 
@@ -308,20 +295,10 @@ public actor SonioxASR {
     }
 
     private func makeResult() -> TranscriptionResult {
-        let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
-        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
-        return TranscriptionResult(
-            // displayText = finalText + interim. When finished, interim is
-            // flushed so this equals finalText; on a finished-wait timeout it
-            // preserves the trailing interim instead of dropping it.
-            text: parser.displayText,
-            audioDuration: audioDuration,
-            lastResponseAge: lastResponseAge,
-            lastTranscriptAge: lastTranscriptAge,
-            maxSegmentGap: nil,
-            traceId: requestId
-        )
+        // displayText = finalText + interim. When finished, interim is
+        // flushed so this equals finalText; on a finished-wait timeout it
+        // preserves the trailing interim instead of dropping it.
+        TranscriptionResult(text: parser.displayText, traceId: requestId)
     }
 
     private func closeWebSocket() async {
@@ -472,7 +449,6 @@ public actor SonioxASR {
     }
 
     private func handleResponseData(_ data: Data) {
-        self.lastResponseAt = Date()
         guard let update = parser.ingest(jsonData: data) else {
             return
         }
@@ -486,7 +462,6 @@ public actor SonioxASR {
         }
 
         if update.didProduceContent {
-            self.lastTranscriptAt = Date()
             let partial = PartialTranscript(finalText: update.finalText, interimText: update.interimText)
             let cb = onPartial
             DispatchQueue.main.async { cb?(partial) }

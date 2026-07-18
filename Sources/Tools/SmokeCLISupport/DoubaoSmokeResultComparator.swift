@@ -22,8 +22,6 @@ public enum DoubaoSmokeResultComparator {
         public var exactMatch: Bool
         public var normalizedMatch: Bool
         public var candidateEmpty: Bool
-        public var officialLength: Int
-        public var candidateLength: Int
         public var lengthDelta: Int
         public var commonPrefixLength: Int
         public var similarity: Double
@@ -60,8 +58,6 @@ public enum DoubaoSmokeResultComparator {
             exactMatch: officialTranscript == candidateTranscript,
             normalizedMatch: normalizedOfficial == normalizedCandidate,
             candidateEmpty: candidateTranscript.isEmpty,
-            officialLength: officialTranscript.count,
-            candidateLength: candidateTranscript.count,
             lengthDelta: candidateTranscript.count - officialTranscript.count,
             commonPrefixLength: commonPrefix,
             similarity: similarity,

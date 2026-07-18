@@ -1,14 +1,10 @@
 import Foundation
-#if canImport(AVFoundation)
 import AVFoundation
-#endif
 
 public enum AudioLevel {
     /// Returns a 0...1 RMS level suitable for driving a waveform UI.
     /// Boosts raw RMS (~0.02-0.15 for normal speech) so the bars react well.
     ///
-    /// Platform-neutral core (QUA-209): operates on raw float samples so the
-    /// Windows capture path can reuse it without AVFoundation.
     public static func computeRMS(samples: UnsafePointer<Float>, count: Int) -> Float {
         guard count > 0 else { return 0 }
         var sum: Float = 0

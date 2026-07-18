@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ConcurrencySupport
 import ASRSupport
 
@@ -15,7 +12,7 @@ import ASRSupport
 /// Doubao's per-device concurrent quota to fill up after a few fast
 /// sessions; the ~600ms TLS+StartTask cost per call is the price.
 public actor DoubaoASR {
-    private var opusEncoder: (any OpusEncoding)?
+    private var opusEncoder: OpusEncoder?
 
     private var session: URLSession?
     private var ws: URLSessionWebSocketTask?
@@ -124,24 +121,13 @@ public actor DoubaoASR {
     private var totalPcmBytesOut: Int = 0
 
     /// When audio capture began for this session. Set in `prepareSession`
-    /// (capture itself is now owned by the shared `AudioTapHub`); drives the
-    /// trace clock and the reported `audioDuration`.
+    /// (capture itself is owned by the shared `AudioTapHub`); drives the
+    /// trace clock in log lines.
     private(set) var audioStartedAt: Date?
 
-    /// Wall-clock timestamps of every VAD-finalized segment commit during this
-    /// recording. Used by the detector to spot large gaps that indicate Doubao
-    /// silently dropped a chunk of audio mid-recording.
-    private(set) var segmentCommittedAt: [Date] = []
-
-    /// Any byte from the server (heartbeats included). For debugging "is the WS
-    /// alive at all" — NOT the heuristic's staleness signal (heartbeats would mask
-    /// real drops). See `lastTranscriptAt` for that.
-    private(set) var lastResponseAt: Date?
-
     /// Wall-clock of the last server message that carried non-empty transcript
-    /// content (`results[].text` non-empty). This is what the incomplete-detector
-    /// looks at to decide "did the server stop producing text long before the
-    /// user released?".
+    /// content (`results[].text` non-empty). Feeds the `lastTranscriptAge`
+    /// fields in the stop-path log lines.
     private(set) var lastTranscriptAt: Date?
 
     /// Creates an idle recognizer. No mic access, network, or registration
@@ -175,7 +161,6 @@ public actor DoubaoASR {
         self.onPartial = onPartial
         self.onError = onError
         self.resultState = DoubaoResultState()
-        self.segmentCommittedAt = []
         self.pcmBuffer = Data()
         self.didSendFirstFrame = false
         self.canSendAudio = false
@@ -191,7 +176,6 @@ public actor DoubaoASR {
         self.finishedChannel = OneShotChannel<Void>()
         self.streamReadyChannel = OneShotChannel<Void>()
         self.audioStartedAt = Date()
-        self.lastResponseAt = nil
         self.lastTranscriptAt = nil
         doushaLog("[DoubaoASR] traceId=\(requestId) prepareSession \(experimentProfile.logSummary) (capture owned by AudioTapHub)")
     }
@@ -253,16 +237,8 @@ public actor DoubaoASR {
         self.deviceId = creds.deviceId
         doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
 
-        #if canImport(AVFoundation) && canImport(AudioToolbox)
-        self.opusEncoder = try makeOpusEncoder()
+        self.opusEncoder = try OpusEncoder()
         doushaLog("[DoubaoASR] opus encoder ready")
-        #else
-        // QUA-209: no opus encoder on this platform. The server accepts raw
-        // s16le with audio_info.format="pcm" (smoke-verified byte-identical
-        // transcripts on Windows), so we stream PCM instead — ~32KB/s upstream
-        // vs ~3KB/s opus, acceptable for dictation.
-        doushaLog("[DoubaoASR] no opus encoder on this platform — streaming raw PCM (format=\(Self.wireFormat))")
-        #endif
 
         if self.ws == nil {
             try openWebSocket()
@@ -329,7 +305,6 @@ public actor DoubaoASR {
         taskStarted = false
         didSendFirstFrame = false
         resultState = DoubaoResultState()
-        segmentCommittedAt = []
 
         // Move retained audio to the front of the send buffer so the fresh session
         // replays the whole recording ahead of any live audio that arrived while we
@@ -426,14 +401,7 @@ public actor DoubaoASR {
     private func _stop() async -> TranscriptionResult {
         doushaLog("[DoubaoASR] stop() isRunning=\(isRunning)")
         guard isRunning else {
-            return TranscriptionResult(
-                text: bestText(),
-                audioDuration: 0,
-                lastResponseAge: nil,
-                lastTranscriptAge: nil,
-                maxSegmentGap: nil,
-                traceId: requestId
-            )
+            return TranscriptionResult(text: bestText(), traceId: requestId)
         }
         let stopStartedAt = Date()
         self.stopStartedAt = stopStartedAt
@@ -541,14 +509,7 @@ public actor DoubaoASR {
             let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
             doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms SessionFinished missing (outcome=\(outcomeStr)); returning empty result partial.len=\(partialLen) segments=\(resultState.committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
             detachAndCloseWebSocketInBackground()
-            return TranscriptionResult(
-                text: "",
-                audioDuration: audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0,
-                lastResponseAge: lastResponseAt.map { Date().timeIntervalSince($0) },
-                lastTranscriptAge: lastTranscriptAt.map { Date().timeIntervalSince($0) },
-                maxSegmentGap: nil,
-                traceId: requestId
-            )
+            return TranscriptionResult(text: "", traceId: requestId)
         }
 
         let final = assembledText()
@@ -779,16 +740,8 @@ public actor DoubaoASR {
         }
     }
 
-    /// Wire audio format. Darwin encodes 10ms frames to opus (official-client
-    /// parity); platforms without an encoder stream raw s16le PCM, which the
-    /// server transcribes identically (QUA-209).
-    static let wireFormat: String = {
-        #if canImport(AVFoundation) && canImport(AudioToolbox)
-        return "speech_opus"
-        #else
-        return "pcm"
-        #endif
-    }()
+    /// Wire audio format: 10ms frames encoded to opus (official-client parity).
+    static let wireFormat = "speech_opus"
 
     private func sessionConfigJSON(deviceId: String) -> String {
         buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint, profile: experimentProfile, audioFormat: Self.wireFormat)
@@ -877,7 +830,6 @@ public actor DoubaoASR {
     }
 
     private func handleResponseData(_ data: Data) {
-        self.lastResponseAt = Date()
         guard let resp = try? AsrResponse.decode(data) else {
             doushaLog("[DoubaoASR] recv: decode failed (\(data.count) bytes)")
             return
@@ -928,10 +880,8 @@ public actor DoubaoASR {
 
         switch update.commit {
         case .rescued(let rescued):
-            segmentCommittedAt.append(Date())
             doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment rescued index=\(resultState.committedSegments.count) text.len=\(rescued.count) newText.len=\(update.text.count)")
         case .final(let text):
-            segmentCommittedAt.append(Date())
             doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment final index=\(resultState.committedSegments.count) text.len=\(text.count)")
         case nil:
             break
@@ -957,27 +907,7 @@ public actor DoubaoASR {
     }
 
     private func currentResult() -> TranscriptionResult {
-        let now = Date()
-        let audioDuration: TimeInterval = audioStartedAt.map { now.timeIntervalSince($0) } ?? 0
-        let lastResponseAge: TimeInterval? = lastResponseAt.map { now.timeIntervalSince($0) }
-        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { now.timeIntervalSince($0) }
-        let maxSegmentGap: TimeInterval? = {
-            guard segmentCommittedAt.count >= 2 else { return nil }
-            var maxGap: TimeInterval = 0
-            for i in 1..<segmentCommittedAt.count {
-                let gap = segmentCommittedAt[i].timeIntervalSince(segmentCommittedAt[i-1])
-                if gap > maxGap { maxGap = gap }
-            }
-            return maxGap
-        }()
-        return TranscriptionResult(
-            text: bestText(),
-            audioDuration: audioDuration,
-            lastResponseAge: lastResponseAge,
-            lastTranscriptAge: lastTranscriptAge,
-            maxSegmentGap: maxSegmentGap,
-            traceId: requestId
-        )
+        TranscriptionResult(text: bestText(), traceId: requestId)
     }
 
     private func traceElapsedMs(now: Date = Date()) -> Int {
@@ -1002,7 +932,8 @@ public actor DoubaoASR {
         try? await flushPendingFrames()
     }
 
-    /// Sends as many complete 20ms frames as the buffer holds. No-op until
+    /// Sends as many complete frames (`Constants.bytesPerFrame`) as the buffer
+    /// holds. No-op until
     /// `canSendAudio` is true (i.e., until StartSession has succeeded).
     ///
     /// Each dequeued frame is appended to `retainedPCM` *before* the send so it can

@@ -6,7 +6,6 @@ final class FloatingHUDLayoutTests: XCTestCase {
     func testCompactCardHeightUnchanged() {
         // The empty/no-text card keeps its original design + height.
         XCTAssertEqual(FloatingHUDView.compactHeight, 71)
-        XCTAssertEqual(FloatingHUDView.cardHeight, 71)
     }
 
     @MainActor
@@ -33,7 +32,6 @@ final class FloatingHUDLayoutTests: XCTestCase {
                 + FloatingHUDView.transcriptTextBandHeight
                 + FloatingHUDView.transcriptBottomPadding
         )
-        XCTAssertEqual(FloatingHUDView.transcriptMaxHeight, FloatingHUDView.transcriptViewportHeight)
         XCTAssertEqual(
             FloatingHUDView.maxHeight,
             FloatingHUDView.transcriptViewportHeight + FloatingHUDView.meterRegionHeight
@@ -121,7 +119,6 @@ final class FloatingHUDLayoutTests: XCTestCase {
     @MainActor
     func testTranscriptTopBreathingRoomIsReservedOutsideTextBand() {
         XCTAssertEqual(FloatingHUDView.transcriptTopPadding, 12)
-        XCTAssertEqual(FloatingHUDView.transcriptFadeHeight, 0)
         XCTAssertGreaterThan(FloatingHUDView.transcriptTopPadding, FloatingHUDView.transcriptBottomPadding)
         XCTAssertGreaterThan(
             FloatingHUDView.transcriptTextBandHeight,
@@ -143,18 +140,11 @@ final class FloatingHUDLayoutTests: XCTestCase {
     }
 
     @MainActor
-    func testTranscriptOverflowUsesHardClipSoVisibleRowsStayIntact() {
-        XCTAssertEqual(FloatingHUDView.transcriptFadeHeight, 0)
-        XCTAssertEqual(FloatingHUDView.transcriptFadeStopLocation(), 0)
-    }
-
-    @MainActor
     func testBorderBeamUsesReferenceStyleInverseMaskGlow() {
         XCTAssertEqual(FloatingHUDView.borderBeamLineWidth, 0.9)
         XCTAssertEqual(FloatingHUDView.borderBeamGlowRadius, 15.0)
         XCTAssertEqual(FloatingHUDView.borderBeamPadding, 0.5)
         XCTAssertEqual(HUDBorderBeam.baseStrokeOpacity, 0.30)
-        XCTAssertEqual(HUDBorderBeam.inverseMaskBlurMultiplier, 1.0)
         XCTAssertEqual(HUDBorderBeam.beamMaskBlurDivisor, 1.5)
         XCTAssertEqual(HUDBorderBeam.beamMaskPaddingMultiplier, -2.0)
         XCTAssertEqual(HUDBorderBeam.beamVisibleStartLocation, 0.52)

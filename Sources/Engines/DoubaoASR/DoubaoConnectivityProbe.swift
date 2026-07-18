@@ -1,18 +1,11 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ConcurrencySupport
 
-/// Staged connectivity probe for the Doubao ASR pipeline (QUA-209).
+/// Staged connectivity probe for the Doubao ASR pipeline.
 ///
-/// Exists to answer the Windows port's #1 risk in isolation: does
-/// FoundationNetworking's libcurl-backed `URLSessionWebSocketTask` actually
-/// work at runtime against the real Doubao frontier servers? It exercises
-/// the full pre-audio path — device registration / cached credentials,
-/// WS TLS upgrade, binary protobuf StartTask round-trip — while deliberately
-/// bypassing `makeOpusEncoder()` (which throws on Windows until libopus
-/// lands) and the mic capture stack.
+/// Exercises the full pre-audio path in isolation — device registration /
+/// cached credentials, WS TLS upgrade, binary protobuf StartTask round-trip —
+/// while deliberately bypassing the opus encoder and the mic capture stack.
 ///
 /// Lives inside DoubaoASR (not the CLI) for the same reason
 /// `SonioxConnectivityTest` lives inside SonioxASR: it needs internal access

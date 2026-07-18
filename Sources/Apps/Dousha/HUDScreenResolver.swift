@@ -75,22 +75,9 @@ enum HUDScreenResolver {
 
     private static func bestScreen(forWindowFrame windowFrame: CGRect,
                                    screens: [NSScreen]) -> NSScreen? {
-        guard !windowFrame.isNull, !windowFrame.isEmpty else { return nil }
-
-        var best: (screen: NSScreen, area: CGFloat)?
-        for screen in screens {
-            let area = intersectionArea(windowFrame, screen.frame)
-            if area > (best?.area ?? 0) {
-                best = (screen, area)
-            }
-        }
-
-        if let best, best.area > 0 {
-            return best.screen
-        }
-
-        let center = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
-        return screens.first { $0.frame.contains(center) }
+        guard let frame = bestScreenFrame(forWindowFrame: windowFrame,
+                                          screenFrames: screens.map(\.frame)) else { return nil }
+        return screens.first { $0.frame == frame }
     }
 
     private static func intersectionArea(_ a: CGRect, _ b: CGRect) -> CGFloat {

@@ -13,7 +13,6 @@ private struct CardFrameKey: PreferenceKey {
 final class FloatingHUDModel: ObservableObject {
     @Published var status: RecordingStatus = .idle
     @Published var focus: AppFocusTracker.Focus?
-    var audioLevel: Float = 0
 
     /// The visible (revealed) transcript slice the view renders — a prefix of
     /// `target` that a timer drips out one-ish character at a time so the batchy
@@ -150,13 +149,11 @@ final class FloatingHUDModel: ObservableObject {
         h.append(level)
         levelUpdatedAt = Date.timeIntervalSinceReferenceDate
         levelHistory = h
-        audioLevel = level
     }
 
     func resetLevels() {
         levelUpdatedAt = Date.timeIntervalSinceReferenceDate
         levelHistory = Array(repeating: 0, count: 40)
-        audioLevel = 0
     }
 }
 
@@ -180,7 +177,6 @@ struct FloatingHUDView: View {
     /// Baseline compact HUD height — the empty/no-text card (context row +
     /// meter). Unchanged from the original design.
     static let compactHeight: CGFloat = 71
-    static let cardHeight: CGFloat = 71
     static let cardWidth: CGFloat = 280
     static let contextRowCenterYRatio: CGFloat = 0.30
     static let levelMeterCenterYRatio: CGFloat = 0.70
@@ -195,9 +191,6 @@ struct FloatingHUDView: View {
     static let transcriptTopPadding: CGFloat = 12
     static let transcriptBottomPadding: CGFloat = 6
     private static let transcriptHorizontalPadding: CGFloat = 16
-    /// Overflow uses a bottom-anchored ScrollView rather than a fade mask, so the
-    /// first visible row stays intact when the transcript reaches the 5-line cap.
-    static let transcriptFadeHeight: CGFloat = 0
     /// Bottom strip reserved for the meter while transcript is showing.
     static let meterRegionHeight: CGFloat = 28
     /// SwiftUI's rendered 13pt medium Chinese rows need more vertical box than
@@ -207,8 +200,6 @@ struct FloatingHUDView: View {
     static let transcriptTextBandHeight: CGFloat = transcriptRenderedLinePitch * CGFloat(maxTranscriptLines)
     /// Transcript viewport cap: top padding + visible rows + bottom breathing room.
     static let transcriptViewportHeight: CGFloat = measuredTranscriptViewportHeight()
-    /// Backward-compatible name for the capped transcript viewport height.
-    static let transcriptMaxHeight: CGFloat = transcriptViewportHeight
     /// Grown card cap = transcript cap + meter strip. The fixed panel sizes to this.
     static let maxHeight: CGFloat = transcriptViewportHeight + meterRegionHeight
     /// FloatingWindow sizes the (fixed) panel to the cap so the grown card fits.
@@ -248,14 +239,6 @@ struct FloatingHUDView: View {
         let needed = resolvedTranscriptViewportHeight(measuredTextHeight: measuredTextHeight, capHeight: capHeight)
             + meterRegionHeight
         return min(maxHeight, max(compactHeight, needed))
-    }
-
-    static func transcriptFadeStopLocation(
-        fadeHeight: CGFloat = transcriptFadeHeight,
-        viewportHeight: CGFloat = transcriptViewportHeight
-    ) -> CGFloat {
-        guard viewportHeight > 0 else { return 0 }
-        return min(1, max(0, fadeHeight / viewportHeight))
     }
 
     static let borderBeamLineWidth: CGFloat = 0.9
