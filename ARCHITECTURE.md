@@ -10,7 +10,7 @@ the per-line version of this document; both are normative.
 
 ```
 ConcurrencySupport        concurrency primitives (SessionGeneration, OneShotChannel,
-        │                 GenerationCloseChannels, Lock, doushaLog, UncheckedSendable)
+        │                 GenerationCloseChannels, Lock, doushaLog)
         ▼
 ASRSupport                engine-agnostic domain types (PartialTranscript,
         │                 TranscriptionResult, TranscriptFormatter,

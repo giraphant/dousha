@@ -52,16 +52,6 @@ import Foundation
     public static var samplesPerFrame: Int { sampleRate * frameDurationMs / 1000 }   // 160
     public static var bytesPerFrame: Int { samplesPerFrame * 2 }                     // 320 (Int16)
 
-    // Trailing silence appended on stop() before FinishSession. Was 2s, tuned
-    // back when there was no explicit end-of-audio signal and the server's VAD
-    // only finalized the last utterance after hearing enough trailing silence.
-    // The last frame now carries `finish_audio: true` plus FinishSession, so the
-    // server should finalize the tail on that signal alone — this is 0 pending
-    // real-device confirmation that the final word isn't truncated. If tail loss
-    // returns, raise this.
-    static let trailingSilencePadMs = 0
-    static var trailingSilencePadSamples: Int { sampleRate * trailingSilencePadMs / 1000 }
-
     // If the user stops before StartTask/StartSession completed, Doubao has not
     // sent any audio yet. Give the startup path a short chance to become ready;
     // after that, return an empty result so MultiEngine can use a backup engine

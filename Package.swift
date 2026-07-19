@@ -10,10 +10,6 @@ let package = Package(
     name: "Dousha",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "ConcurrencySupport", targets: ["ConcurrencySupport"]),
-        .library(name: "ASRSupport",       targets: ["ASRSupport"]),
-        .library(name: "DoubaoASR",        targets: ["DoubaoASR"]),
-        .library(name: "SonioxASR",        targets: ["SonioxASR"]),
         // Headless smoke harness against the real Doubao servers.
         .executable(name: "smoke-cli",     targets: ["SmokeCLI"]),
         .executable(name: "Dousha",        targets: ["Dousha"]),
@@ -51,11 +47,6 @@ let package = Package(
             name: "SmokeCLI",
             dependencies: ["DoubaoASR", "SmokeCLISupport"],
             path: "Sources/Tools/SmokeCLI"
-        ),
-        .testTarget(
-            name: "SmokeCLITests",
-            dependencies: ["SmokeCLISupport"],
-            path: "Tests/SmokeCLITests"
         ),
         .executableTarget(
             name: "Dousha",

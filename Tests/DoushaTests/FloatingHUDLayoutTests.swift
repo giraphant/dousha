@@ -19,8 +19,6 @@ final class FloatingHUDLayoutTests: XCTestCase {
     func testCardCanGrowFromCompactToCap() {
         // Once transcript text arrives the card grows beyond compact.
         XCTAssertGreaterThan(FloatingHUDView.maxHeight, FloatingHUDView.compactHeight)
-        // The fixed panel is sized to the grown cap so the card always fits.
-        XCTAssertEqual(FloatingHUDView.cardMaxHeight, FloatingHUDView.maxHeight)
     }
 
     @MainActor

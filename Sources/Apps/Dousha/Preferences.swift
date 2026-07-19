@@ -74,7 +74,6 @@ final class Preferences: @unchecked Sendable {
         static let refineMode                = "refineMode"
         static let showDockIcon              = "showDockIcon"
         static let showMenuBarIcon           = "showMenuBarIcon"
-        static let voiceProcessingEnabled    = "voiceProcessingEnabled"
         // 麦克风选择：useSystemDefault=true 时沿用 macOS 默认输入设备；否则按
         // priorityUIDs 的顺序挑选第一个可用设备，找不到再退回推荐排序。
         static let microphoneUseSystemDefault = "microphoneUseSystemDefault"
@@ -109,10 +108,6 @@ final class Preferences: @unchecked Sendable {
             // Menu-bar accessory app by default: no Dock icon, status item shown.
             Keys.showDockIcon:             false,
             Keys.showMenuBarIcon:          true,
-            // Experimental: Apple's Voice Processing can switch macOS onto a
-            // hidden aggregate device on some setups, so keep raw mic capture as
-            // the safe default.
-            Keys.voiceProcessingEnabled:   false,
             Keys.microphoneUseSystemDefault: true,
             Keys.microphonePriorityUIDs:     [String](),
             // Spokenly-style background-audio controls. Muting is a safe default for
@@ -130,14 +125,6 @@ final class Preferences: @unchecked Sendable {
     var showMenuBarIcon: Bool {
         get { defaults.bool(forKey: Keys.showMenuBarIcon) }
         set { defaults.set(newValue, forKey: Keys.showMenuBarIcon) }
-    }
-
-    var voiceProcessingEnabled: Bool {
-        // Deprecated / disabled: the AVAudioEngine Voice Processing path can route
-        // capture to hidden aggregate/system-playback devices. Ignore stale stored
-        // `true` values so an older build's setting cannot re-enable it.
-        get { false }
-        set { defaults.set(false, forKey: Keys.voiceProcessingEnabled) }
     }
 
     var microphoneSelection: MicrophoneSelectionPreference {

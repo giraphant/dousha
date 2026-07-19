@@ -688,38 +688,21 @@ struct SettingsView: View {
 
 /// One-shot CGEvent tap that captures the next whitelisted modifier press,
 /// then automatically tears down. Used by the Settings "Record" button.
+/// Mirrors `CancelKeyRecorder` but listens to flagsChanged instead of keyDown.
 final class HotkeyRecorder: @unchecked Sendable {
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private let tap = EventTap()
     private var onCaptured: (@MainActor (UInt16) -> Void)?
 
     func start(onCaptured: @escaping @MainActor (UInt16) -> Void) {
-        guard eventTap == nil else { return }
+        guard !tap.isInstalled else { return }
         self.onCaptured = onCaptured
 
         let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
-        let userInfo = Unmanaged.passUnretained(self).toOpaque()
-        let callback: CGEventTapCallBack = { _, type, event, refcon in
-            guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
-            let me = Unmanaged<HotkeyRecorder>.fromOpaque(refcon).takeUnretainedValue()
-            return me.handle(type: type, event: event)
+        if !tap.install(mask: mask, label: "HotkeyRecorder", handler: { [weak self] type, event in
+            self?.handle(type: type, event: event) ?? Unmanaged.passUnretained(event)
+        }) {
+            self.onCaptured = nil
         }
-
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: userInfo
-        ) else {
-            doushaLog("[Dousha] HotkeyRecorder: failed to create event tap")
-            return
-        }
-        eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     func cancel() { teardown() }
@@ -745,14 +728,7 @@ final class HotkeyRecorder: @unchecked Sendable {
     }
 
     private func teardown() {
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-            runLoopSource = nil
-        }
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            eventTap = nil
-        }
+        tap.teardown()
         onCaptured = nil
     }
 }

@@ -240,12 +240,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         let hub = AudioTapHub(pcmSinks: pcmSinks,
                               bufferSinks: bufferSinks,
                               wantsWAV: wantsWAV,
-                              // The AVAudioEngine Voice Processing route is known-broken
-                              // on real macOS setups with virtual/aggregate audio devices:
-                              // it can switch capture to multi-channel or system playback.
-                              // Keep the plumbing for future lower-level experiments, but
-                              // never enable it from persisted user defaults in production.
-                              voiceProcessingEnabled: false,
+                              // AVAudioEngine Voice Processing route removed as known-broken with virtual/aggregate devices; resurrect from git.
                               microphoneSelection: prefs.microphoneSelection,
                               audioControls: audioControls)
 

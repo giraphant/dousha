@@ -41,7 +41,6 @@ public struct SonioxResponseParser: Sendable {
     /// Outcome of ingesting one batch, so the actor can react (deliver partial,
     /// signal finished, deliver error) without re-reading parser state.
     public struct Update: Sendable, Equatable {
-        public let displayText: String
         public let finalText: String
         public let interimText: String
         public let didProduceContent: Bool
@@ -65,7 +64,7 @@ public struct SonioxResponseParser: Sendable {
         if let code = obj["error_code"], !(code is NSNull) {
             let msg = (obj["error_message"] as? String) ?? "Soniox error (\(code))"
             errorMessage = msg
-            return Update(displayText: displayText, finalText: finalText, interimText: interimText,
+            return Update(finalText: finalText, interimText: interimText,
                           didProduceContent: false, finished: false, errorMessage: msg)
         }
 
@@ -116,7 +115,6 @@ public struct SonioxResponseParser: Sendable {
         // spacing (QUA-173). `displayText` normalises the combined string for the
         // committed/pasted result.
         return Update(
-            displayText: displayText,
             finalText: TranscriptFormatter.normalize(finalText),
             interimText: TranscriptFormatter.normalize(interimText),
             didProduceContent: produced,

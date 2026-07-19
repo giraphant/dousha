@@ -184,8 +184,11 @@ enum AudioInputDevices {
     }
 
     private static func defaultInputDeviceID() throws -> AudioDeviceID {
-        try audioDeviceIDProperty(kAudioHardwarePropertyDefaultInputDevice,
-                                  operation: "get default input device")
+        try coreAudioProperty(object: AudioObjectID(kAudioObjectSystemObject),
+                              selector: kAudioHardwarePropertyDefaultInputDevice,
+                              scope: kAudioObjectPropertyScopeGlobal,
+                              element: kAudioObjectPropertyElementMain,
+                              operation: "get default input device")
     }
 
     private static func stringProperty(_ selector: AudioObjectPropertySelector,
@@ -211,40 +214,11 @@ enum AudioInputDevices {
 
     private static func uint32Property(_ selector: AudioObjectPropertySelector,
                                        objectID: AudioObjectID) throws -> UInt32 {
-        var address = AudioObjectPropertyAddress(mSelector: selector,
-                                                 mScope: kAudioObjectPropertyScopeGlobal,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        var value: UInt32 = 0
-        var dataSize = UInt32(MemoryLayout<UInt32>.size)
-        let status = AudioObjectGetPropertyData(objectID,
-                                                &address,
-                                                0,
-                                                nil,
-                                                &dataSize,
-                                                &value)
-        guard status == noErr else {
-            throw CoreAudioCallError(operation: "get uint32 property \(selector)", status: status)
-        }
-        return value
-    }
-
-    private static func audioDeviceIDProperty(_ selector: AudioObjectPropertySelector,
-                                              operation: String) throws -> AudioDeviceID {
-        var address = AudioObjectPropertyAddress(mSelector: selector,
-                                                 mScope: kAudioObjectPropertyScopeGlobal,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        var value = AudioDeviceID(0)
-        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
-                                                &address,
-                                                0,
-                                                nil,
-                                                &dataSize,
-                                                &value)
-        guard status == noErr else {
-            throw CoreAudioCallError(operation: operation, status: status)
-        }
-        return value
+        try coreAudioProperty(object: objectID,
+                              selector: selector,
+                              scope: kAudioObjectPropertyScopeGlobal,
+                              element: kAudioObjectPropertyElementMain,
+                              operation: "get uint32 property \(selector)")
     }
 
     private static func inputChannelCount(for deviceID: AudioDeviceID) -> Int {
@@ -274,6 +248,27 @@ enum AudioInputDevices {
         let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
         return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
+}
+
+/// Shared CoreAudio scalar-property getter (UInt32 / Float32 / AudioDeviceID).
+/// Array/string reads and setters stay hand-rolled at their call sites.
+func coreAudioProperty<T: AdditiveArithmetic>(object: AudioObjectID,
+                                              selector: AudioObjectPropertySelector,
+                                              scope: AudioObjectPropertyScope,
+                                              element: AudioObjectPropertyElement,
+                                              operation: String) throws -> T {
+    var address = AudioObjectPropertyAddress(mSelector: selector,
+                                             mScope: scope,
+                                             mElement: element)
+    var value = T.zero
+    var dataSize = UInt32(MemoryLayout<T>.size)
+    let status = withUnsafeMutablePointer(to: &value) { pointer in
+        AudioObjectGetPropertyData(object, &address, 0, nil, &dataSize, pointer)
+    }
+    guard status == noErr else {
+        throw CoreAudioCallError(operation: operation, status: status)
+    }
+    return value
 }
 
 struct CoreAudioCallError: Error, LocalizedError {

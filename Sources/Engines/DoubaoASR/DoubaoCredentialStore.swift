@@ -20,7 +20,8 @@ public actor DoubaoCredentialStore {
     public static let shared = DoubaoCredentialStore()
 
     private var cached: DeviceCredentials?
-    nonisolated let fileURL: URL
+    /// Path to the on-disk credential cache. `@_spi` so smoke-cli can print it.
+    @_spi(SmokeCLI) public nonisolated let fileURL: URL
 
     enum DoubaoError: Error, LocalizedError {
         case registrationFailed(String)
@@ -57,28 +58,17 @@ public actor DoubaoCredentialStore {
         try? FileManager.default.removeItem(at: fileURL)
     }
 
-    /// Path to the on-disk credential cache. Read-only; intended for
-    /// diagnostics ("show me where it's stored") and integration tests.
-    public nonisolated var fileURLForDiagnostics: URL { fileURL }
-
-    /// Public wrapper for smoke-cli (QUA-209): acquire or refresh
-    /// credentials without exposing the internal `DeviceCredentials` shape.
-    public func ensureCredentialsForDiagnostics() async throws {
-        _ = try await ensureCredentials()
-    }
-
     /// Returns valid credentials, registering and/or refreshing the token as needed.
     ///
     /// Note (QUA-179): the cached `token` is Doubao's opaque ~10-char `app_key`
-    /// (see `fetchToken`), NOT a JWT — so `isJWTExpired` always returns false and
-    /// this never proactively refreshes a stale token. We can't tell from the
-    /// app_key alone when the server invalidates it; recovery is reactive instead.
+    /// (see `fetchToken`), NOT a JWT — its expiry can't be read client-side, so
+    /// this never proactively refreshes a stale token; recovery is reactive.
     /// `DoubaoASR.establishSession` calls `reset()` and re-registers when the WS
     /// handshake is rejected, so an invalidated app_key self-heals on the next
     /// recording rather than failing forever until a manual reset.
     @_spi(SmokeCLI) public func ensureCredentials() async throws -> DeviceCredentials {
         if var existing = cached, !existing.deviceId.isEmpty {
-            if existing.token.isEmpty || Self.isJWTExpired(existing.token) {
+            if existing.token.isEmpty {
                 existing.token = try await fetchToken(deviceId: existing.deviceId, cdid: existing.cdid)
                 cached = existing
                 try? Self.save(existing, to: fileURL)
@@ -91,17 +81,6 @@ public actor DoubaoCredentialStore {
         cached = fresh
         try? Self.save(fresh, to: fileURL)
         return fresh
-    }
-
-    static func isJWTExpired(_ token: String, marginSec: TimeInterval = 60) -> Bool {
-        let parts = token.split(separator: ".")
-        guard parts.count == 3 else { return false }
-        var b64 = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        while b64.count % 4 != 0 { b64.append("=") }
-        guard let payload = Data(base64Encoded: b64),
-              let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
-              let exp = json["exp"] as? TimeInterval else { return false }
-        return Date().timeIntervalSince1970 >= exp - marginSec
     }
 
     // MARK: - Registration

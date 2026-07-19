@@ -156,3 +156,38 @@ extension OneShotChannel<Void> {
         self.init(Void.self)
     }
 }
+
+/// Outcome of racing a `OneShotChannel` wait against a timeout.
+public enum WaitOutcome<T: Sendable>: Sendable {
+    case signaled(T)
+    case timeout
+    case cancelled
+    case failed
+}
+
+extension OneShotChannel {
+    /// Wait for the channel to resolve, racing a timeout. Never throws —
+    /// cancellation and channel errors come back as outcomes so callers in
+    /// teardown paths (WS close handshakes) can log-and-continue.
+    public func wait(timeout: TimeInterval) async -> WaitOutcome<T> {
+        await withTaskGroup(of: WaitOutcome<T>.self) { group in
+            group.addTask {
+                do {
+                    let v = try await self.wait()
+                    return .signaled(v)
+                } catch is CancellationError {
+                    return .cancelled
+                } catch {
+                    return .failed
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return .timeout
+            }
+            let first = await group.next() ?? .failed
+            group.cancelAll()
+            return first
+        }
+    }
+}

@@ -202,8 +202,6 @@ struct FloatingHUDView: View {
     static let transcriptViewportHeight: CGFloat = measuredTranscriptViewportHeight()
     /// Grown card cap = transcript cap + meter strip. The fixed panel sizes to this.
     static let maxHeight: CGFloat = transcriptViewportHeight + meterRegionHeight
-    /// FloatingWindow sizes the (fixed) panel to the cap so the grown card fits.
-    static let cardMaxHeight: CGFloat = maxHeight
 
     static func measuredTranscriptViewportHeight(
         renderedLinePitch: CGFloat = transcriptRenderedLinePitch,
@@ -617,7 +615,6 @@ private struct HUDActionRow: View {
     let systemImage: String
     let tint: Color
     let backgroundOpacity: Double
-    var idleBackgroundOpacity: Double = 0.74
     let action: @MainActor () -> Void
 
     @State private var hovering: Bool = false
@@ -634,7 +631,7 @@ private struct HUDActionRow: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .background(
                 ZStack {
-                    Color.white.opacity(idleBackgroundOpacity)
+                    Color.white.opacity(0.74)
                     tint.opacity(hovering ? backgroundOpacity : 0)
                 }
             )

@@ -19,8 +19,6 @@ public enum DoubaoSmokeTranscriber {
     public struct Report: Sendable {
         public var transcript: String = ""
         public var success: Bool = false
-        public var observedDiagnosticKeys: [String] = []
-        public var rawResultJsonSamples: [String] = []
     }
 
     public static func run(
@@ -150,8 +148,6 @@ public enum DoubaoSmokeTranscriber {
             try await ws.send(.data(AsrMessageBuilder.finishSession(requestId: requestId, token: creds.token)))
 
             var resultState = DoubaoResultState()
-            var observedDiagnosticKeys = Set<String>()
-            var rawResultJsonSamples: [String] = []
             let deadline = Date().addingTimeInterval(timeout)
             drain: while Date() < deadline {
                 let msg = try await ws.receive()
@@ -168,38 +164,16 @@ public enum DoubaoSmokeTranscriber {
                 }
                 guard !resp.resultJson.isEmpty,
                       let rj = try? JSONSerialization.jsonObject(with: Data(resp.resultJson.utf8)) as? [String: Any] else { continue }
-                if rawResultJsonSamples.count < 3 {
-                    rawResultJsonSamples.append(resp.resultJson)
-                }
-                collectDiagnosticKeys(from: rj, into: &observedDiagnosticKeys)
                 resultState.ingest(object: rj)
             }
 
             let transcript = resultState.rawText
             report.transcript = transcript
-            report.observedDiagnosticKeys = observedDiagnosticKeys.sorted()
-            report.rawResultJsonSamples = rawResultJsonSamples
             stage("transcript: \(transcript.isEmpty ? "(empty)" : transcript)")
             report.success = !transcript.isEmpty
             return report
         } catch {
             return fail("session: FAILED — \(error.localizedDescription)")
-        }
-    }
-
-    private static func collectDiagnosticKeys(from value: Any, into keys: inout Set<String>) {
-        if let dict = value as? [String: Any] {
-            for (key, nestedValue) in dict {
-                let lowered = key.lowercased()
-                if lowered.contains("speaker") || lowered == "speaker_id" || lowered.contains("spk") || lowered.contains("diar") || lowered.contains("vad") || lowered == "is_vad_finished" || lowered.contains("full_vad") {
-                    keys.insert(key)
-                }
-                collectDiagnosticKeys(from: nestedValue, into: &keys)
-            }
-        } else if let array = value as? [Any] {
-            for item in array {
-                collectDiagnosticKeys(from: item, into: &keys)
-            }
         }
     }
 }
