@@ -242,30 +242,41 @@ Verification for any pipeline change:
      log for reconnect outcome);
    - rapid back-to-back recordings (detached close / concurrent-quota path).
 
-## 7. Reserved, not-yet-wired components
+## 7. Removed design assets (QUA-263 / QUA-265)
 
-`ASRSegmentModel` (QUA-265) and `StreamingTextReconciler` (QUA-263), both in
-`Sources/Common/ASRSupport/`, are pure, fully-tested logic that is **not**
-part of the recording pipeline. They were written ahead of the features that
-would consume them and are load-bearing nowhere today. They are kept as
-tested design assets, not deleted — but treat them as cold until a trigger
-below fires, and do not add new callers without that trigger.
+`ASRSegmentModel` (QUA-265) and `StreamingTextReconciler` (QUA-263) were
+pure, fully-tested logic written ahead of features that never materialized.
+They sat unwired with zero production evidence for their differentiators
+(`nonstream_result=true`: **0 of 2935** streamed results across two log
+files; `pauseBoundary`: no consumer) and were deleted in 2026-07. Resurrect
+from git history — or rewrite against the notes below — only when a trigger
+fires:
 
-- **`ASRSegmentModel`** overlaps the shipping segmentation
-  (`DoubaoResultState`, `SonioxResponseParser`). Its differentiator —
-  `revisionWindow`, for Doubao `nonstream_result` second-pass revisions — was
-  not observed across two production log files (~2.9k streamed results):
-  `nonstream_result=true` appeared **0 times**. Its `pauseBoundary` has no
-  consumer. Wiring it just to "use" it duplicates live logic. Re-evaluate
-  when: `nonstream_result` late revisions are observed in production, a third
-  engine needs a shared segmentation layer, or pause-aware utterance
-  boundaries become a product feature.
-- **`StreamingTextReconciler`** computes a tail edit (`Operation`) for a
-  typewriter-style insertion path. `TextInjector` is clipboard+⌘V by design
-  (§5) and the HUD reveal animation already preserves the stable prefix, so
-  nothing consumes the `Operation`. Re-evaluate only if injection becomes
-  incremental (per-key backspace + retype).
+- Segment model: Doubao `nonstream_result` late revisions observed in
+  production, a third engine needs a shared segmentation layer, or
+  pause-aware utterance boundaries become a product feature.
+- Reconciler: text injection becomes incremental (per-key backspace +
+  retype). Today `TextInjector` is clipboard+⌘V by design (§5) and the HUD
+  reveal already keeps the stable prefix stable.
 
-`TranscriptCorrector` (QUA-264) is the exception in this group: it IS wired —
+Decisions worth not re-deriving:
+
+- The shrink-rescue heuristic (`candidate.count * 2 < previous.count &&
+  !previous.hasPrefix(candidate)`) survives inline in
+  `DoubaoResultState.ingest` — the shipping rescue path.
+- Reconciler semantics: edit units are grapheme clusters, but a delete count
+  is NOT a backspace-key count (some target apps delete decomposed clusters
+  scalar-by-scalar); prefix matching must be scalar-exact (not canonical
+  equivalence) so replay converges byte-for-byte; an empty candidate must be
+  held, never erase visible text (engines emit spurious empty snapshots on
+  session resets / keepalives).
+- Segment model: do NOT model a sentence-max forced boundary — without
+  engine cooperation the parked prefix re-arrives inside every later
+  cumulative hypothesis. Engine mapping: Doubao cumulative hypothesis →
+  partial, VAD commit → final, nonstream re-recognition after the same
+  utterance's VAD final → revision; Soniox growing token tail → partial,
+  utterance text at `<end>` → final.
+
+`TranscriptCorrector` (QUA-264) is unrelated to the above and IS wired —
 `RecordingController.handleFinal` applies it once per dictation. The other
 two are not, and should not be wired without the triggers above.
