@@ -240,12 +240,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         let hub = AudioTapHub(pcmSinks: pcmSinks,
                               bufferSinks: bufferSinks,
                               wantsWAV: wantsWAV,
-                              // The AVAudioEngine Voice Processing route is known-broken
-                              // on real macOS setups with virtual/aggregate audio devices:
-                              // it can switch capture to multi-channel or system playback.
-                              // Keep the plumbing for future lower-level experiments, but
-                              // never enable it from persisted user defaults in production.
-                              voiceProcessingEnabled: false,
+                              // AVAudioEngine Voice Processing route removed as known-broken with virtual/aggregate devices; resurrect from git.
                               microphoneSelection: prefs.microphoneSelection,
                               audioControls: audioControls)
 
@@ -477,9 +472,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                 let ms = timings[e].map { Int($0 * 1000) } ?? -1
                 return "\(e.rawValue)(\(len)ch,\(ms)ms\(e == primary ? ",P" : "")\(e == classifier ? ",CLS" : ""))"
             }.joined(separator: " ")
-            let result = results[engine] ?? TranscriptionResult(
-                text: "", audioDuration: 0, lastResponseAge: nil,
-                lastTranscriptAge: nil)
+            let result = results[engine] ?? TranscriptionResult(text: "")
             let onlineTag = onlineChosen.map { "online=\($0.rawValue)" } ?? "online=none"
             doushaLog("[MultiEngine] stop=\(Int(elapsed * 1000))ms | \(perEngine) | \(onlineTag) | picked=\(engine.rawValue) len=\(result.text.count)")
             // Yielding to the AsyncStream is thread-safe from any thread; the

@@ -1,7 +1,6 @@
 import Foundation
 import Speech
 import AVFoundation
-import DoubaoASR
 import ASRSupport
 import ConcurrencySupport
 
@@ -120,12 +119,7 @@ final class AppleSpeechBackend: BufferCaptureEngine, @unchecked Sendable {
     /// Stops the session and waits briefly for the final transcription.
     func finish(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
         guard isRunning else {
-            completion(TranscriptionResult(
-                text: lastText,
-                audioDuration: 0,
-                lastResponseAge: nil,
-                lastTranscriptAge: nil
-            ))
+            completion(TranscriptionResult(text: lastText))
             return
         }
         isRunning = false
@@ -149,12 +143,7 @@ final class AppleSpeechBackend: BufferCaptureEngine, @unchecked Sendable {
             self.task?.cancel()
             self.task = nil
             self.request = nil
-            completion(TranscriptionResult(
-                text: final,
-                audioDuration: 0,
-                lastResponseAge: nil,
-                lastTranscriptAge: nil
-            ))
+            completion(TranscriptionResult(text: final))
         }
     }
 

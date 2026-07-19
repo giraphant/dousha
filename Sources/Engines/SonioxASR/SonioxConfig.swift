@@ -26,8 +26,7 @@ public enum SonioxConfig {
     public static let asyncBaseURL = "https://api.soniox.com"
     public static let asyncModel = "stt-async-v4"
 
-    /// 20ms of int16 mono @16kHz = 320 samples = 640 bytes. Matches Doubao's
-    /// framing so the existing mic-tap → PCM pipeline drops in unchanged.
+    /// 20ms of int16 mono @16kHz = 320 samples = 640 bytes.
     public static let samplesPerFrame = 320
     public static var bytesPerFrame: Int { samplesPerFrame * MemoryLayout<Int16>.size }
 

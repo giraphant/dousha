@@ -109,7 +109,7 @@ final class SonioxResponseParserTests: XCTestCase {
         let u1 = parser.ingest(jsonData: data(#"{"tokens":[{"text":"你好","is_final":true},{"text":"世界","is_final":false}]}"#))
         XCTAssertEqual(u1?.finalText, "你好")
         XCTAssertEqual(u1?.interimText, "世界")
-        XCTAssertEqual(u1?.displayText, "你好世界")
+        XCTAssertEqual(parser.displayText, "你好世界")
 
         // Batch 2: interim replaced, no new final.
         let u2 = parser.ingest(jsonData: data(#"{"tokens":[{"text":"朋友","is_final":false}]}"#))

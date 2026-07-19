@@ -1,10 +1,3 @@
-//
-//  File.swift
-//
-//
-//  Created by feichao on 2024/5/23.
-//
-
 import Foundation
 
 public class Lock<T>: @unchecked Sendable {

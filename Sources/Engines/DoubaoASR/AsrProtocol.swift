@@ -34,8 +34,6 @@ struct AsrRequest {
 
 @_spi(SmokeCLI) public struct AsrResponse: Sendable {
     public var requestId: String = ""
-    public var taskId: String = ""
-    public var serviceName: String = ""
     public var messageType: String = ""
     public var statusCode: Int32 = 0
     public var statusMessage: String = ""
@@ -45,8 +43,6 @@ struct AsrRequest {
         let fields = try Wire.decodeFields(data)
         var r = AsrResponse()
         if case let .length(d) = fields[1] ?? .varint(0) { r.requestId     = String(data: d, encoding: .utf8) ?? "" }
-        if case let .length(d) = fields[2] ?? .varint(0) { r.taskId        = String(data: d, encoding: .utf8) ?? "" }
-        if case let .length(d) = fields[3] ?? .varint(0) { r.serviceName   = String(data: d, encoding: .utf8) ?? "" }
         if case let .length(d) = fields[4] ?? .varint(0) { r.messageType   = String(data: d, encoding: .utf8) ?? "" }
         if case let .varint(v) = fields[5] ?? .length(Data()) { r.statusCode = Int32(truncatingIfNeeded: v) }
         if case let .length(d) = fields[6] ?? .varint(0) { r.statusMessage = String(data: d, encoding: .utf8) ?? "" }

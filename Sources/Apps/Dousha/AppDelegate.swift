@@ -5,6 +5,7 @@ import AVFoundation
 // @preconcurrency: kAXTrustedCheckOptionPrompt is an imported global the SDK
 // hasn't audited for Sendable; treat the access as a warning, not an error.
 @preconcurrency import ApplicationServices
+import ServiceManagement
 import DoubaoASR
 import SonioxASR
 import ASRSupport
@@ -17,7 +18,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let injector = TextInjector()
     private let prefs = Preferences.shared
-    private let launchAtLogin: LaunchAtLoginManaging = LaunchAtLoginController()
 
     private let hudModel = FloatingHUDModel()
     private var floatingWindow: FloatingWindow?
@@ -254,8 +254,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func openSettings() {
         if settingsWindow == nil {
             let actions = SettingsActions(
-                isLaunchAtLoginEnabled: { [launchAtLogin] in launchAtLogin.isEnabled },
-                setLaunchAtLogin: { [launchAtLogin] enabled in try launchAtLogin.setEnabled(enabled) },
+                isLaunchAtLoginEnabled: { SMAppService.mainApp.status == .enabled },
+                // `register()` is idempotent — re-registering an already-enabled
+                // service is fine and simply refreshes it.
+                setLaunchAtLogin: { enabled in
+                    if enabled { try SMAppService.mainApp.register() }
+                    else { try SMAppService.mainApp.unregister() }
+                },
                 isDockIconVisible: { [weak self] in self?.prefs.showDockIcon ?? false },
                 setDockIconVisible: { [weak self] visible in self?.setDockIconVisible(visible) },
                 isMenuBarIconVisible: { [weak self] in self?.prefs.showMenuBarIcon ?? true },

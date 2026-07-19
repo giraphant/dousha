@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ConcurrencySupport
 import ASRSupport
 
@@ -15,7 +12,7 @@ import ASRSupport
 /// Doubao's per-device concurrent quota to fill up after a few fast
 /// sessions; the ~600ms TLS+StartTask cost per call is the price.
 public actor DoubaoASR {
-    private var opusEncoder: (any OpusEncoding)?
+    private var opusEncoder: OpusEncoder?
 
     private var session: URLSession?
     private var ws: URLSessionWebSocketTask?
@@ -81,13 +78,6 @@ public actor DoubaoASR {
     /// "retranscribe must be strictly longer to win" rule (protocol-notes §3.6).
     private var preReconnectText = ""
 
-    /// Whether StartTask has been sent + acked on the current WebSocket. Doubao ties a
-    /// task to a connection — sending StartTask twice on the same WS yields
-    /// "task already started". Currently we close the WS after every stop() so this
-    /// flag always resets to false, but the gate is kept so future re-enabling of WS
-    /// reuse can flip it back on without reintroducing the bug.
-    private var taskStarted: Bool = false
-
     /// One-shot filter used by sendInitialMessages to wait for a specific control
     /// response (TaskStarted/SessionStarted) while the persistent receive loop runs.
     private var pendingResponseFilter: ((AsrResponse) -> Bool)?
@@ -124,24 +114,13 @@ public actor DoubaoASR {
     private var totalPcmBytesOut: Int = 0
 
     /// When audio capture began for this session. Set in `prepareSession`
-    /// (capture itself is now owned by the shared `AudioTapHub`); drives the
-    /// trace clock and the reported `audioDuration`.
+    /// (capture itself is owned by the shared `AudioTapHub`); drives the
+    /// trace clock in log lines.
     private(set) var audioStartedAt: Date?
 
-    /// Wall-clock timestamps of every VAD-finalized segment commit during this
-    /// recording. Used by the detector to spot large gaps that indicate Doubao
-    /// silently dropped a chunk of audio mid-recording.
-    private(set) var segmentCommittedAt: [Date] = []
-
-    /// Any byte from the server (heartbeats included). For debugging "is the WS
-    /// alive at all" — NOT the heuristic's staleness signal (heartbeats would mask
-    /// real drops). See `lastTranscriptAt` for that.
-    private(set) var lastResponseAt: Date?
-
     /// Wall-clock of the last server message that carried non-empty transcript
-    /// content (`results[].text` non-empty). This is what the incomplete-detector
-    /// looks at to decide "did the server stop producing text long before the
-    /// user released?".
+    /// content (`results[].text` non-empty). Feeds the `lastTranscriptAge`
+    /// fields in the stop-path log lines.
     private(set) var lastTranscriptAt: Date?
 
     /// Creates an idle recognizer. No mic access, network, or registration
@@ -175,7 +154,6 @@ public actor DoubaoASR {
         self.onPartial = onPartial
         self.onError = onError
         self.resultState = DoubaoResultState()
-        self.segmentCommittedAt = []
         self.pcmBuffer = Data()
         self.didSendFirstFrame = false
         self.canSendAudio = false
@@ -191,7 +169,6 @@ public actor DoubaoASR {
         self.finishedChannel = OneShotChannel<Void>()
         self.streamReadyChannel = OneShotChannel<Void>()
         self.audioStartedAt = Date()
-        self.lastResponseAt = nil
         self.lastTranscriptAt = nil
         doushaLog("[DoubaoASR] traceId=\(requestId) prepareSession \(experimentProfile.logSummary) (capture owned by AudioTapHub)")
     }
@@ -228,10 +205,10 @@ public actor DoubaoASR {
     /// Acquires credentials, opens the WebSocket, and runs StartTask/StartSession.
     ///
     /// If the handshake fails, assume Doubao rejected our cached, opaque `app_key`
-    /// (QUA-179): the token Doubao hands back is a 10-char `app_key`, not a JWT, so
-    /// `DoubaoCredentialStore.isJWTExpired` never fires and a server-invalidated
-    /// token would otherwise fail *every* recording until the user manually reset
-    /// the credentials. Drop the cached credentials, re-register, and retry the
+    /// (QUA-179): the token Doubao hands back is a 10-char `app_key`, not a JWT,
+    /// so its expiry can't be checked client-side and a server-invalidated token
+    /// would otherwise fail *every* recording until the user manually reset the
+    /// credentials. Drop the cached credentials, re-register, and retry the
     /// handshake exactly once before giving up.
     private func establishSession() async throws {
         do {
@@ -253,23 +230,13 @@ public actor DoubaoASR {
         self.deviceId = creds.deviceId
         doushaLog("[DoubaoASR] credentials ready device_id=\(creds.deviceId) token_len=\(creds.token.count)")
 
-        #if canImport(AVFoundation) && canImport(AudioToolbox)
-        self.opusEncoder = try makeOpusEncoder()
+        self.opusEncoder = try OpusEncoder()
         doushaLog("[DoubaoASR] opus encoder ready")
-        #else
-        // QUA-209: no opus encoder on this platform. The server accepts raw
-        // s16le with audio_info.format="pcm" (smoke-verified byte-identical
-        // transcripts on Windows), so we stream PCM instead — ~32KB/s upstream
-        // vs ~3KB/s opus, acceptable for dictation.
-        doushaLog("[DoubaoASR] no opus encoder on this platform — streaming raw PCM (format=\(Self.wireFormat))")
-        #endif
 
-        if self.ws == nil {
-            try openWebSocket()
-            doushaLog("[DoubaoASR] websocket opened (fresh)")
-        } else {
-            doushaLog("[DoubaoASR] reusing existing websocket")
-        }
+        // Always a fresh WS: one recording = one connection (ARCHITECTURE §5 —
+        // reuse fills Doubao's per-device concurrent quota).
+        try openWebSocket()
+        doushaLog("[DoubaoASR] websocket opened (fresh)")
         try await sendInitialMessages(deviceId: self.deviceId)
         doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms StartTask+StartSession ok pcmBufferBytes=\(self.pcmBuffer.count)")
     }
@@ -326,10 +293,8 @@ public actor DoubaoASR {
     /// state is reset and rebuilds as the replay streams.
     private func reopenAndReplay() async throws {
         requestId = UUID().uuidString.lowercased()
-        taskStarted = false
         didSendFirstFrame = false
         resultState = DoubaoResultState()
-        segmentCommittedAt = []
 
         // Move retained audio to the front of the send buffer so the fresh session
         // replays the whole recording ahead of any live audio that arrived while we
@@ -426,14 +391,7 @@ public actor DoubaoASR {
     private func _stop() async -> TranscriptionResult {
         doushaLog("[DoubaoASR] stop() isRunning=\(isRunning)")
         guard isRunning else {
-            return TranscriptionResult(
-                text: bestText(),
-                audioDuration: 0,
-                lastResponseAge: nil,
-                lastTranscriptAge: nil,
-                maxSegmentGap: nil,
-                traceId: requestId
-            )
+            return TranscriptionResult(text: bestText(), traceId: requestId)
         }
         let stopStartedAt = Date()
         self.stopStartedAt = stopStartedAt
@@ -461,7 +419,7 @@ public actor DoubaoASR {
             let remainingGrace = max(0, DoubaoConstants.startupGraceOnStopSeconds - sessionAge)
             if remainingGrace > 0, let channel = streamReadyChannel {
                 doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms stream not ready; waiting startup grace \(Int(remainingGrace * 1000))ms")
-                _ = await waitWithTimeout(channel: channel, timeout: remainingGrace)
+                _ = await channel.wait(timeout: remainingGrace)
             }
 
             if !streamReady {
@@ -472,21 +430,7 @@ public actor DoubaoASR {
             }
         }
 
-        // Trailing silence into the outbound PCM buffer so the server's VAD
-        // finalizes the last utterance. The explicit `finish_audio: true` on the
-        // last frame should make this unnecessary; gated on a tunable (see
-        // DoubaoConstants.trailingSilencePadMs) so the amount can be dialed in
-        // against real-device tail-truncation tests. (The shared WAV is owned by
-        // the hub; padding it is unnecessary and pad is 0 by default anyway.)
-        let padSamples = DoubaoConstants.trailingSilencePadSamples
-        if padSamples > 0 {
-            let padBytes = padSamples * MemoryLayout<Int16>.size
-            self.pcmBuffer.append(Data(count: padBytes))
-            self.totalPcmBytesOut += padBytes
-        }
-
-        // Drain ALL pending frames (whatever audio is still buffered, plus any
-        // trailing-silence padding). flushPendingFrames is load-bearing here —
+        // Drain ALL pending frames. flushPendingFrames is load-bearing here —
         // flushAndSendLastFrame alone would only handle the very last partial
         // frame.
         do {
@@ -522,7 +466,7 @@ public actor DoubaoASR {
             // immediately instead of blocking ~2s (QUA-181).
             outcomeStr = "ws-dead"
         } else if let channel = finishedChannel {
-            switch await waitWithTimeout(channel: channel, timeout: DoubaoConstants.finishGraceOnStopSeconds) {
+            switch await channel.wait(timeout: DoubaoConstants.finishGraceOnStopSeconds) {
             // A dead-connection signal racing the wait (ping/receive failure fires
             // signalFinished while we're parked) wakes us as .signaled — re-check
             // the flag so we still take the fallback path, not the success path.
@@ -541,14 +485,7 @@ public actor DoubaoASR {
             let finalTranscriptAge = lastTranscriptAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
             doushaLog("[DoubaoASR] traceId=\(requestId) stop+\(elapsedMs(since: stopStartedAt))ms SessionFinished missing (outcome=\(outcomeStr)); returning empty result partial.len=\(partialLen) segments=\(resultState.committedSegments.count) lastTranscriptAge=\(finalTranscriptAge)ms")
             detachAndCloseWebSocketInBackground()
-            return TranscriptionResult(
-                text: "",
-                audioDuration: audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0,
-                lastResponseAge: lastResponseAt.map { Date().timeIntervalSince($0) },
-                lastTranscriptAge: lastTranscriptAt.map { Date().timeIntervalSince($0) },
-                maxSegmentGap: nil,
-                traceId: requestId
-            )
+            return TranscriptionResult(text: "", traceId: requestId)
         }
 
         let final = assembledText()
@@ -567,7 +504,7 @@ public actor DoubaoASR {
 
     /// Synchronously unhooks the current socket/session from actor state and
     /// bumps the generation, then runs the up-to-1s WS close handshake in a
-    /// detached task. Clearing `self.ws`/`self.session`/`taskStarted` before
+    /// detached task. Clearing `self.ws`/`self.session` before
     /// returning means a reentrant `_start()` that opens a fresh socket can't be
     /// torn down by the trailing close — the handshake uses only the captured
     /// handles.
@@ -576,7 +513,6 @@ public actor DoubaoASR {
         guard let closing = ws else {
             session?.invalidateAndCancel()
             session = nil
-            taskStarted = false
             return
         }
         let closingSession = session
@@ -586,13 +522,12 @@ public actor DoubaoASR {
         let closingGeneration = wsGen.live
         self.ws = nil
         self.session = nil
-        self.taskStarted = false
         _ = wsGen.bump()
 
         let channel = wsCloseChannels.register(closingGeneration)
         closing.cancel(with: .normalClosure, reason: nil)
         Task {
-            if case .timeout = await self.waitWithTimeout(channel: channel, timeout: 1.0) {
+            if case .timeout = await channel.wait(timeout: 1.0) {
                 doushaLog("[DoubaoASR] WS close handshake timed out — tearing down anyway")
             }
             self.wsCloseChannels.remove(closingGeneration)
@@ -605,7 +540,6 @@ public actor DoubaoASR {
         guard let ws = ws else {
             session?.invalidateAndCancel()
             session = nil
-            taskStarted = false
             return
         }
         // Drop our reference first so the receive loop's success branch stops
@@ -630,7 +564,7 @@ public actor DoubaoASR {
         // signals this generation's close channel.
         ws.cancel(with: .normalClosure, reason: nil)
 
-        if case .timeout = await waitWithTimeout(channel: channel, timeout: 1.0) {
+        if case .timeout = await channel.wait(timeout: 1.0) {
             doushaLog("[DoubaoASR] WS close handshake timed out — tearing down anyway")
         }
         wsCloseChannels.remove(closingGeneration)
@@ -640,7 +574,6 @@ public actor DoubaoASR {
         // the session — otherwise we'd kill the new recording's connection.
         if session === owningSession {
             session = nil
-            taskStarted = false
         }
     }
 
@@ -725,21 +658,16 @@ public actor DoubaoASR {
     }
 
     private func sendInitialMessages(deviceId: String) async throws {
-        // StartTask: only on first session of this WebSocket (Doubao binds task to
-        // connection; second StartTask would error "task already started").
-        if !taskStarted {
-            try await sendData(AsrMessageBuilder.startTask(requestId: requestId, token: token))
-            let resp = try await waitForResponse(timeout: 5.0) {
-                $0.messageType == "TaskStarted" || $0.messageType == "TaskFailed" || $0.messageType == "SessionFailed"
-            }
-            doushaLog("[DoubaoASR] StartTask resp messageType=\(resp.messageType) code=\(resp.statusCode) msg=\(resp.statusMessage)")
-            if resp.messageType != "TaskStarted" {
-                throw NSError(domain: "DoubaoASR", code: Int(resp.statusCode),
-                              userInfo: [NSLocalizedDescriptionKey: "StartTask: \(resp.statusMessage.isEmpty ? "failed" : resp.statusMessage) (\(resp.statusCode))"])
-            }
-            taskStarted = true
-        } else {
-            doushaLog("[DoubaoASR] reusing task on existing WebSocket — skipping StartTask")
+        // StartTask once per WebSocket (Doubao binds task to connection); every
+        // recording opens a fresh WS, so this always runs exactly once.
+        try await sendData(AsrMessageBuilder.startTask(requestId: requestId, token: token))
+        let resp = try await waitForResponse(timeout: 5.0) {
+            $0.messageType == "TaskStarted" || $0.messageType == "TaskFailed" || $0.messageType == "SessionFailed"
+        }
+        doushaLog("[DoubaoASR] StartTask resp messageType=\(resp.messageType) code=\(resp.statusCode) msg=\(resp.statusMessage)")
+        if resp.messageType != "TaskStarted" {
+            throw NSError(domain: "DoubaoASR", code: Int(resp.statusCode),
+                          userInfo: [NSLocalizedDescriptionKey: "StartTask: \(resp.statusMessage.isEmpty ? "failed" : resp.statusMessage) (\(resp.statusCode))"])
         }
 
         let configJSON = sessionConfigJSON(deviceId: deviceId)
@@ -768,7 +696,7 @@ public actor DoubaoASR {
         pendingResponseFilter = predicate
         pendingResponseChannel = channel
 
-        let outcome = await waitWithTimeout(channel: channel, timeout: timeout)
+        let outcome = await channel.wait(timeout: timeout)
         pendingResponseFilter = nil
         pendingResponseChannel = nil
 
@@ -779,16 +707,8 @@ public actor DoubaoASR {
         }
     }
 
-    /// Wire audio format. Darwin encodes 10ms frames to opus (official-client
-    /// parity); platforms without an encoder stream raw s16le PCM, which the
-    /// server transcribes identically (QUA-209).
-    static let wireFormat: String = {
-        #if canImport(AVFoundation) && canImport(AudioToolbox)
-        return "speech_opus"
-        #else
-        return "pcm"
-        #endif
-    }()
+    /// Wire audio format: 10ms frames encoded to opus (official-client parity).
+    static let wireFormat = "speech_opus"
 
     private func sessionConfigJSON(deviceId: String) -> String {
         buildSessionConfigJSON(deviceId: deviceId, contextHint: contextHint, profile: experimentProfile, audioFormat: Self.wireFormat)
@@ -849,7 +769,6 @@ public actor DoubaoASR {
             ws = nil
             session?.invalidateAndCancel()
             session = nil
-            taskStarted = false
             pendingResponseFilter = nil
             // Unblock any handshake wait in flight (e.g. a reconnect attempt that
             // was mid-StartTask when this socket failed) so it can retry/abort.
@@ -877,7 +796,6 @@ public actor DoubaoASR {
     }
 
     private func handleResponseData(_ data: Data) {
-        self.lastResponseAt = Date()
         guard let resp = try? AsrResponse.decode(data) else {
             doushaLog("[DoubaoASR] recv: decode failed (\(data.count) bytes)")
             return
@@ -928,10 +846,8 @@ public actor DoubaoASR {
 
         switch update.commit {
         case .rescued(let rescued):
-            segmentCommittedAt.append(Date())
             doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment rescued index=\(resultState.committedSegments.count) text.len=\(rescued.count) newText.len=\(update.text.count)")
         case .final(let text):
-            segmentCommittedAt.append(Date())
             doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms segment final index=\(resultState.committedSegments.count) text.len=\(text.count)")
         case nil:
             break
@@ -957,27 +873,7 @@ public actor DoubaoASR {
     }
 
     private func currentResult() -> TranscriptionResult {
-        let now = Date()
-        let audioDuration: TimeInterval = audioStartedAt.map { now.timeIntervalSince($0) } ?? 0
-        let lastResponseAge: TimeInterval? = lastResponseAt.map { now.timeIntervalSince($0) }
-        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { now.timeIntervalSince($0) }
-        let maxSegmentGap: TimeInterval? = {
-            guard segmentCommittedAt.count >= 2 else { return nil }
-            var maxGap: TimeInterval = 0
-            for i in 1..<segmentCommittedAt.count {
-                let gap = segmentCommittedAt[i].timeIntervalSince(segmentCommittedAt[i-1])
-                if gap > maxGap { maxGap = gap }
-            }
-            return maxGap
-        }()
-        return TranscriptionResult(
-            text: bestText(),
-            audioDuration: audioDuration,
-            lastResponseAge: lastResponseAge,
-            lastTranscriptAge: lastTranscriptAge,
-            maxSegmentGap: maxSegmentGap,
-            traceId: requestId
-        )
+        TranscriptionResult(text: bestText(), traceId: requestId)
     }
 
     private func traceElapsedMs(now: Date = Date()) -> Int {
@@ -1002,7 +898,8 @@ public actor DoubaoASR {
         try? await flushPendingFrames()
     }
 
-    /// Sends as many complete 20ms frames as the buffer holds. No-op until
+    /// Sends as many complete frames (`Constants.bytesPerFrame`) as the buffer
+    /// holds. No-op until
     /// `canSendAudio` is true (i.e., until StartSession has succeeded).
     ///
     /// Each dequeued frame is appended to `retainedPCM` *before* the send so it can
@@ -1056,17 +953,11 @@ public actor DoubaoASR {
     }
 
     private func encodeAndSend(_ pcmFrame: Data, state: FrameState) async throws {
-        let payload: Data
-        #if canImport(AVFoundation) && canImport(AudioToolbox)
-        // Darwin: opus. The nil-guard semantics are load-bearing — encoder is
-        // always set after establishSession; a nil here means a frame raced a
-        // teardown and must be dropped, not sent raw.
+        // The nil-guard semantics are load-bearing — encoder is always set
+        // after establishSession; a nil here means a frame raced a teardown
+        // and must be dropped, not sent raw.
         guard let encoder = opusEncoder else { return }
-        payload = try encoder.encode(pcmFrame)
-        #else
-        // QUA-209: raw s16le; the session was opened with format="pcm".
-        payload = pcmFrame
-        #endif
+        let payload = try encoder.encode(pcmFrame)
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let msg = AsrMessageBuilder.taskRequest(
             audio: payload,
@@ -1084,32 +975,4 @@ public actor DoubaoASR {
         DispatchQueue.main.async { cb?(error) }
     }
 
-    private enum WaitOutcome<T: Sendable>: Sendable {
-        case signaled(T)
-        case timeout
-        case cancelled
-        case failed
-    }
-
-    private func waitWithTimeout<T: Sendable>(channel: OneShotChannel<T>, timeout: TimeInterval) async -> WaitOutcome<T> {
-        await withTaskGroup(of: WaitOutcome<T>.self) { group in
-            group.addTask {
-                do {
-                    let v = try await channel.wait()
-                    return .signaled(v)
-                } catch is CancellationError {
-                    return .cancelled
-                } catch {
-                    return .failed
-                }
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return .timeout
-            }
-            let first = await group.next() ?? .failed
-            group.cancelAll()
-            return first
-        }
-    }
 }

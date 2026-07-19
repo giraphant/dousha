@@ -1,20 +1,16 @@
 import XCTest
 @testable import Dousha
 
-/// A controllable stand-in for the SMAppService-backed launch-at-login manager,
+/// A controllable stand-in for the SMAppService-backed launch-at-login state,
 /// so we can exercise the enable/disable/error contract the settings UI relies
 /// on without touching the real login-item database.
-private final class FakeLaunchAtLogin: LaunchAtLoginManaging {
+private final class FakeLaunchAtLogin {
     var enabled: Bool
     var errorToThrow: Error?
-    private(set) var setCalls: [Bool] = []
 
     init(enabled: Bool = false) { self.enabled = enabled }
 
-    var isEnabled: Bool { enabled }
-
     func setEnabled(_ enabled: Bool) throws {
-        setCalls.append(enabled)
         if let errorToThrow { throw errorToThrow }
         self.enabled = enabled
     }
@@ -23,27 +19,6 @@ private final class FakeLaunchAtLogin: LaunchAtLoginManaging {
 private struct DummyError: Error {}
 
 final class SettingsActionsTests: XCTestCase {
-    func testLaunchManager_enableThenDisable() throws {
-        let fake = FakeLaunchAtLogin(enabled: false)
-
-        try fake.setEnabled(true)
-        XCTAssertTrue(fake.isEnabled)
-
-        try fake.setEnabled(false)
-        XCTAssertFalse(fake.isEnabled)
-
-        XCTAssertEqual(fake.setCalls, [true, false])
-    }
-
-    func testLaunchManager_propagatesErrorAndLeavesStateUnchanged() {
-        let fake = FakeLaunchAtLogin(enabled: false)
-        fake.errorToThrow = DummyError()
-
-        XCTAssertThrowsError(try fake.setEnabled(true))
-        // On failure the state must not flip — the UI reverts the toggle to this.
-        XCTAssertFalse(fake.isEnabled)
-    }
-
     /// SettingsActions is the seam the SwiftUI panes call. Verify a set of
     /// closures backed by simple state route through correctly: reading
     /// reflects current state, and setting mutates it.
@@ -56,7 +31,7 @@ final class SettingsActionsTests: XCTestCase {
         var doubaoResets = 0
 
         let actions = SettingsActions(
-            isLaunchAtLoginEnabled: { fake.isEnabled },
+            isLaunchAtLoginEnabled: { fake.enabled },
             setLaunchAtLogin: { try fake.setEnabled($0) },
             isDockIconVisible: { dockVisible },
             setDockIconVisible: { dockVisible = $0 },
@@ -68,6 +43,12 @@ final class SettingsActionsTests: XCTestCase {
         XCTAssertFalse(actions.isLaunchAtLoginEnabled())
         try actions.setLaunchAtLogin(true)
         XCTAssertTrue(actions.isLaunchAtLoginEnabled())
+
+        // On failure the state must not flip — the UI reverts the toggle to this.
+        fake.errorToThrow = DummyError()
+        XCTAssertThrowsError(try actions.setLaunchAtLogin(false))
+        XCTAssertTrue(actions.isLaunchAtLoginEnabled())
+        fake.errorToThrow = nil
 
         XCTAssertFalse(actions.isDockIconVisible())
         actions.setDockIconVisible(true)

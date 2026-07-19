@@ -14,18 +14,6 @@ public enum DoubaoExperimentProfile: String, Sendable {
     case official
     case fast
     case minimal
-    case speakerFlat = "speaker-flat"
-    case speakerNested = "speaker-nested"
-    case speakerNestedBare = "speaker-nested-bare"
-    case speakerNestedString = "speaker-nested-string"
-    case speakerNestedSeconds = "speaker-nested-seconds"
-    case speakerTop = "speaker-top"
-    case speechReject = "speech-reject"
-    case asrSplit = "asr-split"
-    case asrSplitDiar = "asr-split-diar"
-    case asrGlobalTracking = "asr-global-tracking"
-    case asrTextFilter = "asr-text-filter"
-    case asrForceTwopass = "asr-force-twopass"
 
     public static let environmentKey = "DOUSHA_DOUBAO_PROFILE"
     public static let userDefaultsKey = "DoubaoExperimentProfile"
@@ -48,100 +36,41 @@ public enum DoubaoExperimentProfile: String, Sendable {
 
     var enableASRThreepass: Bool {
         switch self {
-        case .official, .speakerFlat, .speakerNested, .speakerNestedBare, .speakerNestedString, .speakerNestedSeconds, .speakerTop, .speechReject, .asrSplit, .asrSplitDiar, .asrGlobalTracking, .asrTextFilter, .asrForceTwopass: true
+        case .official: true
         case .fast, .minimal: false
         }
     }
 
     var enableASRTwopass: Bool {
         switch self {
-        case .official, .fast, .speakerFlat, .speakerNested, .speakerNestedBare, .speakerNestedString, .speakerNestedSeconds, .speakerTop, .speechReject, .asrSplit, .asrSplitDiar, .asrGlobalTracking, .asrTextFilter, .asrForceTwopass: true
+        case .official, .fast: true
         case .minimal: false
         }
     }
 
     var strongDDC: Bool {
         switch self {
-        case .official, .fast, .speakerFlat, .speakerNested, .speakerNestedBare, .speakerNestedString, .speakerNestedSeconds, .speakerTop, .speechReject, .asrSplit, .asrSplitDiar, .asrGlobalTracking, .asrTextFilter, .asrForceTwopass: true
+        case .official, .fast: true
         case .minimal: false
         }
     }
 
     var useTwopassRetry: Bool {
         switch self {
-        case .official, .speakerFlat, .speakerNested, .speakerNestedBare, .speakerNestedString, .speakerNestedSeconds, .speakerTop, .speechReject, .asrSplit, .asrSplitDiar, .asrGlobalTracking, .asrTextFilter, .asrForceTwopass: true
+        case .official: true
         case .fast, .minimal: false
         }
     }
 
     var endSmoothWindowMs: Int {
         switch self {
-        case .official, .fast, .speakerFlat, .speakerNested, .speakerNestedBare, .speakerNestedString, .speakerNestedSeconds, .speakerTop, .speechReject, .asrSplit, .asrSplitDiar, .asrGlobalTracking, .asrTextFilter, .asrForceTwopass: 800
+        case .official, .fast: 800
         case .minimal: 400
         }
     }
 
-    var isSpeakerExperiment: Bool {
-        switch self {
-        case .speakerFlat, .speakerNested, .speakerNestedBare, .speakerNestedString, .speakerNestedSeconds, .speakerTop, .asrSplitDiar: true
-        case .official, .fast, .minimal, .speechReject, .asrSplit, .asrGlobalTracking, .asrTextFilter, .asrForceTwopass: false
-        }
-    }
-
-    var speakerExperimentPayload: [String: Any] {
-        switch self {
-        case .speakerFlat, .speakerNested, .speakerTop:
-            // Mac Doubao IME exposes these as SAMICore ASR create parameters. The
-            // exact timeout semantics are server-defined; these conservative values
-            // are only for placement/acceptance experiments, not a shipped default.
-            return [
-                "enable_speaker_diarization": true,
-                "sos_silence_timeout": 800,
-                "eos_silence_timeout": 800,
-                "sentence_max_time": 10_000
-            ]
-        case .speakerNestedBare:
-            return ["enable_speaker_diarization": true]
-        case .speakerNestedString:
-            return ["enable_speaker_diarization": "true"]
-        case .speakerNestedSeconds:
-            return [
-                "enable_speaker_diarization": true,
-                "sos_silence_timeout": 800,
-                "eos_silence_timeout": 800,
-                "sentence_max_seconds": 10
-            ]
-        case .asrSplit:
-            return ["enable_split": true]
-        case .asrSplitDiar:
-            return [
-                "enable_split": true,
-                "enable_speaker_diarization": true
-            ]
-        case .asrGlobalTracking:
-            return ["enable_global_tracking": true]
-        case .asrTextFilter:
-            return ["enable_text_filter": true]
-        case .asrForceTwopass:
-            return ["force_asr_twopass": true]
-        case .speechReject, .official, .fast, .minimal:
-            return [:]
-        }
-    }
-
-    var enablesSpeechRejection: Bool {
-        switch self {
-        case .speechReject: true
-        case .official, .fast, .minimal, .speakerFlat, .speakerNested, .speakerNestedBare, .speakerNestedString, .speakerNestedSeconds, .speakerTop, .asrSplit, .asrSplitDiar, .asrGlobalTracking, .asrTextFilter, .asrForceTwopass: false
-        }
-    }
-
     var logSummary: String {
-        var summary = "profile=\(rawValue) threepass=\(enableASRThreepass) twopass=\(enableASRTwopass) strongDDC=\(strongDDC) twopassRetry=\(useTwopassRetry) endSmooth=\(endSmoothWindowMs)"
-        if isSpeakerExperiment {
-            summary += " speakerExperiment=\(rawValue)"
-        }
-        return summary
+        "profile=\(rawValue) threepass=\(enableASRThreepass) twopass=\(enableASRTwopass) strongDDC=\(strongDDC) twopassRetry=\(useTwopassRetry) endSmooth=\(endSmoothWindowMs)"
     }
 }
 
@@ -157,9 +86,8 @@ public enum DoubaoExperimentProfile: String, Sendable {
 ///   - profile: Hidden QUA-167 ASR tuning profile. Defaults to `.official` so
 ///     existing callers and release behavior are unchanged.
 ///   - audioFormat: `audio_info.format` wire value. The production pipeline
-///     always sends `"speech_opus"`; the Windows-port smoke harness (QUA-209)
-///     probes alternative values (e.g. `"pcm"`) to learn whether the server
-///     accepts un-encoded audio — which would make libopus unnecessary.
+///     always sends `"speech_opus"`; the smoke harness probes alternative
+///     values (e.g. `"pcm"`).
 ///
 /// `end_smooth_window_ms` and `use_twopass_retry` mirror the official Doubao IME
 /// client's StartSession config in `.official`. The experiment profiles relax
@@ -170,7 +98,7 @@ public func buildSessionConfigJSON(
     profile: DoubaoExperimentProfile = .official,
     audioFormat: String = "speech_opus"
 ) -> String {
-    var extra: [String: Any] = [
+    let extra: [String: Any] = [
         "app_name": "com.android.chrome",
         "app_version": "1.1.2",
         "cell_compress_rate": 8,
@@ -221,29 +149,16 @@ public func buildSessionConfigJSON(
         "use_twopass_retry": profile.useTwopassRetry
     ]
 
-    var payload: [String: Any] = [
+    let payload: [String: Any] = [
         "audio_info": [
             "channel": DoubaoConstants.channels,
             "format": audioFormat,
             "sample_rate": DoubaoConstants.sampleRate
         ],
         "enable_punctuation": true,
-        "enable_speech_rejection": profile.enablesSpeechRejection
+        "enable_speech_rejection": false,
+        "extra": extra
     ]
-
-    let speakerPayload = profile.speakerExperimentPayload
-    switch profile {
-    case .speakerFlat:
-        for (key, value) in speakerPayload { extra[key] = value }
-    case .speakerNested, .speakerNestedBare, .speakerNestedString, .speakerNestedSeconds, .asrSplit, .asrSplitDiar, .asrGlobalTracking, .asrTextFilter, .asrForceTwopass:
-        extra["asr_params"] = speakerPayload
-    case .speakerTop:
-        for (key, value) in speakerPayload { payload[key] = value }
-    case .official, .fast, .minimal, .speechReject:
-        break
-    }
-
-    payload["extra"] = extra
 
     let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
     return String(data: data, encoding: .utf8) ?? "{}"

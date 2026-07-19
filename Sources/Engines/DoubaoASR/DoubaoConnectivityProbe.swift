@@ -1,18 +1,11 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ConcurrencySupport
 
-/// Staged connectivity probe for the Doubao ASR pipeline (QUA-209).
+/// Staged connectivity probe for the Doubao ASR pipeline.
 ///
-/// Exists to answer the Windows port's #1 risk in isolation: does
-/// FoundationNetworking's libcurl-backed `URLSessionWebSocketTask` actually
-/// work at runtime against the real Doubao frontier servers? It exercises
-/// the full pre-audio path — device registration / cached credentials,
-/// WS TLS upgrade, binary protobuf StartTask round-trip — while deliberately
-/// bypassing `makeOpusEncoder()` (which throws on Windows until libopus
-/// lands) and the mic capture stack.
+/// Exercises the full pre-audio path in isolation — device registration /
+/// cached credentials, WS TLS upgrade, binary protobuf StartTask round-trip —
+/// while deliberately bypassing the opus encoder and the mic capture stack.
 ///
 /// Lives inside DoubaoASR (not the CLI) for the same reason
 /// `SonioxConnectivityTest` lives inside SonioxASR: it needs internal access
@@ -20,38 +13,25 @@ import ConcurrencySupport
 /// it probes is easier to keep honest than a reimplementation outside.
 public enum DoubaoConnectivityProbe {
 
-    public struct Report: Sendable {
-        /// Human-readable stage lines, in order ("credentials: ok device_id=…").
-        public var stages: [String] = []
-        public var success: Bool = false
-        /// Set when `success == false`; the first stage that failed.
-        public var failure: String?
-    }
-
-    /// Runs the probe. `progress` is called once per stage line as it
-    /// completes, so a CLI can stream output live; the same lines are also
-    /// collected into the returned `Report`.
+    /// Runs the probe, returning overall success. `progress` is called once
+    /// per stage line as it completes, so a CLI can stream output live.
     public static func run(
         timeout: TimeInterval = 15.0,
         progress: @escaping @Sendable (String) -> Void = { _ in }
-    ) async -> Report {
-        var report = Report()
+    ) async -> Bool {
         func stage(_ line: String) {
-            report.stages.append(line)
             progress(line)
         }
-        func fail(_ line: String) -> Report {
+        func fail(_ line: String) -> Bool {
             stage(line)
-            report.failure = line
-            report.success = false
-            return report
+            return false
         }
 
         // Stage 1 — credentials (registers the anonymous device if no cache).
         let creds: DeviceCredentials
         do {
             creds = try await DoubaoCredentialStore.shared.ensureCredentials()
-            stage("credentials: ok device_id=\(creds.deviceId) token.len=\(creds.token.count) cache=\(DoubaoCredentialStore.shared.fileURLForDiagnostics.path)")
+            stage("credentials: ok device_id=\(creds.deviceId) token.len=\(creds.token.count) cache=\(DoubaoCredentialStore.shared.fileURL.path)")
         } catch {
             return fail("credentials: FAILED — \(error.localizedDescription)")
         }
@@ -105,8 +85,7 @@ public enum DoubaoConnectivityProbe {
                 let resp = try AsrResponse.decode(data)
                 if resp.messageType == "TaskStarted" {
                     stage("starttask: ok TaskStarted code=\(resp.statusCode)")
-                    report.success = true
-                    return report
+                    return true
                 }
                 if resp.messageType == "TaskFailed" || resp.messageType == "SessionFailed" {
                     return fail("starttask: FAILED — \(resp.messageType) code=\(resp.statusCode) msg=\(resp.statusMessage)")

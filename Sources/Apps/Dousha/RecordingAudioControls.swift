@@ -23,7 +23,7 @@ final class RecordingAudioControls: @unchecked Sendable {
 
     init(muteSystemAudio: Bool,
          pauseMedia: Bool,
-         mediaPlaybackState: @escaping MediaPlaybackState = { SystemMediaPlaybackState.isPlaying() },
+         mediaPlaybackState: @escaping MediaPlaybackState = { MediaRemotePlaybackProbe.shared.isPlaying() },
          mediaKeySender: @escaping MediaKeyAction = { MediaKeySender.postPlayPause() }) {
         self.muteSystemAudio = muteSystemAudio
         self.pauseMedia = pauseMedia
@@ -166,21 +166,11 @@ private enum SystemOutputAudio {
                          objectID: deviceID) else {
             return nil
         }
-        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-                                                 mScope: kAudioDevicePropertyScopeOutput,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        var value: Float32 = 0
-        var dataSize = UInt32(MemoryLayout<Float32>.size)
-        let status = AudioObjectGetPropertyData(deviceID,
-                                                &address,
-                                                0,
-                                                nil,
-                                                &dataSize,
-                                                &value)
-        guard status == noErr else {
-            throw CoreAudioCallError(operation: "get virtual master volume", status: status)
-        }
-        return value
+        return try coreAudioProperty(object: deviceID,
+                                     selector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+                                     scope: kAudioDevicePropertyScopeOutput,
+                                     element: kAudioObjectPropertyElementMain,
+                                     operation: "get virtual master volume") as Float32
     }
 
     private static func setVirtualMasterVolume(_ value: Float32, for deviceID: AudioDeviceID) throws {
@@ -220,42 +210,22 @@ private enum SystemOutputAudio {
     }
 
     private static func defaultOutputDeviceID() throws -> AudioDeviceID {
-        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                                                 mScope: kAudioObjectPropertyScopeGlobal,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        var value = AudioDeviceID(0)
-        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
-                                                &address,
-                                                0,
-                                                nil,
-                                                &dataSize,
-                                                &value)
-        guard status == noErr else {
-            throw CoreAudioCallError(operation: "get default output device", status: status)
-        }
-        return value
+        try coreAudioProperty(object: AudioObjectID(kAudioObjectSystemObject),
+                              selector: kAudioHardwarePropertyDefaultOutputDevice,
+                              scope: kAudioObjectPropertyScopeGlobal,
+                              element: kAudioObjectPropertyElementMain,
+                              operation: "get default output device")
     }
 
     private static func uint32Property(_ selector: AudioObjectPropertySelector,
                                        objectID: AudioObjectID,
                                        scope: AudioObjectPropertyScope,
                                        element: AudioObjectPropertyElement) throws -> UInt32 {
-        var address = AudioObjectPropertyAddress(mSelector: selector,
-                                                 mScope: scope,
-                                                 mElement: element)
-        var value: UInt32 = 0
-        var dataSize = UInt32(MemoryLayout<UInt32>.size)
-        let status = AudioObjectGetPropertyData(objectID,
-                                                &address,
-                                                0,
-                                                nil,
-                                                &dataSize,
-                                                &value)
-        guard status == noErr else {
-            throw CoreAudioCallError(operation: "get uint32 property \(selector)", status: status)
-        }
-        return value
+        try coreAudioProperty(object: objectID,
+                              selector: selector,
+                              scope: scope,
+                              element: element,
+                              operation: "get uint32 property \(selector)")
     }
 
     private static func hasProperty(selector: AudioObjectPropertySelector,
@@ -281,12 +251,6 @@ private enum SystemOutputAudio {
         var settable = DarwinBoolean(false)
         let status = AudioObjectIsPropertySettable(objectID, &address, &settable)
         return status == noErr && settable.boolValue
-    }
-}
-
-private enum SystemMediaPlaybackState {
-    static func isPlaying() -> Bool? {
-        MediaRemotePlaybackProbe.shared.isPlaying()
     }
 }
 

@@ -9,7 +9,6 @@ struct HUDBorderBeam: View {
     var duration: TimeInterval = 2.45
 
     static let baseStrokeOpacity = 0.30
-    static let inverseMaskBlurMultiplier = 1.0
     static let beamMaskBlurDivisor = 1.5
     static let beamMaskPaddingMultiplier = -2.0
     static let beamVisibleStartLocation = 0.52
@@ -73,7 +72,7 @@ struct HUDBorderBeam: View {
                     Rectangle()
                         .overlay {
                             shape
-                                .blur(radius: glowRadius * Self.inverseMaskBlurMultiplier)
+                                .blur(radius: glowRadius)
                                 .blendMode(.destinationOut)
                         }
                 }

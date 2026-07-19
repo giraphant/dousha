@@ -239,18 +239,6 @@ final class PreferencesTests: XCTestCase {
 
     // MARK: - Audio processing
 
-    func testVoiceProcessing_defaultsToDisabled() {
-        XCTAssertFalse(prefs.voiceProcessingEnabled)
-    }
-
-    func testVoiceProcessing_ignoresStaleEnabledValue() {
-        defaults.set(true, forKey: "voiceProcessingEnabled")
-
-        let fresh = Preferences(defaults: defaults)
-
-        XCTAssertFalse(fresh.voiceProcessingEnabled)
-    }
-
     func testMicrophoneSelection_defaultsToSystemDefault() {
         XCTAssertEqual(prefs.microphoneSelection, .systemDefault)
     }

@@ -1,34 +1,24 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ASRSupport
 @_spi(SmokeCLI) import DoubaoASR
 
-/// File-based smoke transcription for the Windows port (QUA-209): WAV in,
-/// final transcript out, over the same wire protocol as the live engine.
+/// File-based smoke transcription: WAV in, final transcript out, over the
+/// same wire protocol as the live engine.
 ///
 /// This is deliberately NOT the `DoubaoASR` actor. The actor's job is live
 /// mic streaming — reconnect generations, stop grace windows, interim
-/// delivery — none of which a file smoke test needs, and reusing it would
-/// drag the opus encoder (absent on Windows until libopus lands) into the
-/// path. This is a linear drive of the protocol: StartTask → StartSession →
-/// burst frames → FinishSession → drain results. Burst send (no real-time
-/// pacing) is known-safe: the QUA-193 reconnect path replays retained audio
-/// the same way.
+/// delivery — none of which a file smoke test needs. This is a linear drive
+/// of the protocol: StartTask → StartSession → burst frames → FinishSession →
+/// drain results. Burst send (no real-time pacing) is known-safe: the QUA-193
+/// reconnect path replays retained audio the same way.
 ///
-/// `audioFormat` defaults to the production `"speech_opus"` (requires an
-/// encoder, i.e. macOS today); pass `"pcm"` etc. to probe whether the server
-/// accepts raw s16le — a yes removes the libopus dependency entirely.
+/// `audioFormat` defaults to the production `"speech_opus"`; pass `"pcm"`
+/// etc. to probe how the server handles other formats.
 public enum DoubaoSmokeTranscriber {
 
     public struct Report: Sendable {
-        public var stages: [String] = []
         public var transcript: String = ""
         public var success: Bool = false
-        public var failure: String?
-        public var observedDiagnosticKeys: [String] = []
-        public var rawResultJsonSamples: [String] = []
     }
 
     public static func run(
@@ -40,12 +30,10 @@ public enum DoubaoSmokeTranscriber {
     ) async -> Report {
         var report = Report()
         func stage(_ line: String) {
-            report.stages.append(line)
             progress(line)
         }
         func fail(_ line: String) -> Report {
             stage(line)
-            report.failure = line
             return report
         }
 
@@ -61,10 +49,10 @@ public enum DoubaoSmokeTranscriber {
 
         // Encoder (opus path only). Resolved before any network work so a
         // missing encoder fails fast with a clear message.
-        var encoder: (any OpusEncoding)?
+        var encoder: OpusEncoder?
         if audioFormat == "speech_opus" {
             do {
-                encoder = try makeOpusEncoder()
+                encoder = try OpusEncoder()
             } catch {
                 return fail("opus: FAILED — \(error.localizedDescription) (try --format pcm)")
             }
@@ -160,8 +148,6 @@ public enum DoubaoSmokeTranscriber {
             try await ws.send(.data(AsrMessageBuilder.finishSession(requestId: requestId, token: creds.token)))
 
             var resultState = DoubaoResultState()
-            var observedDiagnosticKeys = Set<String>()
-            var rawResultJsonSamples: [String] = []
             let deadline = Date().addingTimeInterval(timeout)
             drain: while Date() < deadline {
                 let msg = try await ws.receive()
@@ -178,39 +164,16 @@ public enum DoubaoSmokeTranscriber {
                 }
                 guard !resp.resultJson.isEmpty,
                       let rj = try? JSONSerialization.jsonObject(with: Data(resp.resultJson.utf8)) as? [String: Any] else { continue }
-                if rawResultJsonSamples.count < 3 {
-                    rawResultJsonSamples.append(resp.resultJson)
-                }
-                collectDiagnosticKeys(from: rj, into: &observedDiagnosticKeys)
                 resultState.ingest(object: rj)
             }
 
             let transcript = resultState.rawText
             report.transcript = transcript
-            report.observedDiagnosticKeys = observedDiagnosticKeys.sorted()
-            report.rawResultJsonSamples = rawResultJsonSamples
             stage("transcript: \(transcript.isEmpty ? "(empty)" : transcript)")
             report.success = !transcript.isEmpty
-            if transcript.isEmpty { report.failure = "transcript: empty" }
             return report
         } catch {
             return fail("session: FAILED — \(error.localizedDescription)")
-        }
-    }
-
-    private static func collectDiagnosticKeys(from value: Any, into keys: inout Set<String>) {
-        if let dict = value as? [String: Any] {
-            for (key, nestedValue) in dict {
-                let lowered = key.lowercased()
-                if lowered.contains("speaker") || lowered == "speaker_id" || lowered.contains("spk") || lowered.contains("diar") || lowered.contains("vad") || lowered == "is_vad_finished" || lowered.contains("full_vad") {
-                    keys.insert(key)
-                }
-                collectDiagnosticKeys(from: nestedValue, into: &keys)
-            }
-        } else if let array = value as? [Any] {
-            for item in array {
-                collectDiagnosticKeys(from: item, into: &keys)
-            }
         }
     }
 }

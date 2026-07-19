@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ConcurrencySupport
 import ASRSupport
 
@@ -71,15 +68,6 @@ public actor SonioxASR {
     private var onPartial: (@Sendable (PartialTranscript) -> Void)?
     private var onError: (@Sendable (Error) -> Void)?
 
-    private var totalPcmBytesOut: Int = 0
-
-    /// When audio capture began for this session. Set in `prepareSession`
-    /// (the mic + shared WAV are owned by the `AudioTapHub`); drives the
-    /// reported `audioDuration`.
-    private var audioStartedAt: Date?
-    private var lastResponseAt: Date?
-    private var lastTranscriptAt: Date?
-
     /// Creates an idle recognizer. No mic, network, or key validation happens
     /// until `prepareSession()` / `openStream()`. `mode` picks real-time
     /// WebSocket streaming or async (batch) upload-on-stop.
@@ -114,12 +102,8 @@ public actor SonioxASR {
         self.parser = SonioxResponseParser()
         self.pcmBuffer = Data()
         self.canSendAudio = false
-        self.totalPcmBytesOut = 0
         self.requestId = UUID().uuidString.lowercased()
         self.finishedChannel = OneShotChannel<Void>()
-        self.audioStartedAt = Date()
-        self.lastResponseAt = nil
-        self.lastTranscriptAt = nil
         doushaLog("[SonioxASR] traceId=\(requestId) prepareSession mode=\(mode.rawValue) (capture owned by AudioTapHub)")
     }
 
@@ -238,7 +222,7 @@ public actor SonioxASR {
         // Wait for `finished: true`. Soniox flushes promptly; 5s is generous.
         let waitStart = Date()
         if let channel = finishedChannel {
-            _ = await waitWithTimeout(channel: channel, timeout: 5.0)
+            _ = await channel.wait(timeout: 5.0)
         }
         doushaLog("[SonioxASR] traceId=\(requestId) post-EOS wait \(Int(Date().timeIntervalSince(waitStart) * 1000))ms finished=\(parser.isFinished)")
 
@@ -278,7 +262,7 @@ public actor SonioxASR {
         let channel = wsCloseChannels.register(closingGeneration)
         closing.cancel(with: .normalClosure, reason: nil)
         Task {
-            if case .timeout = await self.waitWithTimeout(channel: channel, timeout: 1.0) {
+            if case .timeout = await channel.wait(timeout: 1.0) {
                 doushaLog("[SonioxASR] WS close handshake timed out — tearing down anyway")
             }
             self.wsCloseChannels.remove(closingGeneration)
@@ -308,20 +292,10 @@ public actor SonioxASR {
     }
 
     private func makeResult() -> TranscriptionResult {
-        let audioDuration: TimeInterval = audioStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        let lastResponseAge: TimeInterval? = lastResponseAt.map { Date().timeIntervalSince($0) }
-        let lastTranscriptAge: TimeInterval? = lastTranscriptAt.map { Date().timeIntervalSince($0) }
-        return TranscriptionResult(
-            // displayText = finalText + interim. When finished, interim is
-            // flushed so this equals finalText; on a finished-wait timeout it
-            // preserves the trailing interim instead of dropping it.
-            text: parser.displayText,
-            audioDuration: audioDuration,
-            lastResponseAge: lastResponseAge,
-            lastTranscriptAge: lastTranscriptAge,
-            maxSegmentGap: nil,
-            traceId: requestId
-        )
+        // displayText = finalText + interim. When finished, interim is
+        // flushed so this equals finalText; on a finished-wait timeout it
+        // preserves the trailing interim instead of dropping it.
+        TranscriptionResult(text: parser.displayText, traceId: requestId)
     }
 
     private func closeWebSocket() async {
@@ -350,7 +324,7 @@ public actor SonioxASR {
         let channel = wsCloseChannels.register(closingGeneration)
         ws.cancel(with: .normalClosure, reason: nil)
 
-        if case .timeout = await waitWithTimeout(channel: channel, timeout: 1.0) {
+        if case .timeout = await channel.wait(timeout: 1.0) {
             doushaLog("[SonioxASR] WS close handshake timed out — tearing down anyway")
         }
         wsCloseChannels.remove(closingGeneration)
@@ -472,7 +446,6 @@ public actor SonioxASR {
     }
 
     private func handleResponseData(_ data: Data) {
-        self.lastResponseAt = Date()
         guard let update = parser.ingest(jsonData: data) else {
             return
         }
@@ -486,7 +459,6 @@ public actor SonioxASR {
         }
 
         if update.didProduceContent {
-            self.lastTranscriptAt = Date()
             let partial = PartialTranscript(finalText: update.finalText, interimText: update.interimText)
             let cb = onPartial
             DispatchQueue.main.async { cb?(partial) }
@@ -509,7 +481,6 @@ public actor SonioxASR {
         // Async mode never streams PCM — the WAV side-recording is the payload.
         // Skip buffering so a long recording can't grow an unbounded Data.
         guard mode == .realtime else { return }
-        totalPcmBytesOut += data.count
         pcmBuffer.append(data)
         try? await flushPendingFrames()
     }
@@ -547,32 +518,4 @@ public actor SonioxASR {
         DispatchQueue.main.async { cb?(error) }
     }
 
-    private enum WaitOutcome<T: Sendable>: Sendable {
-        case signaled(T)
-        case timeout
-        case cancelled
-        case failed
-    }
-
-    private func waitWithTimeout<T: Sendable>(channel: OneShotChannel<T>, timeout: TimeInterval) async -> WaitOutcome<T> {
-        await withTaskGroup(of: WaitOutcome<T>.self) { group in
-            group.addTask {
-                do {
-                    let v = try await channel.wait()
-                    return .signaled(v)
-                } catch is CancellationError {
-                    return .cancelled
-                } catch {
-                    return .failed
-                }
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return .timeout
-            }
-            let first = await group.next() ?? .failed
-            group.cancelAll()
-            return first
-        }
-    }
 }

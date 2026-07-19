@@ -23,7 +23,7 @@ final class FloatingWindow {
     }
     /// The panel is sized once and never resized during a session.
     private static var panelHeight: CGFloat {
-        FloatingHUDView.cardMaxHeight + panelVerticalMargin * 2
+        FloatingHUDView.maxHeight + panelVerticalMargin * 2
     }
 
     init(model: FloatingHUDModel) {
