@@ -55,6 +55,7 @@ final class RecordingHistoryStore {
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyyMMdd-HHmmss-SSS"
         fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = TimeZone(identifier: "UTC")
         let id = fmt.string(from: date)
         do {
             try? FileManager.default.removeItem(at: wavURL(id: id))
@@ -70,9 +71,18 @@ final class RecordingHistoryStore {
         return id
     }
 
-    /// A successful re-transcription refreshes the stored text (spec §4).
+    /// A successful re-transcription refreshes the stored text (spec §4). If the
+    /// sidecar is missing but the wav is present (orphan from a crash between the
+    /// wav copy and the sidecar write), create one instead of dropping the result.
     func updateTranscript(id: String, transcript: String) {
-        guard var sc = readSidecar(id: id) else { return }
+        guard var sc = readSidecar(id: id) else {
+            guard FileManager.default.fileExists(atPath: wavURL(id: id).path) else { return }
+            let attrs = try? FileManager.default.attributesOfItem(atPath: wavURL(id: id).path)
+            let date = attrs?[.modificationDate] as? Date ?? Date()
+            writeSidecar(Sidecar(date: date, transcript: transcript, engine: "", error: nil), id: id)
+            notifyChanged()
+            return
+        }
         sc.transcript = transcript
         sc.error = nil
         writeSidecar(sc, id: id)

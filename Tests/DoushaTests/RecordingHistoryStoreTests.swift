@@ -98,6 +98,20 @@ final class RecordingHistoryStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.wavURL(id: id).path))
     }
 
+    func testUpdateTranscript_createsSidecarForOrphanWav() throws {
+        // Crash between the wav copy and the sidecar write leaves an orphan wav;
+        // a re-transcription of it must not be silently dropped.
+        let orphan = dir.appendingPathComponent("20260101-000000-000.wav")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(count: 44 + 3_200).write(to: orphan)
+
+        store.updateTranscript(id: "20260101-000000-000", transcript: "重转成功")
+
+        let entry = store.entries().first
+        XCTAssertEqual(entry?.transcript, "重转成功")
+        XCTAssertNil(entry?.error)
+    }
+
     func testSave_postsHistoryChanged() {
         let exp = expectation(forNotification: .doushaHistoryChanged, object: nil)
         _ = store.save(wavFrom: sourceWAV, date: Date(), engine: "e",

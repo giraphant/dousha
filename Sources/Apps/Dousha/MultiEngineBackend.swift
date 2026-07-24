@@ -348,7 +348,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         buf.frameLength = frames
         chunk.withUnsafeBytes { raw in
             if let base = raw.baseAddress, let dst = buf.int16ChannelData?[0] {
-                memcpy(dst, base, chunk.count)
+                memcpy(dst, base, Int(frames) * MemoryLayout<Int16>.size)
             }
         }
         return buf
@@ -361,7 +361,11 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     static func forReplay(_ prefs: Preferences, wavURL: URL) -> SpeechBackend {
         if wavURL != AudioCapturePaths.sharedWAV {
             try? FileManager.default.removeItem(at: AudioCapturePaths.sharedWAV)
-            try? FileManager.default.copyItem(at: wavURL, to: AudioCapturePaths.sharedWAV)
+            do {
+                try FileManager.default.copyItem(at: wavURL, to: AudioCapturePaths.sharedWAV)
+            } catch {
+                doushaLog("[MultiEngine] replay copy to sharedWAV failed: \(error.localizedDescription)")
+            }
         }
         let built = makeEntries(prefs)
         return MultiEngineBackend(entries: built.entries, primary: built.primary,

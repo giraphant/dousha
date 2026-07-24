@@ -287,10 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 isMenuBarIconVisible: { [weak self] in self?.prefs.showMenuBarIcon ?? true },
                 setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
                 resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() },
-                retranscribe: { [weak self] id in
-                    guard let self else { return }
-                    self.recording.retranscribe(id: id, url: self.historyStore.wavURL(id: id))
-                },
+                retranscribe: { [weak self] id in self?.retranscribeEntry(id: id) },
                 canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false }
             )
             settingsWindow = SettingsWindowFactory.create(actions: actions)
@@ -303,7 +300,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Menu-bar "重新转录上次": replay the newest history entry.
     private func retranscribeLast() {
         guard let entry = historyStore.newest() else { return }
-        recording.retranscribe(id: entry.id, url: historyStore.wavURL(id: entry.id))
+        retranscribeEntry(id: entry.id)
+    }
+
+    /// Shared entry point for menu + settings retranscribe. The Caches dir can
+    /// be cleaned behind our back — a dead entry is removed (posting the list
+    /// refresh) instead of surfacing a repeated error (spec §4).
+    private func retranscribeEntry(id: String) {
+        let url = historyStore.wavURL(id: id)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            doushaLog("[Dousha] retranscribe: wav missing for id=\(id) — removing entry")
+            historyStore.remove(id: id)
+            return
+        }
+        recording.retranscribe(id: id, url: url)
     }
 
     // MARK: - Permissions

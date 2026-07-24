@@ -101,6 +101,12 @@ final class RecordingController {
     /// History entry the current replay session refreshes on success.
     private var replayHistoryId: String?
 
+    /// Set when a LIVE session dies with an error: its trailing .final (which
+    /// archives the failed recording to history) has not arrived yet. Gates
+    /// canRetranscribe so a rescue can't destroy the very recording it wants,
+    /// and lets the trailing final save even after the 3 s error auto-reset.
+    private var pendingErrorMessage: String?
+
     init(environment: RecordingEnvironment) {
         self.env = environment
     }
@@ -152,6 +158,7 @@ final class RecordingController {
         sessionCorrect = env.makeCorrector()   // config snapshot at start (QUA-264)
         isReplay = false
         replayHistoryId = nil
+        pendingErrorMessage = nil
         transition(to: .recording)
         backend.setLanguage(env.language())
         env.resetHUDLevels()
@@ -188,10 +195,16 @@ final class RecordingController {
                     self.handleFinal(result)
                 }
             }
+            // Stream over with no trailing final (e.g. capture failure):
+            // release the gate so the feature can't wedge.
+            self?.pendingErrorMessage = nil
         }
     }
 
     private func transitionToError(_ message: String) {
+        if (status == .recording || status == .transcribing) && !isReplay {
+            pendingErrorMessage = message
+        }
         // Idempotent: a flood of cascading server errors must not keep re-deferring
         // the idle reset.
         if case .error = status { return }
@@ -229,7 +242,9 @@ final class RecordingController {
     /// Whether a re-transcription may begin now. Mirrors start()'s guard: idle,
     /// or an error state (the failed-dictation rescue shouldn't wait out the
     /// 3 s auto-reset).
-    var canRetranscribe: Bool { status == .idle || isErrorStatus(status) }
+    var canRetranscribe: Bool {
+        (status == .idle || isErrorStatus(status)) && pendingErrorMessage == nil
+    }
 
     /// Re-transcribe a saved recording (menu bar / settings history pane).
     /// Runs the full engine pipeline against the WAV via a replay backend and
@@ -269,8 +284,9 @@ final class RecordingController {
     /// one point a failed recording can be archived for rescue re-transcription.
     private func handleFinal(_ result: TranscriptionResult) {
         guard status == .transcribing else {
-            if case .error(let message) = status, !isReplay {
+            if let message = pendingErrorMessage, !isReplay {
                 env.saveHistory(result.text.trimmingCharacters(in: .whitespacesAndNewlines), message)
+                pendingErrorMessage = nil
             }
             doushaLog("[RecordingController] final dropped (status=\(status))")
             return

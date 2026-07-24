@@ -560,4 +560,72 @@ final class RecordingControllerRetranscribeTests: XCTestCase {
         c.cancel()
         XCTAssertTrue(spy.savedHistory.isEmpty)
     }
+
+    // MARK: - Error-window race (the trailing .final that archives a failed
+    // LIVE session hasn't arrived yet — canRetranscribe must stay false so a
+    // rescue can't destroy the very recording it wants).
+
+    func testRetranscribe_blockedUntilTrailingFinalArrives() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        backend.emitError("boom")
+        await expectEventually({ c.status != .recording }, "error transition")
+        XCTAssertFalse(c.canRetranscribe, "gate must hold until the trailing final archives the entry")
+
+        c.retranscribe(id: "h1", url: makeTempWAV())
+        XCTAssertTrue(spy.replayURLs.isEmpty, "retranscribe must be rejected while the gate is closed")
+
+        backend.emitFinal(TranscriptionResult(text: "残余"))
+        await expectEventually({ !spy.savedHistory.isEmpty && c.canRetranscribe },
+                               "trailing final archives the entry and opens the gate")
+
+        c.retranscribe(id: "h1", url: makeTempWAV())
+        XCTAssertEqual(c.status, .transcribing)
+    }
+
+    func testTrailingFinalAfterErrorAutoReset_stillSaves() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, sched) = makeSUT(backend: backend)
+        c.start()
+        backend.emitError("network down")
+        await expectEventually({ c.status == .error("network down") }, "error transition")
+
+        sched.advance(by: RecordingController.errorAutoReset)
+        XCTAssertEqual(c.status, .idle, "auto-reset must fire even with the gate still held")
+
+        backend.emitFinal(TranscriptionResult(text: "残余"))
+        await expectEventually({ !spy.savedHistory.isEmpty },
+                               "trailing final still saves after the auto-reset lands in .idle")
+        XCTAssertEqual(spy.savedHistory.count, 1)
+        XCTAssertEqual(spy.savedHistory[0].transcript, "残余")
+        XCTAssertEqual(spy.savedHistory[0].error, "network down")
+    }
+
+    func testReplayEmptyFinal_writesNoHistory() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.retranscribe(id: "h1", url: makeTempWAV())
+        backend.emitFinal(TranscriptionResult(text: "  "))
+        await expectEventually({ c.status == .idle }, "empty replay result returns to idle")
+        XCTAssertTrue(spy.savedHistory.isEmpty)
+        XCTAssertTrue(spy.historyUpdates.isEmpty)
+        XCTAssertTrue(spy.clipboardCopies.isEmpty)
+    }
+
+    func testReplayError_writesNoHistory() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.retranscribe(id: "h1", url: makeTempWAV())
+        backend.emitError("replay boom")
+        await expectEventually({ c.status != .transcribing }, "replay error transition")
+
+        backend.emitFinal(TranscriptionResult(text: "残余"))
+        // The drop branch is a no-op for a replay error (no pendingErrorMessage,
+        // no status change) — give the consumer loop a few ticks to actually run
+        // it before asserting the negative (mirrors AudioTapHub's drain idiom).
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(spy.savedHistory.isEmpty)
+        XCTAssertTrue(spy.historyUpdates.isEmpty)
+    }
 }
