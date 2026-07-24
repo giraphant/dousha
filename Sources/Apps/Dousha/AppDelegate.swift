@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let injector = TextInjector()
     private let prefs = Preferences.shared
+    private let historyStore = RecordingHistoryStore()
 
     private let hudModel = FloatingHUDModel()
     private var floatingWindow: FloatingWindow?
@@ -39,6 +40,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingWindow = FloatingWindow(model: hudModel)
         recording = RecordingController(environment: RecordingEnvironment(
             makeBackend: { [prefs] in MultiEngineBackend.fromPreferences(prefs) },
+            makeReplayBackend: { [prefs] url in MultiEngineBackend.forReplay(prefs, wavURL: url) },
+            copyToClipboard: { text in
+                let pb = NSPasteboard.general
+                pb.clearContents(); pb.setString(text, forType: .string)
+            },
+            saveHistory: { [prefs, historyStore] transcript, error in
+                historyStore.save(wavFrom: AudioCapturePaths.sharedWAV, date: Date(),
+                                   engine: prefs.engine.rawValue, transcript: transcript,
+                                   error: error, limit: prefs.historyLimit)
+            },
+            updateHistory: { [historyStore] id, transcript in
+                historyStore.updateTranscript(id: id, transcript: transcript)
+            },
             applyStatusToHUD: { [hudModel] status in hudModel.status = status },
             setHUDVisible: { [weak self] visible in
                 if visible { self?.floatingWindow?.show() } else { self?.floatingWindow?.hide() }

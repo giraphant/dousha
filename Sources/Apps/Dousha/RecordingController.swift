@@ -9,6 +9,15 @@ import ConcurrencySupport
 struct RecordingEnvironment {
     /// Build a fresh backend from current preferences (called at each start()).
     var makeBackend: () -> SpeechBackend
+    /// Build a replay backend for a saved WAV (re-transcribe; no mic).
+    var makeReplayBackend: (URL) -> SpeechBackend
+    /// Put re-transcription results on the clipboard (replay never ⌘V-injects).
+    var copyToClipboard: (String) -> Void
+    /// Archive the just-finished LIVE recording (wav is complete when called).
+    /// `error` carries the failure message for a rescued failed dictation.
+    var saveHistory: (_ transcript: String, _ error: String?) -> Void
+    /// A successful re-transcription refreshes its history entry's text.
+    var updateHistory: (_ id: String, _ transcript: String) -> Void
     /// Apply the new status to the HUD (glow/content). Does NOT control visibility.
     var applyStatusToHUD: (RecordingStatus) -> Void
     /// Show (true) / hide (false) the floating HUD window.
@@ -85,6 +94,13 @@ final class RecordingController {
     /// (QUA-264). Identity until the first start so a stray final can't crash.
     private var sessionCorrect: (String) -> String = { $0 }
 
+    /// True for a replay (re-transcribe) session: partials show during
+    /// .transcribing, the result goes to the clipboard, and history is
+    /// updated in place instead of appended.
+    private var isReplay = false
+    /// History entry the current replay session refreshes on success.
+    private var replayHistoryId: String?
+
     init(environment: RecordingEnvironment) {
         self.env = environment
     }
@@ -134,21 +150,29 @@ final class RecordingController {
         let backend = env.makeBackend()
         self.backend = backend
         sessionCorrect = env.makeCorrector()   // config snapshot at start (QUA-264)
+        isReplay = false
+        replayHistoryId = nil
         transition(to: .recording)
         backend.setLanguage(env.language())
         env.resetHUDLevels()
         env.resetHUDTranscript()
 
-        let stream = backend.start()
+        consume(backend.start())
+    }
+
+    /// Drains one session's event stream. Shared by start() and retranscribe().
+    private func consume(_ stream: AsyncStream<RecordingEvent>) {
         sessionTask?.cancel()        // defensive: no overlapping consumer
         sessionTask = Task { @MainActor [weak self] in
             for await event in stream {
                 guard let self else { return }
                 switch event {
                 case .partial(let partial):
-                    // Drop late partials once we've left .recording so a batch
-                    // emitted just before stop() can't clobber the final.
-                    guard self.status == .recording else { continue }
+                    // Live: drop late partials once we've left .recording so a
+                    // batch emitted just before stop() can't clobber the final.
+                    // Replay: the whole session runs in .transcribing.
+                    let live: RecordingStatus = self.isReplay ? .transcribing : .recording
+                    guard self.status == live else { continue }
                     self.env.updateHUDTranscript(partial)
                 case .audioLevel(let level):
                     self.env.pushHUDLevel(level)
@@ -202,22 +226,79 @@ final class RecordingController {
         backend?.stop()
     }
 
-    /// Handles the terminal `.final` event. Replaces the old `stop(completion:)`
-    /// closure body. The `status == .transcribing` guard replaces the old
-    /// `generation == myGen` check: a `.final` arriving after an error/idle
-    /// (e.g. from the `stop()` we issue inside `transitionToError`) is dropped.
+    /// Whether a re-transcription may begin now. Mirrors start()'s guard: idle,
+    /// or an error state (the failed-dictation rescue shouldn't wait out the
+    /// 3 s auto-reset).
+    var canRetranscribe: Bool { status == .idle || isErrorStatus(status) }
+
+    /// Re-transcribe a saved recording (menu bar / settings history pane).
+    /// Runs the full engine pipeline against the WAV via a replay backend and
+    /// puts the result on the clipboard instead of injecting. Entering
+    /// .transcribing locks out the hotkey path (start() guards on idle) and the
+    /// cancel key (recordingFlag stays false) for the whole replay.
+    func retranscribe(id: String, url: URL) {
+        guard canRetranscribe else {
+            doushaLog("[RecordingController] retranscribe REJECTED (status=\(status))")
+            return
+        }
+        // The Caches dir can be cleaned behind our back — fail loud, not silent.
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            transitionToError("录音文件已丢失")
+            return
+        }
+        doushaLog("[RecordingController] retranscribe start id=\(id)")
+        let backend = env.makeReplayBackend(url)
+        self.backend = backend
+        sessionCorrect = env.makeCorrector()
+        isReplay = true
+        replayHistoryId = id
+        transition(to: .transcribing)
+        backend.setLanguage(env.language())
+        env.resetHUDTranscript()
+        consume(backend.start())
+        // Safe immediately: MultiEngineBackend.stop() awaits its start task —
+        // which includes the whole replay push — before finishing the engines.
+        backend.stop()
+    }
+
+    /// Handles the terminal `.final` event. The `status == .transcribing` guard
+    /// replaces the old generation check: a `.final` arriving after idle (e.g.
+    /// post-cancel) is dropped. The error-state drop is ALSO the history hook
+    /// for failed live dictations: transitionToError's stop() yields a trailing
+    /// .final only after engine teardown, when the shared WAV is complete — the
+    /// one point a failed recording can be archived for rescue re-transcription.
     private func handleFinal(_ result: TranscriptionResult) {
         guard status == .transcribing else {
+            if case .error(let message) = status, !isReplay {
+                env.saveHistory(result.text.trimmingCharacters(in: .whitespacesAndNewlines), message)
+            }
             doushaLog("[RecordingController] final dropped (status=\(status))")
             return
         }
         let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { transition(to: .idle); return }
+        guard !text.isEmpty else {
+            // A silent live recording still enters history — "the ASR heard
+            // nothing" is exactly when the user wants to re-transcribe.
+            if !isReplay { env.saveHistory("", nil) }
+            transition(to: .idle)
+            return
+        }
         // QUA-264: local correction runs before the HUD final so what the user
-        // sees is what gets injected. A correction that empties the text (e.g.
-        // a filler-word deletion rule ate everything) ends the session quietly.
+        // sees is what gets injected. A correction that empties the text ends
+        // the session quietly.
         let corrected = sessionCorrect(text)
-        guard !corrected.isEmpty else { transition(to: .idle); return }
+        guard !corrected.isEmpty else {
+            if !isReplay { env.saveHistory(text, nil) }
+            transition(to: .idle)
+            return
+        }
+        // History stores the ASR transcript (pre-refine), matching what the
+        // list shows and what a future re-transcription would compare against.
+        if isReplay {
+            if let id = replayHistoryId { env.updateHistory(id, corrected) }
+        } else {
+            env.saveHistory(corrected, nil)
+        }
         env.setFinalTranscript(corrected)
         refineAndInject(corrected)
     }
@@ -237,7 +318,11 @@ final class RecordingController {
 
     private func injectAndFinish(_ text: String) {
         transition(to: .injecting)
-        env.inject(text)
+        if isReplay {
+            env.copyToClipboard(text)   // replay result never ⌘V-injects (spec)
+        } else {
+            env.inject(text)
+        }
         env.scheduleAfter(Self.injectGreenFlash) { [weak self] in
             self?.transition(to: .idle)
         }

@@ -18,6 +18,10 @@ final class RecordingSpy {
     var finalTranscripts: [String] = []
     var injected: [String] = []
     var clipboardWrites: [String] = []
+    var replayURLs: [URL] = []
+    var clipboardCopies: [String] = []
+    var savedHistory: [(transcript: String, error: String?)] = []
+    var historyUpdates: [(id: String, transcript: String)] = []
     /// QUA-264 correction seam: inputs seen, and the transform applied (identity
     /// by default so unrelated tests are unaffected). The transform is captured
     /// by makeCorrector at start(), mirroring production's config snapshot.
@@ -92,6 +96,14 @@ func makeSUT(backend: MockSpeechBackend = MockSpeechBackend())
     let sched = ManualScheduler()
     let env = RecordingEnvironment(
         makeBackend: { spy.madeBackends.append(backend); return backend },
+        makeReplayBackend: { url in
+            spy.replayURLs.append(url)
+            spy.madeBackends.append(backend)
+            return backend
+        },
+        copyToClipboard: { spy.clipboardCopies.append($0) },
+        saveHistory: { transcript, error in spy.savedHistory.append((transcript, error)) },
+        updateHistory: { id, transcript in spy.historyUpdates.append((id, transcript)) },
         applyStatusToHUD: { spy.statusLog.append($0) },
         setHUDVisible: { spy.visibleLog.append($0) },
         setCancelKeyEnabled: { spy.cancelKeyEnabledLog.append($0) },
@@ -436,5 +448,116 @@ final class RecordingControllerCancelTests: XCTestCase {
         // contractual no-op, so this late emit can never be delivered.
         backend.emitError("late boom")
         XCTAssertEqual(c.status, .idle, "stale error after cancel must be dropped, not enter .error")
+    }
+}
+
+@MainActor
+final class RecordingControllerRetranscribeTests: XCTestCase {
+
+    /// Creates an empty temp file so retranscribe's existence check passes.
+    private func makeTempWAV() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rc-\(UUID().uuidString).wav")
+        FileManager.default.createFile(atPath: url.path, contents: Data(count: 44))
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    func testRetranscribe_runsReplayToClipboardAndUpdatesHistory() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, sched) = makeSUT(backend: backend)
+        let url = makeTempWAV()
+
+        c.retranscribe(id: "h1", url: url)
+        XCTAssertEqual(c.status, .transcribing)
+        XCTAssertEqual(spy.replayURLs, [url])
+        XCTAssertTrue(backend.startCalled)
+        XCTAssertTrue(backend.stopCalled)
+
+        // Replay partials arrive while .transcribing and must reach the HUD.
+        backend.emitPartial(PartialTranscript(finalText: "部分", interimText: ""))
+        await expectEventually({ spy.partials.count == 1 }, "replay partial delivered")
+
+        backend.emitFinal(TranscriptionResult(text: "重转结果"))
+        await expectEventually({ c.status == .injecting }, "replay final -> injecting")
+        XCTAssertEqual(spy.clipboardCopies, ["重转结果"])
+        XCTAssertTrue(spy.injected.isEmpty)                       // never ⌘V on replay
+        XCTAssertEqual(spy.historyUpdates.map(\.id), ["h1"])
+        XCTAssertEqual(spy.historyUpdates.map(\.transcript), ["重转结果"])
+        XCTAssertTrue(spy.savedHistory.isEmpty)                   // replay adds no new entry
+        sched.advance(by: RecordingController.injectGreenFlash)
+        XCTAssertEqual(c.status, .idle)
+    }
+
+    func testRetranscribe_rejectedWhileRecording() {
+        let (c, spy, _) = makeSUT()
+        c.start()
+        XCTAssertEqual(c.status, .recording)
+        c.retranscribe(id: "h1", url: makeTempWAV())
+        XCTAssertTrue(spy.replayURLs.isEmpty)
+        XCTAssertEqual(c.status, .recording)
+    }
+
+    func testRetranscribe_missingFileGoesToError() {
+        let (c, spy, _) = makeSUT()
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nope-\(UUID().uuidString).wav")
+        c.retranscribe(id: "h1", url: missing)
+        guard case .error = c.status else { return XCTFail("expected .error, got \(c.status)") }
+        XCTAssertTrue(spy.replayURLs.isEmpty)
+    }
+
+    func testStartRejectedDuringReplay() {
+        let (c, spy, _) = makeSUT()
+        c.retranscribe(id: "h1", url: makeTempWAV())
+        XCTAssertEqual(c.status, .transcribing)
+        c.start()
+        XCTAssertEqual(c.status, .transcribing)
+        XCTAssertEqual(spy.madeBackends.count, 1)   // only the replay backend
+    }
+
+    func testLiveFinal_savesHistoryWithCorrectedText() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        spy.correctionTransform = { $0 + "。" }
+        c.start()
+        c.stop()
+        backend.emitFinal(TranscriptionResult(text: "你好"))
+        await expectEventually({ !spy.savedHistory.isEmpty }, "live final saves history")
+        XCTAssertEqual(spy.savedHistory[0].transcript, "你好。")
+        XCTAssertNil(spy.savedHistory[0].error)
+        XCTAssertTrue(spy.historyUpdates.isEmpty)
+    }
+
+    func testLiveEmptyFinal_stillSavesHistory() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        c.stop()
+        backend.emitFinal(TranscriptionResult(text: "  "))
+        await expectEventually({ !spy.savedHistory.isEmpty }, "empty final still saves history")
+        XCTAssertEqual(spy.savedHistory[0].transcript, "")
+        XCTAssertEqual(c.status, .idle)
+    }
+
+    func testLiveError_trailingFinalSavesHistoryWithError() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        backend.emitError("network down")
+        await expectEventually({ c.status != .recording }, "error transition")
+        // The stop() inside transitionToError later yields a trailing final.
+        backend.emitFinal(TranscriptionResult(text: "残余"))
+        await expectEventually({ !spy.savedHistory.isEmpty }, "trailing final saves history with error")
+        XCTAssertEqual(spy.savedHistory[0].transcript, "残余")
+        XCTAssertEqual(spy.savedHistory[0].error, "network down")
+    }
+
+    func testCancel_savesNothing() {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        c.cancel()
+        XCTAssertTrue(spy.savedHistory.isEmpty)
     }
 }
