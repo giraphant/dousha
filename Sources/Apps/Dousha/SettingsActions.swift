@@ -29,4 +29,9 @@ struct SettingsActions {
 
     /// Reset cached Doubao credentials (shows its own confirmation alert).
     var resetDoubaoCredentials: @MainActor () -> Void
+
+    /// Re-transcribe a history entry by id (reaches the RecordingController).
+    var retranscribe: @MainActor (String) -> Void
+    /// Whether a re-transcription may start now (controller idle / error).
+    var canRetranscribe: @MainActor () -> Bool
 }

@@ -81,6 +81,8 @@ final class Preferences: @unchecked Sendable {
         // 录音时背景音频控制：静音系统输出 / 暂停媒体。
         static let muteSystemAudioDuringRecording = "muteSystemAudioDuringRecording"
         static let pauseMediaDuringRecording      = "pauseMediaDuringRecording"
+        // 重新转录历史：保留最近 N 条录音（wav+sidecar），见 history 面板。
+        static let historyLimit                   = "historyLimit"
     }
 
     /// Stored value used to represent a disabled cancel hotkey. Picked because
@@ -113,7 +115,8 @@ final class Preferences: @unchecked Sendable {
             // Spokenly-style background-audio controls. Muting is a safe default for
             // dictation; media pause is opt-in because it sends a global media key.
             Keys.muteSystemAudioDuringRecording: true,
-            Keys.pauseMediaDuringRecording:      false
+            Keys.pauseMediaDuringRecording:      false,
+            Keys.historyLimit:                   5
         ])
     }
 
@@ -148,6 +151,12 @@ final class Preferences: @unchecked Sendable {
     var pauseMediaDuringRecording: Bool {
         get { defaults.bool(forKey: Keys.pauseMediaDuringRecording) }
         set { defaults.set(newValue, forKey: Keys.pauseMediaDuringRecording) }
+    }
+
+    /// 重新转录历史保留条数。钳制 1...50：0/负数无意义，上限防磁盘失控。
+    var historyLimit: Int {
+        get { min(max(defaults.integer(forKey: Keys.historyLimit), 1), 50) }
+        set { defaults.set(min(max(newValue, 1), 50), forKey: Keys.historyLimit) }
     }
 
     var language: String {

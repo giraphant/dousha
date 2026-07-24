@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let injector = TextInjector()
     private let prefs = Preferences.shared
+    private let historyStore = RecordingHistoryStore()
 
     private let hudModel = FloatingHUDModel()
     private var floatingWindow: FloatingWindow?
@@ -34,12 +35,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         doushaLog("[Dousha] HUD layout revision: \(FloatingHUDView.layoutRevision)")
         applyDockIconVisibility()
         installMainMenu()
-        menuBar = MenuBarController(openSettings: { [weak self] in self?.openSettings() })
+        menuBar = MenuBarController(
+            openSettings: { [weak self] in self?.openSettings() },
+            retranscribeLast: { [weak self] in self?.retranscribeLast() },
+            canRetranscribeLast: { [weak self] in
+                guard let self else { return false }
+                return self.recording.canRetranscribe && self.historyStore.newest() != nil
+            })
         menuBar.install()
         floatingWindow = FloatingWindow(model: hudModel)
         recording = RecordingController(environment: RecordingEnvironment(
             makeBackend: { [prefs] in MultiEngineBackend.fromPreferences(prefs) },
-            applyStatusToHUD: { [hudModel] status in hudModel.status = status },
+            makeReplayBackend: { [prefs] url in MultiEngineBackend.forReplay(prefs, wavURL: url) },
+            copyToClipboard: { text in
+                let pb = NSPasteboard.general
+                pb.clearContents(); pb.setString(text, forType: .string)
+                doushaLog("[Dousha] retranscribe result → clipboard (len=\(text.count))")
+            },
+            saveHistory: { [prefs, historyStore] transcript, error in
+                historyStore.save(wavFrom: AudioCapturePaths.sharedWAV, date: Date(),
+                                   engine: prefs.activeEngines.map(\.displayName).joined(separator: "+"),
+                                   transcript: transcript,
+                                   error: error, limit: prefs.historyLimit)
+            },
+            updateHistory: { [historyStore] id, transcript in
+                historyStore.updateTranscript(id: id, transcript: transcript)
+            },
+            applyStatusToHUD: { [hudModel] status in
+                hudModel.status = status
+                // The settings history pane mirrors canRetranscribe reactively;
+                // this is its refresh tick (menu validation polls live instead).
+                NotificationCenter.default.post(name: .doushaRecordingStatusChanged, object: nil)
+            },
             setHUDVisible: { [weak self] visible in
                 if visible { self?.floatingWindow?.show() } else { self?.floatingWindow?.hide() }
             },
@@ -265,13 +292,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 setDockIconVisible: { [weak self] visible in self?.setDockIconVisible(visible) },
                 isMenuBarIconVisible: { [weak self] in self?.prefs.showMenuBarIcon ?? true },
                 setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
-                resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() }
+                resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() },
+                retranscribe: { [weak self] id in self?.retranscribeEntry(id: id) },
+                canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false }
             )
             settingsWindow = SettingsWindowFactory.create(actions: actions)
         }
         settingsWindow?.center()
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Menu-bar "重新转录上次": replay the newest history entry.
+    private func retranscribeLast() {
+        guard let entry = historyStore.newest() else { return }
+        retranscribeEntry(id: entry.id)
+    }
+
+    /// Shared entry point for menu + settings retranscribe. The Caches dir can
+    /// be cleaned behind our back — a dead entry is removed (posting the list
+    /// refresh) instead of surfacing a repeated error (spec §4).
+    private func retranscribeEntry(id: String) {
+        let url = historyStore.wavURL(id: id)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            doushaLog("[Dousha] retranscribe: wav missing for id=\(id) — removing entry")
+            historyStore.remove(id: id)
+            return
+        }
+        recording.retranscribe(id: id, url: url)
     }
 
     // MARK: - Permissions

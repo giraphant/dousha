@@ -56,6 +56,66 @@ final class MultiEngineBackendTests: XCTestCase {
                                         englishEngine: .soniox,
                                         mixedEngine: .soniox)
 
+    /// PCM push engine that records every ingested chunk (replay tests).
+    private final class MockPCMBackend: PCMCaptureEngine, @unchecked Sendable {
+        let result: TranscriptionResult
+        private let lock = NSLock()
+        private var _ingested = Data()
+        var ingested: Data { lock.lock(); defer { lock.unlock() }; return _ingested }
+        init(text: String) { self.result = TranscriptionResult(text: text) }
+        func setLanguage(_ identifier: String) {}
+        func beginSession(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
+                          onError: @escaping @Sendable (Error) -> Void) async {}
+        func openStream() {}
+        func ingest(_ pcm: Data) { lock.lock(); _ingested.append(pcm); lock.unlock() }
+        func finish(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
+            completion(result)
+        }
+        func cancelSession() {}
+    }
+
+    /// Writes a small valid WAV (16 kHz mono s16) and returns (url, pcmByteCount).
+    private func makeTestWAV(samples: Int) throws -> (URL, Int) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("replay-\(UUID().uuidString).wav")
+        let writer = try WavFileWriter(url: url, sampleRate: 16_000, channels: 1)
+        let data = [Int16](repeating: 1_000, count: samples)
+        data.withUnsafeBufferPointer { writer.append(int16Samples: $0.baseAddress!, count: $0.count) }
+        try writer.close()
+        return (url, samples * 2)
+    }
+
+    func testReplay_pushesWholeWavBeforeFinish() async throws {
+        // 4000 samples = 8000 bytes → 2 full 3200-byte chunks + one 1600-byte tail.
+        let (url, byteCount) = try makeTestWAV(samples: 4_000)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let mock = MockPCMBackend(text: "replayed")
+        let multi = MultiEngineBackend(entries: [(.soniox, mock)], primary: .soniox,
+                                       router: router, hub: nil, replayWAV: url)
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "replayed")
+        // stop() awaited startTask (which includes the push), so by the time the
+        // final arrived every byte must have been ingested.
+        XCTAssertEqual(mock.ingested.count, byteCount)
+    }
+
+    func testReplay_missingWavYieldsStreamError() async {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-\(UUID().uuidString).wav")
+        let mock = MockPCMBackend(text: "")
+        let multi = MultiEngineBackend(entries: [(.soniox, mock)], primary: .soniox,
+                                       router: router, hub: nil, replayWAV: url)
+        let stream = multi.start()
+        multi.stop()
+        var sawError = false
+        for await event in stream {
+            if case .error = event { sawError = true }
+            if case .final = event { break }
+        }
+        XCTAssertTrue(sawError)
+        XCTAssertTrue(mock.ingested.isEmpty)
+    }
+
     /// Drives the new stream API to completion and returns the routed final
     /// result. `start()` sets up the sessions (mock partials/errors emitted
     /// synchronously inside beginSession); `stop()` awaits that setup, routes,

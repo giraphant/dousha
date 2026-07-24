@@ -270,4 +270,21 @@ final class PreferencesTests: XCTestCase {
         XCTAssertFalse(fresh.muteSystemAudioDuringRecording)
         XCTAssertTrue(fresh.pauseMediaDuringRecording)
     }
+
+    func testHistoryLimit_defaultsTo5() {
+        XCTAssertEqual(prefs.historyLimit, 5)
+    }
+
+    func testHistoryLimit_clampsToRange() {
+        prefs.historyLimit = 0
+        XCTAssertEqual(prefs.historyLimit, 1)
+        prefs.historyLimit = 99
+        XCTAssertEqual(prefs.historyLimit, 50)
+    }
+
+    func testHistoryLimit_persistsAcrossInstances() {
+        prefs.historyLimit = 12
+        let fresh = Preferences(defaults: defaults)
+        XCTAssertEqual(fresh.historyLimit, 12)
+    }
 }

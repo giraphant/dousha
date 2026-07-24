@@ -25,13 +25,20 @@ enum AboutPanel {
 /// window, which `AppDelegate` owns along with its `SettingsActions` wiring — is
 /// injected as a closure.
 @MainActor
-final class MenuBarController {
+final class MenuBarController: NSObject {
     private var statusItem: NSStatusItem!
     private let prefs = Preferences.shared
     private let openSettingsAction: () -> Void
+    private let retranscribeLastAction: () -> Void
+    private let canRetranscribeLastAction: () -> Bool
 
-    init(openSettings: @escaping () -> Void) {
+    init(openSettings: @escaping () -> Void,
+         retranscribeLast: @escaping () -> Void,
+         canRetranscribeLast: @escaping () -> Bool) {
         self.openSettingsAction = openSettings
+        self.retranscribeLastAction = retranscribeLast
+        self.canRetranscribeLastAction = canRetranscribeLast
+        super.init()
     }
 
     // MARK: - Setup
@@ -144,6 +151,14 @@ final class MenuBarController {
         llmItem.target = self
         menu.addItem(llmItem)
 
+        // 重新转录 — 转错/转失败后的补救入口，结果只进剪贴板。
+        let retryItem = NSMenuItem(title: "重新转录上次",
+                                   action: #selector(retranscribeLast(_:)),
+                                   keyEquivalent: "")
+        retryItem.image = menuIcon("arrow.clockwise")
+        retryItem.target = self
+        menu.addItem(retryItem)
+
         menu.addItem(.separator())
 
         // 设置 — 热键 + LLM 配置。⌘, 是 macOS 惯例。
@@ -222,6 +237,10 @@ final class MenuBarController {
         openSettingsAction()
     }
 
+    @objc private func retranscribeLast(_ sender: NSMenuItem) {
+        retranscribeLastAction()
+    }
+
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Dousha",
@@ -231,5 +250,14 @@ final class MenuBarController {
                 attributes: [.foregroundColor: NSColor.secondaryLabelColor])
         ])
         NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+extension MenuBarController: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(retranscribeLast(_:)) {
+            return canRetranscribeLastAction()
+        }
+        return true
     }
 }

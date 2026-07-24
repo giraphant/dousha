@@ -33,6 +33,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case model
     case glossary
     case enhance
+    case history
 
     var id: Self { self }
 
@@ -43,6 +44,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .model:    return "听写模型"
         case .glossary: return "个性词库"
         case .enhance:  return "智能增强"
+        case .history:  return "历史记录"
         }
     }
 
@@ -53,6 +55,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .model:    return "waveform"
         case .glossary: return "character.book.closed"
         case .enhance:  return "sparkles"
+        case .history:  return "clock.arrow.circlepath"
         }
     }
 }
@@ -122,6 +125,15 @@ struct SettingsView: View {
     @State private var glossaryEnabled: Bool = Preferences.shared.glossaryEnabled
     @State private var glossaryText: String = GlossaryText.format(Preferences.shared.glossaryTerms)
 
+    // MARK: 历史（重新转录）
+    @State private var historyLimit: Int = Preferences.shared.historyLimit
+    @State private var historyEntries: [RecordingHistoryEntry] = []
+    /// Reactive mirror of `actions.canRetranscribe()` — polling it inline in
+    /// `.disabled` bakes in whatever the controller status was at render time
+    /// and nothing re-renders when the session ends (buttons stuck grey).
+    @State private var canRetranscribeNow = true
+    private let history = RecordingHistoryStore()
+
     init(actions: SettingsActions) {
         self.actions = actions
         _launchAtLogin = State(initialValue: actions.isLaunchAtLoginEnabled())
@@ -151,6 +163,7 @@ struct SettingsView: View {
         case .model:    modelPane
         case .glossary: glossaryPane
         case .enhance:  enhancePane
+        case .history:  historyPane
         }
     }
 
@@ -553,6 +566,94 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
+    // MARK: - 历史记录
+
+    private var historyPane: some View {
+        Form {
+            Section {
+                Stepper("保留最近 \(historyLimit) 条录音", value: $historyLimit, in: 1...50)
+                    .onChange(of: historyLimit) { _, newValue in
+                        Preferences.shared.historyLimit = newValue
+                        history.prune(limit: newValue)
+                    }
+                Text("每次听写的原始录音和转录文本保存在本机缓存目录，超出条数自动删除最旧的。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Section("最近录音") {
+                if historyEntries.isEmpty {
+                    Text("暂无录音").foregroundColor(.secondary)
+                }
+                ForEach(historyEntries) { entry in
+                    historyRow(entry)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            historyEntries = history.entries()
+            canRetranscribeNow = actions.canRetranscribe()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .doushaHistoryChanged)
+            .receive(on: DispatchQueue.main)) { _ in
+            historyEntries = history.entries()
+            canRetranscribeNow = actions.canRetranscribe()
+        }
+        // The history-changed notification fires while the controller is still
+        // .transcribing (the save happens before the final transition), so a
+        // render at that moment bakes in disabled buttons that nothing would
+        // ever refresh. Re-read the gate on every controller status change.
+        .onReceive(NotificationCenter.default.publisher(for: .doushaRecordingStatusChanged)
+            .receive(on: DispatchQueue.main)) { _ in
+            canRetranscribeNow = actions.canRetranscribe()
+        }
+    }
+
+    private func historyRow(_ entry: RecordingHistoryEntry) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(entry.date, format: .dateTime.month().day().hour().minute())
+                    Text(Self.durationLabel(entry.duration)).foregroundColor(.secondary)
+                    if !entry.engine.isEmpty {
+                        Text(entry.engine).foregroundColor(.secondary)
+                    }
+                    if let err = entry.error {
+                        Text("转录失败：\(err)").foregroundColor(.red).lineLimit(1)
+                    }
+                }
+                .font(.caption)
+                Text(entry.transcript.isEmpty ? "（无文本）" : entry.transcript)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundColor(entry.transcript.isEmpty ? .secondary : .primary)
+            }
+            Spacer()
+            Button("重新转录") { actions.retranscribe(entry.id) }
+                .disabled(!canRetranscribeNow)
+            Button {
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(entry.transcript, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .help("复制文本")
+            .disabled(entry.transcript.isEmpty)
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([history.wavURL(id: entry.id)])
+            } label: {
+                Image(systemName: "folder")
+            }
+            .help("在 Finder 中显示")
+        }
+    }
+
+    private static func durationLabel(_ d: TimeInterval) -> String {
+        let s = Int(d.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
     // MARK: - 系统开关
 
     private func applyLaunchAtLogin(_ newValue: Bool) {
@@ -739,4 +840,7 @@ extension Notification.Name {
     /// Posted when the engine routing slots / primary language change in Settings,
     /// so the menu bar can rebuild to reflect the new active set / primary.
     static let doushaEngineRoutingChanged = Notification.Name("DoushaEngineRoutingChanged")
+    /// Posted (main thread) on every RecordingController status transition, so
+    /// the settings history pane can refresh its retranscribe-enabled state.
+    static let doushaRecordingStatusChanged = Notification.Name("DoushaRecordingStatusChanged")
 }

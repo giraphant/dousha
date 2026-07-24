@@ -48,8 +48,8 @@ actor AudioTapHub {
     /// - Parameters:
     ///   - pcmSinks: int16-PCM consumers (Doubao/Soniox `ingest`).
     ///   - bufferSinks: native-buffer consumers (Apple `ingest`).
-    ///   - wantsWAV: write the shared WAV (true whenever a PCM engine is active;
-    ///     the WAV is the Soniox-async upload payload).
+    ///   - wantsWAV: write the shared WAV (now always true: it feeds the
+    ///     Soniox-async upload payload AND the re-transcribe history archive).
     ///   - microphoneSelection: per-recording mic route preference. When the user
     ///     has pinned a specific device, it is pushed onto the input node's HAL
     ///     AudioUnit before capture starts, so AVAudioEngine no longer follows
