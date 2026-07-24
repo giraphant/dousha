@@ -37,7 +37,9 @@ final class SettingsActionsTests: XCTestCase {
             setDockIconVisible: { dockVisible = $0 },
             isMenuBarIconVisible: { menuBarVisible },
             setMenuBarIconVisible: { menuBarVisible = $0 },
-            resetDoubaoCredentials: { doubaoResets += 1 }
+            resetDoubaoCredentials: { doubaoResets += 1 },
+            retranscribe: { _ in },
+            canRetranscribe: { true }
         )
 
         XCTAssertFalse(actions.isLaunchAtLoginEnabled())

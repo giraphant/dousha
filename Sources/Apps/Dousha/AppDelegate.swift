@@ -286,7 +286,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 setDockIconVisible: { [weak self] visible in self?.setDockIconVisible(visible) },
                 isMenuBarIconVisible: { [weak self] in self?.prefs.showMenuBarIcon ?? true },
                 setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
-                resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() }
+                resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() },
+                retranscribe: { [weak self] id in
+                    guard let self else { return }
+                    self.recording.retranscribe(id: id, url: self.historyStore.wavURL(id: id))
+                },
+                canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false }
             )
             settingsWindow = SettingsWindowFactory.create(actions: actions)
         }
