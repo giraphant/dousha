@@ -1,4 +1,5 @@
 import Foundation
+@preconcurrency import AVFoundation
 import ASRSupport
 import SonioxASR
 import ConcurrencySupport
@@ -39,6 +40,9 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     /// QUA-180: how long the primary may emit no partials before a secondary is
     /// allowed to drive the HUD's live-subtitle area. Injectable for tests.
     private let hudFallbackSeconds: TimeInterval
+    /// Replay source (re-transcribe): when set, start() has no mic phase and
+    /// instead bursts this WAV's PCM to every engine after openStream.
+    private let replayWAV: URL?
 
     /// The live session's stream continuation, set in `start()`, yielded to from
     /// the engine callbacks / capture, and finished by `stop()` / `cancel()`.
@@ -188,35 +192,43 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
          primary: Engine,
          router: LanguageRouter,
          hub: AudioTapHub? = nil,
-         hudFallbackSeconds: TimeInterval = 2.0) {
+         hudFallbackSeconds: TimeInterval = 2.0,
+         replayWAV: URL? = nil) {
         precondition(!entries.isEmpty, "MultiEngineBackend needs at least one engine")
         self.entries = entries
         self.primary = entries.contains(where: { $0.engine == primary }) ? primary : entries[0].engine
         self.router = router
         self.hub = hub
         self.hudFallbackSeconds = hudFallbackSeconds
+        self.replayWAV = replayWAV
     }
 
-    /// Build from Preferences: one backend per active engine, primary derived
-    /// from the current language, router from the configured slots, and the
-    /// single shared `AudioTapHub` fed from each backend's capture sink.
-    static func fromPreferences(_ prefs: Preferences) -> SpeechBackend {
+    /// Engine set + routing shared by the live path (`fromPreferences`) and
+    /// the replay path (`forReplay`): one backend per active engine, primary
+    /// from the current language, router from the configured slots.
+    private static func makeEntries(_ prefs: Preferences)
+        -> (entries: [(engine: Engine, backend: PushCaptureEngine)],
+            primary: Engine, router: LanguageRouter) {
         let active = prefs.activeEngines
         let primary = prefs.primaryEngine(forLanguage: prefs.language)
         let engines = active.isEmpty ? [primary] : active
-
         let entries = engines.map { engine in
             (engine: engine, backend: SpeechBackendFactory.make(engine: engine, language: prefs.language))
         }
         let router = LanguageRouter(chineseEngine: prefs.chineseEngine,
                                     englishEngine: prefs.englishEngine,
                                     mixedEngine: prefs.mixedEngine)
+        return (entries, primary, router)
+    }
+
+    /// Build from Preferences: one backend per active engine, primary derived
+    /// from the current language, router from the configured slots, and the
+    /// single shared `AudioTapHub` fed from each backend's capture sink.
+    static func fromPreferences(_ prefs: Preferences) -> SpeechBackend {
+        let (entries, primary, router) = makeEntries(prefs)
 
         // One tap, fanned out to each engine's sink: int16 PCM for Doubao/Soniox,
-        // native buffers for Apple. The shared WAV is the Soniox-async upload
-        // payload and nothing else reads it (retranscribe was removed), so write
-        // it only when Soniox async is actually active — Doubao-only and
-        // Soniox-realtime sessions skip the per-buffer disk I/O.
+        // native buffers for Apple.
         var pcmSinks: [AudioTapHub.PCMSink] = []
         var bufferSinks: [AudioTapHub.BufferSink] = []
         for entry in entries {
@@ -232,7 +244,9 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                 doushaLog("[MultiEngine] \(entry.engine.rawValue) has no audio sink — check its capture protocol conformance")
             }
         }
-        let wantsWAV = prefs.sonioxMode == .async && entries.contains { $0.engine == .soniox }
+        // The shared WAV feeds the Soniox-async upload AND the re-transcribe
+        // history (archived whenever a final arrives) — always written now.
+        let wantsWAV = true
         let audioControls = RecordingAudioControls(
             muteSystemAudio: prefs.muteSystemAudioDuringRecording,
             pauseMedia: prefs.pauseMediaDuringRecording
@@ -281,9 +295,77 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             // Phase 3 — open each engine's stream; audio buffered during setup
             // flushes once the stream is ready.
             for entry in self.entries { entry.backend.openStream() }
+
+            // Replay (re-transcribe): no mic — burst the WAV's PCM to every
+            // engine. Burst send without real-time pacing is known-safe for
+            // the WS engines (Doubao smoke harness ships audio the same way).
+            // Runs inside startTask so stop()'s `await startTask` ordering
+            // guarantees the engines only finish after the full push.
+            if let replayWAV = self.replayWAV {
+                Self.pushReplay(wav: replayWAV, entries: self.entries, cont: cont)
+            }
         }
 
         return stream
+    }
+
+    /// Read the WAV and push it chunk-by-chunk, mirroring what the live tap
+    /// does per buffer: raw int16 Data to PCM engines, an AVAudioPCMBuffer of
+    /// the same samples to buffer engines (Apple).
+    private static func pushReplay(wav: URL,
+                                   entries: [(engine: Engine, backend: PushCaptureEngine)],
+                                   cont: AsyncStream<RecordingEvent>.Continuation) {
+        let pcm: Data
+        do {
+            pcm = try WavReader.readPCM(path: wav.path)
+        } catch {
+            doushaLog("[MultiEngine] replay read failed: \(error.localizedDescription)")
+            cont.yield(.error("录音文件读取失败"))
+            return
+        }
+        let pcmEngines = entries.compactMap { $0.backend as? PCMCaptureEngine }
+        let bufferEngines = entries.compactMap { $0.backend as? BufferCaptureEngine }
+        let chunkBytes = 3_200   // 100 ms of 16 kHz mono s16
+        var offset = 0
+        while offset < pcm.count {
+            let end = min(offset + chunkBytes, pcm.count)
+            let chunk = pcm.subdata(in: offset..<end)
+            for e in pcmEngines { e.ingest(chunk) }
+            if !bufferEngines.isEmpty, let buf = int16Buffer(from: chunk) {
+                for e in bufferEngines { e.ingest(buf) }
+            }
+            offset = end
+        }
+        doushaLog("[MultiEngine] replay pushed \(pcm.count) bytes to \(entries.count) engine(s)")
+    }
+
+    /// int16 16 kHz mono chunk → AVAudioPCMBuffer (what Apple Speech ingests).
+    private static func int16Buffer(from chunk: Data) -> AVAudioPCMBuffer? {
+        guard let fmt = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000,
+                                      channels: 1, interleaved: true) else { return nil }
+        let frames = AVAudioFrameCount(chunk.count / MemoryLayout<Int16>.size)
+        guard frames > 0, let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames) else { return nil }
+        buf.frameLength = frames
+        chunk.withUnsafeBytes { raw in
+            if let base = raw.baseAddress, let dst = buf.int16ChannelData?[0] {
+                memcpy(dst, base, chunk.count)
+            }
+        }
+        return buf
+    }
+
+    /// Replay factory (re-transcribe): same engine set as a live recording but
+    /// no mic. The WAV is first copied to the shared path because Soniox's
+    /// async mode uploads `AudioCapturePaths.sharedWAV` on stop — "re-transcribe
+    /// X" ≡ "make X the last recording". One file copy, zero engine changes.
+    static func forReplay(_ prefs: Preferences, wavURL: URL) -> SpeechBackend {
+        if wavURL != AudioCapturePaths.sharedWAV {
+            try? FileManager.default.removeItem(at: AudioCapturePaths.sharedWAV)
+            try? FileManager.default.copyItem(at: wavURL, to: AudioCapturePaths.sharedWAV)
+        }
+        let built = makeEntries(prefs)
+        return MultiEngineBackend(entries: built.entries, primary: built.primary,
+                                  router: built.router, hub: nil, replayWAV: wavURL)
     }
 
     /// Reset every engine's session state. The primary drives the user's HUD
