@@ -128,6 +128,10 @@ struct SettingsView: View {
     // MARK: 历史（重新转录）
     @State private var historyLimit: Int = Preferences.shared.historyLimit
     @State private var historyEntries: [RecordingHistoryEntry] = []
+    /// Reactive mirror of `actions.canRetranscribe()` — polling it inline in
+    /// `.disabled` bakes in whatever the controller status was at render time
+    /// and nothing re-renders when the session ends (buttons stuck grey).
+    @State private var canRetranscribeNow = true
     private let history = RecordingHistoryStore()
 
     init(actions: SettingsActions) {
@@ -586,10 +590,22 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { historyEntries = history.entries() }
+        .onAppear {
+            historyEntries = history.entries()
+            canRetranscribeNow = actions.canRetranscribe()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .doushaHistoryChanged)
             .receive(on: DispatchQueue.main)) { _ in
             historyEntries = history.entries()
+            canRetranscribeNow = actions.canRetranscribe()
+        }
+        // The history-changed notification fires while the controller is still
+        // .transcribing (the save happens before the final transition), so a
+        // render at that moment bakes in disabled buttons that nothing would
+        // ever refresh. Re-read the gate on every controller status change.
+        .onReceive(NotificationCenter.default.publisher(for: .doushaRecordingStatusChanged)
+            .receive(on: DispatchQueue.main)) { _ in
+            canRetranscribeNow = actions.canRetranscribe()
         }
     }
 
@@ -614,7 +630,7 @@ struct SettingsView: View {
             }
             Spacer()
             Button("重新转录") { actions.retranscribe(entry.id) }
-                .disabled(!actions.canRetranscribe())
+                .disabled(!canRetranscribeNow)
             Button {
                 let pb = NSPasteboard.general
                 pb.clearContents()
@@ -824,4 +840,7 @@ extension Notification.Name {
     /// Posted when the engine routing slots / primary language change in Settings,
     /// so the menu bar can rebuild to reflect the new active set / primary.
     static let doushaEngineRoutingChanged = Notification.Name("DoushaEngineRoutingChanged")
+    /// Posted (main thread) on every RecordingController status transition, so
+    /// the settings history pane can refresh its retranscribe-enabled state.
+    static let doushaRecordingStatusChanged = Notification.Name("DoushaRecordingStatusChanged")
 }

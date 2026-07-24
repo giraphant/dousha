@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             copyToClipboard: { text in
                 let pb = NSPasteboard.general
                 pb.clearContents(); pb.setString(text, forType: .string)
+                doushaLog("[Dousha] retranscribe result → clipboard (len=\(text.count))")
             },
             saveHistory: { [prefs, historyStore] transcript, error in
                 historyStore.save(wavFrom: AudioCapturePaths.sharedWAV, date: Date(),
@@ -60,7 +61,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateHistory: { [historyStore] id, transcript in
                 historyStore.updateTranscript(id: id, transcript: transcript)
             },
-            applyStatusToHUD: { [hudModel] status in hudModel.status = status },
+            applyStatusToHUD: { [hudModel] status in
+                hudModel.status = status
+                // The settings history pane mirrors canRetranscribe reactively;
+                // this is its refresh tick (menu validation polls live instead).
+                NotificationCenter.default.post(name: .doushaRecordingStatusChanged, object: nil)
+            },
             setHUDVisible: { [weak self] visible in
                 if visible { self?.floatingWindow?.show() } else { self?.floatingWindow?.hide() }
             },

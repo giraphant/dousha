@@ -49,6 +49,13 @@ public actor SonioxASR {
     /// doesn't leak forward.
     private var finishedChannel: OneShotChannel<Void>?
 
+    /// Signaled once the config frame is on the wire (audio may flow) — or on
+    /// openStream failure, so a waiter never hangs. Replay (re-transcribe)
+    /// calls stop() microseconds after openStream(); without this gate the
+    /// end-of-audio marker beats the buffered audio onto the wire and the
+    /// server answers "No audio received". Mirrors DoubaoASR's startup grace.
+    private var configSentChannel: OneShotChannel<Void>?
+
     /// Signaled by the receive loop once the WS has fully torn down, so
     /// closeWebSocket() can wait for the server's Close ack before invalidating
     /// the URLSession. Keyed by the closing socket's generation so a stale
@@ -104,6 +111,7 @@ public actor SonioxASR {
         self.canSendAudio = false
         self.requestId = UUID().uuidString.lowercased()
         self.finishedChannel = OneShotChannel<Void>()
+        self.configSentChannel = OneShotChannel<Void>()
         doushaLog("[SonioxASR] traceId=\(requestId) prepareSession mode=\(mode.rawValue) (capture owned by AudioTapHub)")
     }
 
@@ -144,11 +152,13 @@ public actor SonioxASR {
             startKeepalive()
             self.canSendAudio = true
             try await flushPendingFrames()
+            configSentChannel?.finish(())
         } catch {
             doushaLog("[SonioxASR] openStream() failed: \(error.localizedDescription)")
             deliverError(error)
             await closeWebSocket()
             isRunning = false
+            configSentChannel?.finish(())   // release a stop() waiting on the config grace
             signalFinished()
         }
     }
@@ -209,6 +219,17 @@ public actor SonioxASR {
 
         if mode == .async {
             return await stopAsync()
+        }
+
+        // Replay (re-transcribe) stops microseconds after openStream — before
+        // the config frame is on the wire. Flushing then no-ops (canSendAudio
+        // still false) and the end-of-audio marker would beat the buffered
+        // audio onto the wire → server "No audio received". Wait (bounded) for
+        // openStream to finish the config send, mirroring DoubaoASR's startup
+        // grace; on openStream failure the channel fires immediately.
+        if !canSendAudio, let channel = configSentChannel {
+            doushaLog("[SonioxASR] traceId=\(requestId) stream not ready; waiting config grace 3000ms")
+            _ = await channel.wait(timeout: 3.0)
         }
 
         do {
