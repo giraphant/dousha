@@ -61,14 +61,26 @@ final class MultiEngineBackendTests: XCTestCase {
         let result: TranscriptionResult
         private let lock = NSLock()
         private var _ingested = Data()
+        private var _ingestTimes: [UInt64] = []
+        private var _finishTime: UInt64?
         var ingested: Data { lock.lock(); defer { lock.unlock() }; return _ingested }
+        var ingestTimes: [UInt64] { lock.lock(); defer { lock.unlock() }; return _ingestTimes }
+        var finishTime: UInt64? { lock.lock(); defer { lock.unlock() }; return _finishTime }
         init(text: String) { self.result = TranscriptionResult(text: text) }
         func setLanguage(_ identifier: String) {}
         func beginSession(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                           onError: @escaping @Sendable (Error) -> Void) async {}
         func openStream() {}
-        func ingest(_ pcm: Data) { lock.lock(); _ingested.append(pcm); lock.unlock() }
+        func ingest(_ pcm: Data) {
+            let now = DispatchTime.now().uptimeNanoseconds
+            lock.lock()
+            _ingested.append(pcm)
+            _ingestTimes.append(now)
+            lock.unlock()
+        }
         func finish(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
+            let now = DispatchTime.now().uptimeNanoseconds
+            lock.lock(); _finishTime = now; lock.unlock()
             completion(result)
         }
         func cancelSession() {}
@@ -85,7 +97,7 @@ final class MultiEngineBackendTests: XCTestCase {
         return (url, samples * 2)
     }
 
-    func testReplay_pushesWholeWavBeforeFinish() async throws {
+    func testReplay_pacesChunksAtAudioRateBeforeFinish() async throws {
         // 4000 samples = 8000 bytes → 2 full 3200-byte chunks + one 1600-byte tail.
         let (url, byteCount) = try makeTestWAV(samples: 4_000)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -97,6 +109,18 @@ final class MultiEngineBackendTests: XCTestCase {
         // stop() awaited startTask (which includes the push), so by the time the
         // final arrived every byte must have been ingested.
         XCTAssertEqual(mock.ingested.count, byteCount)
+
+        let times = mock.ingestTimes
+        let finish = try XCTUnwrap(mock.finishTime)
+        XCTAssertEqual(times.count, 3)
+
+        func seconds(_ start: UInt64, _ end: UInt64) -> Double {
+            Double(end - start) / 1_000_000_000
+        }
+
+        XCTAssertGreaterThanOrEqual(seconds(times[0], times[1]), 0.075)
+        XCTAssertGreaterThanOrEqual(seconds(times[1], times[2]), 0.075)
+        XCTAssertGreaterThanOrEqual(seconds(times[2], finish), 0.035)
     }
 
     func testReplay_missingWavYieldsStreamError() async {

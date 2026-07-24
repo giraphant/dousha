@@ -41,7 +41,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     /// allowed to drive the HUD's live-subtitle area. Injectable for tests.
     private let hudFallbackSeconds: TimeInterval
     /// Replay source (re-transcribe): when set, start() has no mic phase and
-    /// instead bursts this WAV's PCM to every engine after openStream.
+    /// instead feeds this WAV's PCM to every engine at audio rate after openStream.
     private let replayWAV: URL?
 
     /// The live session's stream continuation, set in `start()`, yielded to from
@@ -296,13 +296,13 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             // flushes once the stream is ready.
             for entry in self.entries { entry.backend.openStream() }
 
-            // Replay (re-transcribe): no mic — burst the WAV's PCM to every
-            // engine. Burst send without real-time pacing is known-safe for
-            // the WS engines (Doubao smoke harness ships audio the same way).
+            // Replay (re-transcribe): no mic — feed the WAV's PCM to every
+            // engine at audio rate so their live-session finalization waits only
+            // need to drain a small tail, not decode the whole recording.
             // Runs inside startTask so stop()'s `await startTask` ordering
-            // guarantees the engines only finish after the full push.
+            // guarantees the engines only finish after the full replay.
             if let replayWAV = self.replayWAV {
-                Self.pushReplay(wav: replayWAV, entries: self.entries, cont: cont)
+                await Self.pushReplay(wav: replayWAV, entries: self.entries, cont: cont)
             }
         }
 
@@ -314,7 +314,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     /// the same samples to buffer engines (Apple).
     private static func pushReplay(wav: URL,
                                    entries: [(engine: Engine, backend: PushCaptureEngine)],
-                                   cont: AsyncStream<RecordingEvent>.Continuation) {
+                                   cont: AsyncStream<RecordingEvent>.Continuation) async {
         let pcm: Data
         do {
             pcm = try WavReader.readPCM(path: wav.path)
@@ -326,6 +326,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         let pcmEngines = entries.compactMap { $0.backend as? PCMCaptureEngine }
         let bufferEngines = entries.compactMap { $0.backend as? BufferCaptureEngine }
         let chunkBytes = 3_200   // 100 ms of 16 kHz mono s16
+        let bytesPerSecond: UInt64 = 32_000
         var offset = 0
         while offset < pcm.count {
             let end = min(offset + chunkBytes, pcm.count)
@@ -335,6 +336,13 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
                 for e in bufferEngines { e.ingest(buf) }
             }
             offset = end
+
+            let nanoseconds = UInt64(chunk.count) * 1_000_000_000 / bytesPerSecond
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
         }
         doushaLog("[MultiEngine] replay pushed \(pcm.count) bytes to \(entries.count) engine(s)")
     }
