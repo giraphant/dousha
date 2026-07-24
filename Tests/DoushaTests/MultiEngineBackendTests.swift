@@ -79,7 +79,7 @@ final class MultiEngineBackendTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("replay-\(UUID().uuidString).wav")
         let writer = try WavFileWriter(url: url, sampleRate: 16_000, channels: 1)
-        var data = [Int16](repeating: 1_000, count: samples)
+        let data = [Int16](repeating: 1_000, count: samples)
         data.withUnsafeBufferPointer { writer.append(int16Samples: $0.baseAddress!, count: $0.count) }
         try writer.close()
         return (url, samples * 2)
