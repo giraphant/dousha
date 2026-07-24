@@ -35,7 +35,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         doushaLog("[Dousha] HUD layout revision: \(FloatingHUDView.layoutRevision)")
         applyDockIconVisibility()
         installMainMenu()
-        menuBar = MenuBarController(openSettings: { [weak self] in self?.openSettings() })
+        menuBar = MenuBarController(
+            openSettings: { [weak self] in self?.openSettings() },
+            retranscribeLast: { [weak self] in self?.retranscribeLast() },
+            canRetranscribeLast: { [weak self] in
+                guard let self else { return false }
+                return self.recording.canRetranscribe && self.historyStore.newest() != nil
+            })
         menuBar.install()
         floatingWindow = FloatingWindow(model: hudModel)
         recording = RecordingController(environment: RecordingEnvironment(
@@ -47,7 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             saveHistory: { [prefs, historyStore] transcript, error in
                 historyStore.save(wavFrom: AudioCapturePaths.sharedWAV, date: Date(),
-                                   engine: prefs.engine.rawValue, transcript: transcript,
+                                   engine: prefs.activeEngines.map(\.displayName).joined(separator: "+"),
+                                   transcript: transcript,
                                    error: error, limit: prefs.historyLimit)
             },
             updateHistory: { [historyStore] id, transcript in
@@ -286,6 +293,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.center()
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Menu-bar "重新转录上次": replay the newest history entry.
+    private func retranscribeLast() {
+        guard let entry = historyStore.newest() else { return }
+        recording.retranscribe(id: entry.id, url: historyStore.wavURL(id: entry.id))
     }
 
     // MARK: - Permissions
