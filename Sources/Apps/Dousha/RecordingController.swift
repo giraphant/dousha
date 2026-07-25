@@ -15,9 +15,14 @@ struct RecordingEnvironment {
     var copyToClipboard: (String) -> Void
     /// Archive the just-finished LIVE recording (wav is complete when called).
     /// `error` carries the failure message for a rescued failed dictation.
-    var saveHistory: (_ transcript: String, _ error: String?) -> Void
+    /// Returns the new history entry's id, or nil if archiving failed.
+    var saveHistory: (_ transcript: String, _ error: String?) -> String?
     /// A successful re-transcription refreshes its history entry's text.
     var updateHistory: (_ id: String, _ transcript: String) -> Void
+    /// Re-transcribe a history entry by id — the auto-rescue after a
+    /// dead-engines session (issue #46). Routed through the same app path as
+    /// the menu's manual 重新转录 (missing-wav handling included).
+    var rescue: (_ id: String) -> Void
     /// Apply the new status to the HUD (glow/content). Does NOT control visibility.
     var applyStatusToHUD: (RecordingStatus) -> Void
     /// Show (true) / hide (false) the floating HUD window.
@@ -101,10 +106,12 @@ final class RecordingController {
     /// History entry the current replay session refreshes on success.
     private var replayHistoryId: String?
 
-    /// Set when a LIVE session dies with an error: its trailing .final (which
-    /// archives the failed recording to history) has not arrived yet. Gates
+    /// Set when a LIVE session's engines all die: the session's terminal .final
+    /// (which archives the failed recording to history) has not arrived yet.
+    /// While it's set during .recording, capture keeps running to the user's
+    /// stop (issue #46 — the mic doesn't need the network). Gates
     /// canRetranscribe so a rescue can't destroy the very recording it wants,
-    /// and lets the trailing final save even after the 3 s error auto-reset.
+    /// and lets a trailing final save even after the 3 s error auto-reset.
     private var pendingErrorMessage: String?
 
     init(environment: RecordingEnvironment) {
@@ -185,19 +192,36 @@ final class RecordingController {
                     self.env.pushHUDLevel(level)
                 case .error(let message):
                     doushaLog("[RecordingController] recognition error: \(message)")
-                    // Intentionally NOT cancelling the consumer loop here: the stop()
-                    // issued inside transitionToError produces a trailing .final
-                    // (dropped by handleFinal's guard) and then finishes the stream,
-                    // so the task exits on its own — parallel to the explicit
-                    // sessionTask?.cancel() on the cancel() path.
-                    self.transitionToError(message)
+                    if self.status == .recording && !self.isReplay {
+                        // Issue #46: engines dying must not end a live recording —
+                        // the mic and the WAV don't need the network. Latch the
+                        // failure and keep capturing until the user releases the
+                        // key; handleFinal then archives the WAV and auto-rescues
+                        // it. A capture failure (no audio at all) finishes the
+                        // stream right after its error, which the loop exit below
+                        // turns into the fatal transition.
+                        self.pendingErrorMessage = message
+                    } else {
+                        // Intentionally NOT cancelling the consumer loop here: the stop()
+                        // issued inside transitionToError produces a trailing .final
+                        // (dropped by handleFinal's guard) and then finishes the stream,
+                        // so the task exits on its own — parallel to the explicit
+                        // sessionTask?.cancel() on the cancel() path.
+                        self.transitionToError(message)
+                    }
                 case .final(let result):
                     self.handleFinal(result)
                 }
             }
-            // Stream over with no trailing final (e.g. capture failure):
-            // release the gate so the feature can't wedge.
-            self?.pendingErrorMessage = nil
+            // Stream over. One that dies while still .recording (capture failure:
+            // .error then finish, no trailing .final ever) surfaces its latched
+            // error now. Either way the latch is released — no trailing final is
+            // coming, and holding it would wedge canRetranscribe.
+            guard let self else { return }
+            if self.status == .recording {
+                self.transitionToError(self.pendingErrorMessage ?? "录音失败")
+            }
+            self.pendingErrorMessage = nil
         }
     }
 
@@ -278,24 +302,38 @@ final class RecordingController {
 
     /// Handles the terminal `.final` event. The `status == .transcribing` guard
     /// replaces the old generation check: a `.final` arriving after idle (e.g.
-    /// post-cancel) is dropped. The error-state drop is ALSO the history hook
-    /// for failed live dictations: transitionToError's stop() yields a trailing
-    /// .final only after engine teardown, when the shared WAV is complete — the
-    /// one point a failed recording can be archived for rescue re-transcription.
+    /// post-cancel) is dropped. A `pendingErrorMessage` latch marks a live
+    /// session whose engines all died; its final — whether it lands in
+    /// .transcribing (engines died mid-recording, capture ran to the user's
+    /// stop) or in the drop branch (engines died after stop; transitionToError's
+    /// stop() yields the trailing .final after engine teardown) — arrives when
+    /// the shared WAV is complete, the one point a failed recording can be
+    /// archived and auto-rescued (issue #46).
     private func handleFinal(_ result: TranscriptionResult) {
         guard status == .transcribing else {
             if let message = pendingErrorMessage, !isReplay {
-                env.saveHistory(result.text.trimmingCharacters(in: .whitespacesAndNewlines), message)
                 pendingErrorMessage = nil
+                archiveFailedAndRescue(
+                    text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                    message: message)
             }
             doushaLog("[RecordingController] final dropped (status=\(status))")
             return
         }
         let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Issue #46: the engines all died mid-recording but capture ran to the
+        // user's stop. Archive the completed WAV as a failed dictation and
+        // auto-rescue it, instead of ending the session with a partial result.
+        if let message = pendingErrorMessage, !isReplay {
+            pendingErrorMessage = nil
+            transition(to: .idle)
+            archiveFailedAndRescue(text: text, message: message)
+            return
+        }
         guard !text.isEmpty else {
             // A silent live recording still enters history — "the ASR heard
             // nothing" is exactly when the user wants to re-transcribe.
-            if !isReplay { env.saveHistory("", nil) }
+            if !isReplay { _ = env.saveHistory("", nil) }
             transition(to: .idle)
             return
         }
@@ -304,7 +342,7 @@ final class RecordingController {
         // the session quietly.
         let corrected = sessionCorrect(text)
         guard !corrected.isEmpty else {
-            if !isReplay { env.saveHistory(text, nil) }
+            if !isReplay { _ = env.saveHistory(text, nil) }
             transition(to: .idle)
             return
         }
@@ -313,10 +351,23 @@ final class RecordingController {
         if isReplay {
             if let id = replayHistoryId { env.updateHistory(id, corrected) }
         } else {
-            env.saveHistory(corrected, nil)
+            _ = env.saveHistory(corrected, nil)
         }
         env.setFinalTranscript(corrected)
         refineAndInject(corrected)
+    }
+
+    /// Issue #46 auto-rescue: archive a dead-engines session (WAV complete,
+    /// transcript partial or empty, `message` = the fatal engine error) and
+    /// schedule one re-transcription of the entry just saved. Scheduled rather
+    /// than called inline so the rescue's consume() never cancels the session
+    /// task it is running on; result goes to the clipboard (replay semantics).
+    /// If the rescue fails too, the red history entry remains for manual rescue.
+    private func archiveFailedAndRescue(text: String, message: String) {
+        guard let id = env.saveHistory(text, message) else { return }
+        doushaLog("[RecordingController] auto-rescue id=\(id)")
+        let rescue = env.rescue
+        env.scheduleAfter(0) { rescue(id) }
     }
 
     private func refineAndInject(_ text: String) {

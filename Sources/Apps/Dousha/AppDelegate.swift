@@ -61,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateHistory: { [historyStore] id, transcript in
                 historyStore.updateTranscript(id: id, transcript: transcript)
             },
+            rescue: { [weak self] id in self?.retranscribeEntry(id: id) },
             applyStatusToHUD: { [hudModel] status in
                 hudModel.status = status
                 // The settings history pane mirrors canRetranscribe reactively;

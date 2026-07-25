@@ -99,6 +99,16 @@ engine is still alive (`ErrorGate`); a primary failure hands the HUD to the
 secondary immediately. Only all-engines-dead (or capture failure) becomes a
 fatal `.error` stream event.
 
+Fatal ≠ session end during live capture (issue #46): a fatal `.error` arriving
+while the controller is still `.recording` is latched (`pendingErrorMessage`),
+NOT transitioned — the mic + WAV don't need the network, so capture runs until
+the user releases the key. The session's `.final` then archives the completed
+WAV as a failed history entry and schedules one automatic `retranscribe` rescue
+(replay → clipboard; a failed rescue leaves the red entry for manual rescue).
+Capture failure is distinguished structurally: its stream finishes right after
+the `.error` with no trailing `.final`, which the consumer's loop exit turns
+into the immediate fatal transition.
+
 `RecordingController.transition(to:)` is the single place status changes, with
 a fixed side-effect order: **recordingFlag mirror first** (the cancel-key tap
 thread reads it), then status + HUD glow, then dispatcher reset, then HUD
