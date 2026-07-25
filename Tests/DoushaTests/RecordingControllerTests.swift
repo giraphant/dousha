@@ -21,6 +21,9 @@ final class RecordingSpy {
     var replayURLs: [URL] = []
     var clipboardCopies: [String] = []
     var savedHistory: [(transcript: String, error: String?)] = []
+    /// Id saveHistory reports back (nil = archiving failed → no auto-rescue).
+    var saveHistoryId: String? = "h-saved"
+    var rescues: [String] = []                   // auto-rescue ids, in order
     var historyUpdates: [(id: String, transcript: String)] = []
     /// QUA-264 correction seam: inputs seen, and the transform applied (identity
     /// by default so unrelated tests are unaffected). The transform is captured
@@ -65,6 +68,8 @@ final class MockSpeechBackend: SpeechBackend, @unchecked Sendable {
     func emitLevel(_ l: Float) { continuation?.yield(.audioLevel(l)) }
     func emitError(_ message: String) { continuation?.yield(.error(message)) }
     func emitFinal(_ r: TranscriptionResult) { continuation?.yield(.final(r)); continuation?.finish() }
+    /// Finish the stream with no trailing final (capture failure in production).
+    func endStream() { continuation?.finish() }
 }
 
 /// Deterministic clock + scheduler. `advance` fires every work item whose
@@ -102,8 +107,12 @@ func makeSUT(backend: MockSpeechBackend = MockSpeechBackend())
             return backend
         },
         copyToClipboard: { spy.clipboardCopies.append($0) },
-        saveHistory: { transcript, error in spy.savedHistory.append((transcript, error)) },
+        saveHistory: { transcript, error in
+            spy.savedHistory.append((transcript, error))
+            return spy.saveHistoryId
+        },
         updateHistory: { id, transcript in spy.historyUpdates.append((id, transcript)) },
+        rescue: { id in spy.rescues.append(id) },
         applyStatusToHUD: { spy.statusLog.append($0) },
         setHUDVisible: { spy.visibleLog.append($0) },
         setCancelKeyEnabled: { spy.cancelKeyEnabledLog.append($0) },
@@ -263,14 +272,44 @@ final class RecordingControllerCallbackTests: XCTestCase {
         XCTAssertTrue(spy.partials.isEmpty, "partials after .recording must be dropped")
     }
 
-    func testError_transitionsToError_andReleasesBackend() async {
+    func testErrorDuringRecording_keepsCapturing() async {
+        // Issue #46: engines all dying must not end a live recording — the mic
+        // and the WAV don't need the network. The error is latched; capture
+        // runs until the user releases the key.
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
         c.start()
         backend.emitError("boom")
+        // FIFO + serial loop ⇒ once the sentinel level is observed, the earlier
+        // error has already been processed (same idiom as the late-partial test).
+        backend.emitLevel(0.9)
+        await expectEventually({ spy.levels == [0.9] }, "sentinel level delivered")
+        XCTAssertEqual(c.status, .recording, "engines dead must not end a live recording")
+        XCTAssertFalse(backend.stopCalled, "capture must keep running until the user stops")
+        XCTAssertFalse(c.canRetranscribe)
+    }
+
+    func testErrorDuringTranscribing_transitionsToError() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start(); c.stop()
+        backend.emitError("boom")
         await expectEventually({ c.status == .error("boom") }, "error transition")
-        XCTAssertTrue(backend.stopCalled, "error must release the mic via stop")
         XCTAssertEqual(spy.resetTranscriptCount, 2)  // once at start, once on error
+    }
+
+    func testCaptureFailure_streamEndsWhileRecording_entersError() async {
+        // A stream that dies while still .recording (capture failure: .error
+        // then finish, no trailing final ever) must surface the fatal error and
+        // release the retranscribe gate.
+        let backend = MockSpeechBackend()
+        let (c, spy, _) = makeSUT(backend: backend)
+        c.start()
+        backend.emitError("mic broke")
+        backend.endStream()
+        await expectEventually({ c.status == .error("mic broke") }, "capture failure is fatal")
+        XCTAssertTrue(c.canRetranscribe, "latch must release — no trailing final is coming")
+        XCTAssertTrue(spy.savedHistory.isEmpty, "no WAV exists to archive")
     }
 }
 
@@ -540,17 +579,79 @@ final class RecordingControllerRetranscribeTests: XCTestCase {
         XCTAssertEqual(c.status, .idle)
     }
 
-    func testLiveError_trailingFinalSavesHistoryWithError() async {
+    func testLiveErrorAfterStop_trailingFinalSavesHistoryWithError() async {
+        // Engines die AFTER the user released the key (.transcribing): still
+        // the fatal-error path; the trailing final archives + auto-rescues.
         let backend = MockSpeechBackend()
-        let (c, spy, _) = makeSUT(backend: backend)
-        c.start()
+        let (c, spy, sched) = makeSUT(backend: backend)
+        spy.saveHistoryId = "h-late"
+        c.start(); c.stop()
         backend.emitError("network down")
-        await expectEventually({ c.status != .recording }, "error transition")
+        await expectEventually({ c.status != .transcribing }, "error transition")
         // The stop() inside transitionToError later yields a trailing final.
         backend.emitFinal(TranscriptionResult(text: "残余"))
         await expectEventually({ !spy.savedHistory.isEmpty }, "trailing final saves history with error")
         XCTAssertEqual(spy.savedHistory[0].transcript, "残余")
         XCTAssertEqual(spy.savedHistory[0].error, "network down")
+        sched.advance(by: 0)
+        XCTAssertEqual(spy.rescues, ["h-late"], "failed session auto-rescues its entry")
+    }
+
+    // MARK: - Issue #46: engines die mid-recording — capture continues to the
+    // user's stop, the final archives the WAV, and a rescue is scheduled.
+
+    func testErrorDuringRecording_stopArchivesAndAutoRescues() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, sched) = makeSUT(backend: backend)
+        spy.saveHistoryId = "h-rescue"
+        c.start()
+        backend.emitError("network down")
+        backend.emitLevel(0.9)   // sentinel: error processed once level lands
+        await expectEventually({ spy.levels == [0.9] }, "error processed")
+        XCTAssertEqual(c.status, .recording)
+
+        c.stop()                 // user releases the key — WAV is complete
+        XCTAssertEqual(c.status, .transcribing)
+        backend.emitFinal(TranscriptionResult(text: "残余"))
+        await expectEventually({ !spy.savedHistory.isEmpty }, "final archives the failed dictation")
+        XCTAssertEqual(spy.savedHistory[0].transcript, "残余")
+        XCTAssertEqual(spy.savedHistory[0].error, "network down")
+        XCTAssertEqual(c.status, .idle)
+        XCTAssertTrue(spy.injected.isEmpty, "a failed dictation must not inject")
+        XCTAssertTrue(spy.finalTranscripts.isEmpty)
+
+        sched.advance(by: 0)
+        XCTAssertEqual(spy.rescues, ["h-rescue"], "the just-saved entry is auto-rescued")
+    }
+
+    func testErrorDuringRecording_archiveFails_noRescue() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, sched) = makeSUT(backend: backend)
+        spy.saveHistoryId = nil   // history save failed → nothing to rescue
+        c.start()
+        backend.emitError("network down")
+        backend.emitLevel(0.9)
+        await expectEventually({ spy.levels == [0.9] }, "error processed")
+        c.stop()
+        backend.emitFinal(TranscriptionResult(text: ""))
+        await expectEventually({ c.status == .idle }, "session ends")
+        sched.advance(by: 0)
+        XCTAssertTrue(spy.rescues.isEmpty)
+    }
+
+    func testErrorDuringRecording_cancelDiscardsEverything() async {
+        let backend = MockSpeechBackend()
+        let (c, spy, sched) = makeSUT(backend: backend)
+        c.start()
+        backend.emitError("network down")
+        backend.emitLevel(0.9)
+        await expectEventually({ spy.levels == [0.9] }, "error processed")
+        c.cancel()
+        await expectEventually({ c.canRetranscribe }, "latch released at stream end")
+        XCTAssertEqual(c.status, .idle)
+        sched.advance(by: 0)
+        XCTAssertTrue(spy.savedHistory.isEmpty)
+        XCTAssertTrue(spy.rescues.isEmpty)
     }
 
     func testCancel_savesNothing() {
@@ -568,9 +669,9 @@ final class RecordingControllerRetranscribeTests: XCTestCase {
     func testRetranscribe_blockedUntilTrailingFinalArrives() async {
         let backend = MockSpeechBackend()
         let (c, spy, _) = makeSUT(backend: backend)
-        c.start()
+        c.start(); c.stop()
         backend.emitError("boom")
-        await expectEventually({ c.status != .recording }, "error transition")
+        await expectEventually({ c.status != .transcribing }, "error transition")
         XCTAssertFalse(c.canRetranscribe, "gate must hold until the trailing final archives the entry")
 
         c.retranscribe(id: "h1", url: makeTempWAV())
@@ -587,7 +688,7 @@ final class RecordingControllerRetranscribeTests: XCTestCase {
     func testTrailingFinalAfterErrorAutoReset_stillSaves() async {
         let backend = MockSpeechBackend()
         let (c, spy, sched) = makeSUT(backend: backend)
-        c.start()
+        c.start(); c.stop()
         backend.emitError("network down")
         await expectEventually({ c.status == .error("network down") }, "error transition")
 
