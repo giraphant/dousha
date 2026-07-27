@@ -89,7 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     replacements: prefs.localCorrectionRules
                         .compactMap(TranscriptCorrector.Replacement.parse),
                     casingTerms: (prefs.glossaryEnabled ? prefs.glossaryTerms : [])
-                        + TranscriptCorrector.builtinCasingTerms
+                        + TranscriptCorrector.builtinCasingTerms,
+                    quoteStyle: prefs.quoteStyle
                 )
                 return { text in
                     let corrected = corrector.correct(text)
