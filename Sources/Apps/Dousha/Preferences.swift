@@ -1,3 +1,4 @@
+import ASRSupport
 import Foundation
 import SonioxASR
 
@@ -64,6 +65,8 @@ final class Preferences: @unchecked Sendable {
         static let localCorrectionEnabled    = "localCorrectionEnabled"
         // User replacement rules, one "wrong=>right" string per element.
         static let localCorrectionRules      = "localCorrectionRules"
+        // Quote convention for the correction layer's rule 3.
+        static let quoteStyle                = "quoteStyle"
         static let hotkeyKeyCode             = "hotkey.keyCode"
         static let hotkeyMode                = "hotkey.mode"
         // Sentinel: -1 stored under `cancelHotkey.keyCode` means "disabled".
@@ -103,6 +106,7 @@ final class Preferences: @unchecked Sendable {
             Keys.glossaryTerms:            [String](),
             Keys.localCorrectionEnabled:   true,
             Keys.localCorrectionRules:     [String](),
+            Keys.quoteStyle:               TranscriptCorrector.QuoteStyle.curly.rawValue,
             Keys.hotkeyKeyCode:            Int(HotkeyConfig.default.keyCode),
             Keys.hotkeyMode:               HotkeyConfig.default.mode.rawValue,
             Keys.cancelHotkeyKeyCode:      Int(CancelHotkeyConfig.escKeyCode),
@@ -290,6 +294,14 @@ final class Preferences: @unchecked Sendable {
     var localCorrectionRules: [String] {
         get { defaults.stringArray(forKey: Keys.localCorrectionRules) ?? [] }
         set { defaults.set(newValue, forKey: Keys.localCorrectionRules) }
+    }
+
+    var quoteStyle: TranscriptCorrector.QuoteStyle {
+        get {
+            TranscriptCorrector.QuoteStyle(rawValue: defaults.string(forKey: Keys.quoteStyle) ?? "")
+                ?? .curly
+        }
+        set { defaults.set(newValue.rawValue, forKey: Keys.quoteStyle) }
     }
 
     var hotkey: HotkeyConfig {

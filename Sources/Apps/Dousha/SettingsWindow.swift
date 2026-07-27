@@ -1,6 +1,7 @@
 import Cocoa
 import CoreGraphics
 import SwiftUI
+import ASRSupport
 import ConcurrencySupport
 import SonioxASR
 
@@ -81,6 +82,9 @@ struct SettingsView: View {
     @State private var launchAtLoginError: String = ""
     @State private var showDockIcon: Bool
     @State private var showMenuBarIcon: Bool
+
+    // 智能增强 — 文本格式
+    @State private var quoteStyle: TranscriptCorrector.QuoteStyle = Preferences.shared.quoteStyle
 
     // 智能增强 — 润色
     @State private var llmEnabled: Bool = Preferences.shared.llmEnabled
@@ -520,6 +524,22 @@ struct SettingsView: View {
 
     private var enhancePane: some View {
         Form {
+            Section("文本格式") {
+                Picker("引号", selection: $quoteStyle) {
+                    Text("中文用「」").tag(TranscriptCorrector.QuoteStyle.corner)
+                    Text("中文用“”").tag(TranscriptCorrector.QuoteStyle.curly)
+                    Text("不处理").tag(TranscriptCorrector.QuoteStyle.off)
+                }
+                .pickerStyle(.menu)
+                .onChange(of: quoteStyle) { _, newValue in
+                    Preferences.shared.quoteStyle = newValue
+                }
+                Text("把听写出来的直引号配对成规范引号。英文始终用 “ ”，撇号写成 don’t；上面这项只决定中文语境用哪套。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("润色") {
                 Toggle("启用润色", isOn: $llmEnabled)
                     .onChange(of: llmEnabled) { _, newValue in

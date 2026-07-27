@@ -18,11 +18,15 @@ import Foundation
 ///   2. **Term casing** — known terms (built-in product names + the user's
 ///      glossary hot-words) matched case-insensitively at word boundaries and
 ///      rewritten to their canonical casing (`claude code` → `Claude Code`).
-///   3. **Spacing** — `TranscriptFormatter.normalize`, re-run because rules 1–2
+///   3. **Quotes** — rewrite every double-quote mark to the configured
+///      `quoteStyle`, pairing them across the whole dictation. Needs the full
+///      final text (an open/close decision can't be made on a streamed
+///      fragment), which is why it lives here and not in `TranscriptFormatter`.
+///   4. **Spacing** — `TranscriptFormatter.normalize`, re-run because rules 1–2
 ///      can create fresh CJK↔Latin seams (`把阿派=>API` yields `把API` which
 ///      needs its 盘古 space). Idempotent, so re-running over already-normalized
 ///      engine output is safe.
-///   4. **Trailing punctuation cleanup** — collapse a doubled terminal mark and
+///   5. **Trailing punctuation cleanup** — collapse a doubled terminal mark and
 ///      drop dangling clause separators at the very end of the dictation.
 ///
 /// Every rule is conservative by design: no semantic rewrites, no built-in
@@ -32,7 +36,7 @@ import Foundation
 /// when `isEnabled` is false.
 ///
 /// The layer runs **exactly once** per dictation (`RecordingController`
-/// applies it to the single terminal `.final`). Rules 2–4 are idempotent, but
+/// applies it to the single terminal `.final`). Rules 2–5 are idempotent, but
 /// a user replacement whose output re-contains its own match (`foo=>foo bar`)
 /// would compound if re-run — the run-once contract, not per-rule idempotency,
 /// is what keeps user rules safe.
@@ -63,6 +67,17 @@ public struct TranscriptCorrector: Sendable {
         }
     }
 
+    /// Which marks rule 3 emits in *Chinese* context. Latin-only text always
+    /// gets curly marks — the setting only picks the Chinese convention.
+    public enum QuoteStyle: String, Sendable, CaseIterable {
+        /// Leave every quote mark exactly as the engine produced it.
+        case off
+        /// “…” / ‘…’ — the mainland publishing standard.
+        case curly
+        /// 「…」/ 『…』 — 直角引号.
+        case corner
+    }
+
     /// Master switch — false makes `correct` the identity function.
     public var isEnabled: Bool
     /// User phrase fixes, applied in list order (rule 1).
@@ -70,13 +85,17 @@ public struct TranscriptCorrector: Sendable {
     /// Canonical casings enforced by rule 2. On case-insensitive duplicates the
     /// earlier entry wins, so callers should put user terms before built-ins.
     public var casingTerms: [String]
+    /// Quote convention enforced by rule 3.
+    public var quoteStyle: QuoteStyle
 
     public init(isEnabled: Bool = true,
                 replacements: [Replacement] = [],
-                casingTerms: [String] = TranscriptCorrector.builtinCasingTerms) {
+                casingTerms: [String] = TranscriptCorrector.builtinCasingTerms,
+                quoteStyle: QuoteStyle = .curly) {
         self.isEnabled = isEnabled
         self.replacements = replacements
         self.casingTerms = casingTerms
+        self.quoteStyle = quoteStyle
     }
 
     /// Built-in canonical casings. Deliberately limited to names that are not
@@ -110,9 +129,11 @@ public struct TranscriptCorrector: Sendable {
         for term in Self.casingCandidates(casingTerms) {
             s = Self.replaceAll(of: term, with: term, in: s, caseInsensitive: true)
         }
-        // Rule 3: repair spacing around any seams rules 1–2 introduced.
+        // Rule 3: quote marks, paired across the whole dictation.
+        s = Self.normalizeQuotes(s, style: quoteStyle)
+        // Rule 4: repair spacing around any seams rules 1–2 introduced.
         s = TranscriptFormatter.normalize(s)
-        // Rule 4: tail punctuation cleanup.
+        // Rule 5: tail punctuation cleanup.
         s = Self.cleanTrailingPunctuation(s)
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -187,7 +208,118 @@ public struct TranscriptCorrector: Sendable {
         return result
     }
 
-    // MARK: - Rule 4: trailing punctuation
+    // MARK: - Rule 3: quotes
+
+    /// What a quote character means at its position.
+    private enum QuoteRole {
+        case open, close
+        /// ASCII `"` — direction is not encoded in the character, so it falls
+        /// back to alternating by nesting depth.
+        case ambiguous
+        /// `'`/`’` inside a word: a contraction or possessive, not a quotation.
+        case apostrophe
+    }
+
+    /// Every character `normalizeQuotes` might rewrite — its fast-path filter.
+    /// `‘` is absent on purpose: nothing below ever changes it.
+    private static let rewritableQuoteChars: Set<Character> = [
+        "\"", "'", "\u{2019}", "\u{201C}", "\u{201D}", "「", "」", "『", "』",
+    ]
+
+    /// Classify a character as a quote mark, or nil if it isn't one.
+    ///
+    /// Single quotes are only ever recognised as apostrophes, and only with a
+    /// word character on **both** sides. ASR output effectively never uses `'`
+    /// as a quotation mark, so pairing it would be guesswork — and a one-sided
+    /// test would curl the tail of `'hi'` while leaving its head straight,
+    /// which reads worse than not touching it at all. The cost is that a
+    /// possessive plural (`students'`) keeps its ASCII mark.
+    private static func quoteRole(_ ch: Character, prev: Character?, next: Character?) -> QuoteRole? {
+        switch ch {
+        case "\"":                return .ambiguous
+        case "\u{201C}", "「", "『": return .open   // “
+        case "\u{201D}", "」", "』": return .close  // ”
+        case "'", "\u{2019}":     // ' ’
+            let inWord = (prev.map(isLatinWordJoining) ?? false)
+                && (next.map(isLatinWordJoining) ?? false)
+            return inWord ? .apostrophe : nil
+        default:                  return nil
+        }
+    }
+
+    /// Rewrite every double-quote mark to `style`, pairing left to right.
+    ///
+    /// Language context is decided **per dictation, not per pair**: any Han
+    /// ideograph anywhere in the text makes the whole run Chinese, so a quoted
+    /// English term inside a Chinese sentence takes Chinese marks
+    /// (`什么是"action"` → `什么是「action」`). Latin-only text always gets curly
+    /// marks, whatever `style` says.
+    /// ponytail: contains-Han is the entire detector — an English sentence with
+    /// one Chinese word takes Chinese marks. Swap in a Han-ratio threshold if
+    /// that ever shows up in real dictation.
+    ///
+    /// Idempotent: marks already in the target style re-emit unchanged, and the
+    /// space trim below only ever removes a space that was already stray.
+    public static func normalizeQuotes(_ text: String, style: QuoteStyle) -> String {
+        guard style != .off else { return text }
+        let chars = Array(text)
+        guard chars.contains(where: rewritableQuoteChars.contains) else { return text }
+
+        let chinese = chars.contains(where: TranscriptFormatter.isHan)
+        // Level-2 marks only come into play when the input already carries an
+        // explicit nested pair — plain ASCII `"` nesting is unrecoverable.
+        let (open1, close1, open2, close2): (Character, Character, Character, Character) =
+            chinese && style == .corner
+                ? ("「", "」", "『", "』")
+                : ("\u{201C}", "\u{201D}", "\u{2018}", "\u{2019}")
+
+        var out: [Character] = []
+        out.reserveCapacity(chars.count)
+        var depth = 0
+        var i = 0
+        while i < chars.count {
+            let ch = chars[i]
+            guard let role = quoteRole(ch,
+                                       prev: i > 0 ? chars[i - 1] : nil,
+                                       next: i + 1 < chars.count ? chars[i + 1] : nil) else {
+                out.append(ch)
+                i += 1
+                continue
+            }
+            if role == .apostrophe {
+                out.append("\u{2019}")
+                i += 1
+                continue
+            }
+            let isOpen = role == .open || (role == .ambiguous && depth == 0)
+            let mark: Character
+            if isOpen {
+                depth += 1
+                mark = depth >= 2 ? open2 : open1
+            } else {
+                mark = depth >= 2 ? close2 : close1
+                depth = max(0, depth - 1)
+            }
+            // In Chinese context an ASCII space between a Han character and a
+            // quote mark is engine segmentation noise (`他说 "你好"`).
+            // `TranscriptFormatter.tightenCJKSpaces` deliberately skips curly
+            // quotes (they double as English punctuation), so the trim has to
+            // happen here, where we know the run is Chinese.
+            if chinese, out.count >= 2, out.last == " ",
+               TranscriptFormatter.isHan(out[out.count - 2]) {
+                out.removeLast()
+            }
+            out.append(mark)
+            if chinese, i + 2 < chars.count, chars[i + 1] == " ",
+               TranscriptFormatter.isHan(chars[i + 2]) {
+                i += 1
+            }
+            i += 1
+        }
+        return String(out)
+    }
+
+    // MARK: - Rule 5: trailing punctuation
 
     /// Terminal sentence marks eligible for the doubled-mark collapse.
     private static let terminalMarks: Set<Character> = ["。", "．", ".", "？", "?", "！", "!"]

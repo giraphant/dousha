@@ -144,7 +144,9 @@ public enum TranscriptFormatter {
     /// True only for Han ideographs — the script that never uses inter-character
     /// spaces, so a space between two of them is always stray. Narrower than
     /// `isCJKWord` on purpose: excludes Hangul, where spaces are meaningful.
-    private static func isHan(_ ch: Character) -> Bool {
+    /// Internal rather than private: `TranscriptCorrector`'s quote rule needs the
+    /// same "is this Chinese context" test.
+    static func isHan(_ ch: Character) -> Bool {
         for scalar in ch.unicodeScalars {
             let v = scalar.value
             if (0x4E00...0x9FFF).contains(v) { return true }   // CJK Unified Ideographs

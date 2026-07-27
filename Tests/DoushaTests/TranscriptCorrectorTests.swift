@@ -8,10 +8,12 @@ import ASRSupport
 final class TranscriptCorrectorTests: XCTestCase {
 
     private func corrector(rules: [String] = [],
-                           terms: [String] = TranscriptCorrector.builtinCasingTerms)
+                           terms: [String] = TranscriptCorrector.builtinCasingTerms,
+                           quotes: TranscriptCorrector.QuoteStyle = .curly)
         -> TranscriptCorrector {
         TranscriptCorrector(replacements: rules.compactMap(TranscriptCorrector.Replacement.parse),
-                            casingTerms: terms)
+                            casingTerms: terms,
+                            quoteStyle: quotes)
     }
 
     // MARK: - Bypass / trivial input
@@ -172,6 +174,72 @@ final class TranscriptCorrectorTests: XCTestCase {
     func testInteriorPunctuationIsNeverTouched() {
         let c = corrector()
         XCTAssertEqual(c.correct("先这样，然后那样。再说！"), "先这样，然后那样。再说！")
+    }
+
+    // MARK: - Rule 3: quotes
+
+    func testChineseContextUsesConfiguredStyle() {
+        let corner = corrector(quotes: .corner)
+        XCTAssertEqual(corner.correct("什么是\"action\"，什么是\"behavior\"。"),
+                       "什么是「action」，什么是「behavior」。")
+        let curly = corrector(quotes: .curly)
+        XCTAssertEqual(curly.correct("什么是\"action\"，什么是\"behavior\"。"),
+                       "什么是\u{201C}action\u{201D}，什么是\u{201C}behavior\u{201D}。")
+    }
+
+    /// The language call is per dictation, not per pair: one Han character
+    /// anywhere makes every quote in the run Chinese.
+    func testLatinOnlyTextAlwaysGetsCurlyEvenInCornerMode() {
+        let c = corrector(quotes: .corner)
+        XCTAssertEqual(c.correct("He said \"hello\" to me."),
+                       "He said \u{201C}hello\u{201D} to me.")
+    }
+
+    func testAlreadyStyledQuotesAreRestyled() {
+        XCTAssertEqual(corrector(quotes: .curly).correct("他说「你好」。"),
+                       "他说\u{201C}你好\u{201D}。")
+        XCTAssertEqual(corrector(quotes: .corner).correct("他说\u{201C}你好\u{201D}。"),
+                       "他说「你好」。")
+    }
+
+    func testNestedPairUsesSecondaryMarks() {
+        XCTAssertEqual(corrector(quotes: .corner).correct("他说\u{201C}我听过\u{201C}能动性\u{201D}这个词\u{201D}。"),
+                       "他说「我听过『能动性』这个词」。")
+    }
+
+    func testApostropheBecomesCurly() {
+        let c = corrector(quotes: .corner)
+        XCTAssertEqual(c.correct("I don't think it's right"),
+                       "I don\u{2019}t think it\u{2019}s right")
+        // A standalone `'` is not a quotation mark we can place — leave it.
+        XCTAssertEqual(c.correct("say 'hi' now"), "say 'hi' now")
+    }
+
+    func testStraySpacesAroundChineseQuotesAreTrimmed() {
+        let c = corrector(quotes: .corner)
+        XCTAssertEqual(c.correct("他说 \"你好\" 呢"), "他说「你好」呢")
+        XCTAssertEqual(c.correct("他说\" 你好 \"呢"), "他说「你好」呢")
+        // Latin side keeps its spacing — only the Han seam is noise.
+        XCTAssertEqual(c.correct("He said \"hi\" now"),
+                       "He said \u{201C}hi\u{201D} now")
+    }
+
+    func testQuoteStyleOffLeavesMarksAlone() {
+        let c = corrector(quotes: .off)
+        XCTAssertEqual(c.correct("什么是\"action\"，don't"), "什么是\"action\"，don't")
+    }
+
+    func testQuoteNormalizationIsIdempotent() {
+        for style in TranscriptCorrector.QuoteStyle.allCases {
+            let c = corrector(quotes: style)
+            for s in ["什么是\"action\"，什么是\"behavior\"。",
+                      "他说 \"你好\" 呢",
+                      "He said \"hello\", didn't he?",
+                      "只有一个\"没配对"] {
+                let once = c.correct(s)
+                XCTAssertEqual(c.correct(once), once, "not idempotent (\(style)) for: \(s)")
+            }
+        }
     }
 
     // MARK: - Pipeline properties
