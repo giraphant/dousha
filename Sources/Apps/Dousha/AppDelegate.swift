@@ -1,6 +1,5 @@
 import Cocoa
 import SwiftUI
-import Speech
 import AVFoundation
 // @preconcurrency: kAXTrustedCheckOptionPrompt is an imported global the SDK
 // hasn't audited for Sendable; treat the access as a warning, not an error.
@@ -172,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard overHUD else { return }   // drop phantom fires (cursor not on the HUD)
             self.recording.cancel()
         }
-        requestSpeechAndMicPermissions()
+        requestPermissions()
 
         focusTracker.onChange = { [weak self] focus in
             self?.hudModel.focus = focus
@@ -337,12 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() },
                 retranscribe: { [weak self] id in self?.retranscribeEntry(id: id) },
                 canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false },
-                requestMicrophone: { _ = await AVCaptureDevice.requestAccess(for: .audio) },
-                requestSpeechRecognition: {
-                    await withCheckedContinuation { continuation in
-                        SFSpeechRecognizer.requestAuthorization { @Sendable _ in continuation.resume() }
-                    }
-                }
+                requestMicrophone: { _ = await AVCaptureDevice.requestAccess(for: .audio) }
             )
             settingsWindow = SettingsWindowFactory.create(actions: actions)
         }
@@ -376,8 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // queue. If the method were @MainActor, the empty closures would be inferred
     // main-actor-isolated and Swift's executor check would trap when TCC calls
     // them off-main (dispatch_assert_queue_fail). The body touches no actor state.
-    nonisolated private func requestSpeechAndMicPermissions() {
-        SFSpeechRecognizer.requestAuthorization { _ in }
+    nonisolated private func requestPermissions() {
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
         let opts: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
         _ = AXIsProcessTrustedWithOptions(opts)

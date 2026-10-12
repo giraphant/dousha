@@ -33,12 +33,12 @@ final class AppleSpeechBackendCancelTests: XCTestCase {
 
     // MARK: - protocol conformance
 
-    func testConformsToBufferCaptureEngine() {
+    func testConformsToPCMCaptureEngine() {
         // Compile-time check via type assignment: AppleSpeechBackend must remain a
-        // BufferCaptureEngine (the shared AudioTapHub pushes it native buffers via
-        // ingest, and MultiEngineBackend drives it through cancelSession()). If the
+        // PCMCaptureEngine (the shared AudioTapHub pushes it int16 PCM via ingest,
+        // and MultiEngineBackend drives it through cancelSession()). If the
         // conformance is removed or the impl drifts, this test stops compiling.
-        let backend: BufferCaptureEngine = AppleSpeechBackend(language: "en-US")
+        let backend: PCMCaptureEngine = AppleSpeechBackend(language: "en-US")
         backend.cancelSession()
     }
 }

@@ -8,10 +8,8 @@ import ConcurrencySupport
 /// doing the shared work exactly once per buffer:
 ///
 ///   • `AudioLevel.computeRMS` → `onLevel` (drives the HUD — one level)
-///   • the native `AVAudioPCMBuffer` → **buffer sinks** (Apple Speech, which
-///     feeds `SFSpeech` native-format buffers directly)
 ///   • int16 16 kHz mono PCM, converted **once** → one shared WAV **and** the
-///     **PCM sinks** (Doubao, Soniox)
+///     **PCM sinks** (every engine)
 ///
 /// This replaces the per-engine `AVAudioEngine`/tap/`WavFileWriter`/RMS that
 /// `DoubaoASR`/`SonioxASR`/`AppleSpeechBackend` each used to own — so N engines
@@ -23,10 +21,8 @@ import ConcurrencySupport
 /// `cancelCapture`. The audio-thread tap closure captures only local copies and
 /// never hops back into this actor, so it stays real-time safe.
 actor AudioTapHub {
-    /// Consumes int16 16 kHz mono PCM, pushed as `Data` chunks (Doubao, Soniox).
+    /// Consumes int16 16 kHz mono PCM, pushed as `Data` chunks.
     typealias PCMSink = @Sendable (Data) -> Void
-    /// Consumes the native-format mic buffer (Apple feeds `SFSpeech` directly).
-    typealias BufferSink = @Sendable (AVAudioPCMBuffer) -> Void
 
     private static let captureStartAttempts = 3
     private static let captureRetryDelayNanoseconds: UInt64 = 100_000_000
@@ -34,7 +30,6 @@ actor AudioTapHub {
 
     private let audioEngine = AVAudioEngine()
     private let pcmSinks: [PCMSink]
-    private let bufferSinks: [BufferSink]
     private let wantsWAV: Bool
     private let microphoneSelection: MicrophoneSelectionPreference
     private let audioControls: RecordingAudioControls?
@@ -46,8 +41,7 @@ actor AudioTapHub {
     private var captureGeneration = 0
 
     /// - Parameters:
-    ///   - pcmSinks: int16-PCM consumers (Doubao/Soniox `ingest`).
-    ///   - bufferSinks: native-buffer consumers (Apple `ingest`).
+    ///   - pcmSinks: int16-PCM consumers (each engine's `ingest`).
     ///   - wantsWAV: write the shared WAV (now always true: it feeds the
     ///     Soniox-async upload payload AND the re-transcribe history archive).
     ///   - microphoneSelection: per-recording mic route preference. When the user
@@ -58,12 +52,10 @@ actor AudioTapHub {
     ///     pause media). Held for the lifetime of a recording and restored on stop
     ///     and cancel regardless of which path tears the capture down.
     init(pcmSinks: [PCMSink],
-         bufferSinks: [BufferSink],
          wantsWAV: Bool,
          microphoneSelection: MicrophoneSelectionPreference,
          audioControls: RecordingAudioControls?) {
         self.pcmSinks = pcmSinks
-        self.bufferSinks = bufferSinks
         self.wantsWAV = wantsWAV
         self.microphoneSelection = microphoneSelection
         self.audioControls = audioControls
@@ -101,7 +93,7 @@ actor AudioTapHub {
         do {
             let inputFormat = try await startWithRetry(onLevel: onLevel, label: "capture start")
             capturing = true
-            doushaLog("[AudioTapHub] capture started inputFormat=\(inputFormat) pcmSinks=\(pcmSinks.count) bufferSinks=\(bufferSinks.count) wav=\(wavWriter != nil)")
+            doushaLog("[AudioTapHub] capture started inputFormat=\(inputFormat) pcmSinks=\(pcmSinks.count) wav=\(wavWriter != nil)")
         } catch {
             audioControls?.end()
             unregisterConfigurationObserver()
@@ -214,10 +206,9 @@ actor AudioTapHub {
 
         // Snapshots for the audio-thread closure — it must not touch actor state.
         let pcmSinks = self.pcmSinks
-        let bufferSinks = self.bufferSinks
         let capturedWAV = self.wavWriter
-        // Only do the int16 conversion if someone actually consumes it (a PCM
-        // engine or the WAV). Apple-only recordings skip it entirely.
+        // Only do the int16 conversion if someone actually consumes it (an
+        // engine or the WAV).
         let needPCM = !pcmSinks.isEmpty || capturedWAV != nil
 
         inputNode.removeTap(onBus: 0)
@@ -225,9 +216,6 @@ actor AudioTapHub {
             // Audio thread — fast, no actor hop, no blocking.
             let level = AudioLevel.computeRMS(buffer)
             DispatchQueue.main.async { onLevel(level) }
-
-            // Apple wants the untouched native buffer.
-            for sink in bufferSinks { sink(buffer) }
 
             guard needPCM else { return }
 

@@ -43,8 +43,7 @@ final class SettingsActionsTests: XCTestCase {
             resetDoubaoCredentials: { doubaoResets += 1 },
             retranscribe: { _ in },
             canRetranscribe: { true },
-            requestMicrophone: {},
-            requestSpeechRecognition: {}
+            requestMicrophone: {}
         )
 
         XCTAssertFalse(actions.isLaunchAtLoginEnabled())

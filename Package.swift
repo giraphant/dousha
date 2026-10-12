@@ -8,7 +8,7 @@ import PackageDescription
 //   Sources/Tools/    developer-facing executables, never shipped
 let package = Package(
     name: "Dousha",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     products: [
         // Headless smoke harness against the real Doubao servers.
         .executable(name: "smoke-cli",     targets: ["SmokeCLI"]),
