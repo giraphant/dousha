@@ -654,6 +654,9 @@ struct SettingsView: View {
             ForEach(MLXModelCatalog.all, id: \.repoID) { descriptor in
                 qwen3ModelRow(descriptor)
             }
+            Button("在 Finder 中显示") {
+                NSWorkspace.shared.activateFileViewerSelecting([MLXModelInventory.modelsDirectory])
+            }
             if !modelManagementError.isEmpty {
                 statusLabel(modelManagementError, isError: true)
             }
@@ -734,11 +737,15 @@ struct SettingsView: View {
     }
 
     private func refreshModelInventory() async {
-        let entries = await Task.detached(priority: .utility) {
-            let inventory = MLXModelInventory()
-            return Dictionary(uniqueKeysWithValues: MLXModelCatalog.all.map { ($0.repoID, inventory.entry(for: $0)) })
-        }.value
-        modelInventory = entries
+        do {
+            modelInventory = try await Task.detached(priority: .utility) {
+                try MLXModelInventory.legacyMigration.get()
+                let inventory = MLXModelInventory()
+                return Dictionary(uniqueKeysWithValues: MLXModelCatalog.all.map { ($0.repoID, inventory.entry(for: $0)) })
+            }.value
+        } catch {
+            modelManagementError = error.localizedDescription
+        }
     }
 
     private func refreshEnginePreferences() {

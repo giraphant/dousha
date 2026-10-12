@@ -171,6 +171,12 @@ After the last lease/request ends, the configured idle delay (default 60s) evict
 the model and clears MLX's buffer cache under the process-wide lease; new activity
 cancels eviction and the next recording reloads as needed.
 
+Models live in `~/Library/Application Support/Dousha/Models`, outside purgeable
+Caches to avoid silent multi-GB re-downloads; before the first load or inventory,
+catalog models move once from the legacy `~/.cache/huggingface/hub/mlx-audio`
+location when absent at the destination, leaving legacy hub copies untouched.
+Uninstall removes both the `mlx-audio` and hub-format copies under Dousha's root.
+
 **Preload/prewarm.** Launch preloads after hotkey installation when Qwen3 is
 active; routing/menu/model changes use the same fire-and-forget `warmup` path.
 Launch preload still loads normally, then the same idle-unload timer applies.

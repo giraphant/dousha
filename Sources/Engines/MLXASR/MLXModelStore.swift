@@ -1,6 +1,7 @@
 import Foundation
 import MLXAudioSTT
 import MLX
+import HuggingFace
 import ConcurrencySupport
 
 /// Offline seam for successful loads and prewarm without allocating MLX arrays.
@@ -121,7 +122,9 @@ public actor MLXModelStore {
     public init() {
         clearCache = { Memory.clearCache() }
         loadModel = { repoID in
-            QwenLoadedModel(try await Qwen3ASRModel.fromPretrained(repoID))
+            try MLXModelInventory.legacyMigration.get()
+            return QwenLoadedModel(try await Qwen3ASRModel.fromPretrained(repoID,
+                cache: HubCache(cacheDirectory: MLXModelInventory.modelsDirectory)))
         }
         doushaLog("[MLXModelStore] state=idle")
     }
