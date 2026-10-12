@@ -14,6 +14,9 @@ let package = Package(
         .executable(name: "smoke-cli",     targets: ["SmokeCLI"]),
         .executable(name: "Dousha",        targets: ["Dousha"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/Blaizzy/mlx-audio-swift.git", revision: "244458d7b61e54ff135073ddc9ed76782bb20758"),
+    ],
     targets: [
         .target(name: "ConcurrencySupport", path: "Sources/Common/ConcurrencySupport"),
         .target(
@@ -39,18 +42,26 @@ let package = Package(
             path: "Sources/Engines/SonioxASR"
         ),
         .target(
+            name: "MLXASR",
+            dependencies: [
+                "ConcurrencySupport", "ASRSupport",
+                .product(name: "MLXAudioSTT", package: "mlx-audio-swift"),
+            ],
+            path: "Sources/Engines/MLXASR"
+        ),
+        .target(
             name: "SmokeCLISupport",
             dependencies: ["ASRSupport", "DoubaoASR"],
             path: "Sources/Tools/SmokeCLISupport"
         ),
         .executableTarget(
             name: "SmokeCLI",
-            dependencies: ["DoubaoASR", "SmokeCLISupport"],
+            dependencies: ["DoubaoASR", "MLXASR", "SmokeCLISupport"],
             path: "Sources/Tools/SmokeCLI"
         ),
         .executableTarget(
             name: "Dousha",
-            dependencies: ["DoubaoASR", "SonioxASR", "ASRSupport"],
+            dependencies: ["DoubaoASR", "SonioxASR", "MLXASR", "ASRSupport"],
             path: "Sources/Apps/Dousha",
             // dousha (QUA-159): adopts Swift 6 strict concurrency. The UI /
             // controller layer (AppDelegate, FloatingWindow, FloatingHUDModel,
@@ -69,7 +80,7 @@ let package = Package(
         ),
         .testTarget(
             name: "DoushaTests",
-            dependencies: ["Dousha", "DoubaoASR", "SonioxASR", "ASRSupport", "ConcurrencySupport"],
+            dependencies: ["Dousha", "DoubaoASR", "SonioxASR", "MLXASR", "ASRSupport", "ConcurrencySupport"],
             path: "Tests/DoushaTests"
         ),
     ]

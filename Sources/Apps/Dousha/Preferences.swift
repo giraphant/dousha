@@ -1,6 +1,7 @@
 import ASRSupport
 import Foundation
 import SonioxASR
+import MLXASR
 
 enum Language: String, CaseIterable {
     case en_US = "en-US"
@@ -48,10 +49,12 @@ final class Preferences: @unchecked Sendable {
         static let englishEngine             = "englishEngine"
         static let mixedEngine               = "mixedEngine"
         static let activeEngines             = "activeEngines"
+        static let qwen3ModelRepoID           = "qwen3ModelRepoID"
         static let llmEnabled                = "llmEnabled"
         static let llmBaseURL                = "llmBaseURL"
         static let llmAPIKey                 = "llmAPIKey"
         static let llmModel                  = "llmModel"
+        static let llmSystemPrompt           = "llmSystemPrompt"
         static let sonioxAPIKey              = "sonioxAPIKey"
         static let sonioxMode                = "sonioxMode"
         // Engine-agnostic glossary (QUA-133). Key strings keep the historical
@@ -183,7 +186,7 @@ final class Preferences: @unchecked Sendable {
     }
 
     private func engineSlot(_ key: String) -> Engine {
-        Engine(rawValue: defaults.string(forKey: key) ?? "") ?? Preferences.defaultEngine
+        Engine(storedValue: defaults.string(forKey: key) ?? "") ?? Preferences.defaultEngine
     }
 
     /// Engine used when the transcript is ≥95% CJK.
@@ -212,7 +215,9 @@ final class Preferences: @unchecked Sendable {
             guard let raw = defaults.stringArray(forKey: Keys.activeEngines) else {
                 return [Preferences.defaultEngine]
             }
-            let engines = raw.compactMap(Engine.init(rawValue:))
+            let engines = raw.compactMap(Engine.init(storedValue:)).reduce(into: [Engine]()) { result, engine in
+                if !result.contains(engine) { result.append(engine) }
+            }
             return engines.isEmpty ? [Preferences.defaultEngine] : engines
         }
         set {
@@ -241,6 +246,19 @@ final class Preferences: @unchecked Sendable {
         activeEngines = [e]
     }
 
+    var qwen3ModelRepoID: String {
+        get { qwen3Model.repoID }
+        set {
+            let model = MLXModelCatalog.all.first { $0.repoID == newValue } ?? MLXModelCatalog.defaultModel
+            defaults.set(model.repoID, forKey: Keys.qwen3ModelRepoID)
+        }
+    }
+
+    var qwen3Model: MLXModelDescriptor {
+        let repoID = defaults.string(forKey: Keys.qwen3ModelRepoID)
+        return MLXModelCatalog.all.first { $0.repoID == repoID } ?? MLXModelCatalog.defaultModel
+    }
+
     var llmEnabled: Bool {
         get { defaults.bool(forKey: Keys.llmEnabled) }
         set { defaults.set(newValue, forKey: Keys.llmEnabled) }
@@ -264,6 +282,20 @@ final class Preferences: @unchecked Sendable {
     var llmModel: String {
         get { defaults.string(forKey: Keys.llmModel) ?? "gpt-4o-mini" }
         set { defaults.set(newValue, forKey: Keys.llmModel) }
+    }
+
+    /// Absence means the built-in prompt, so resetting also follows future
+    /// default-prompt updates. Preserve custom text, including its formatting.
+    var llmSystemPrompt: String {
+        get { defaults.string(forKey: Keys.llmSystemPrompt) ?? TextRefiner.defaultSystemPrompt }
+        set {
+            if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || newValue == TextRefiner.defaultSystemPrompt {
+                defaults.removeObject(forKey: Keys.llmSystemPrompt)
+            } else {
+                defaults.set(newValue, forKey: Keys.llmSystemPrompt)
+            }
+        }
     }
 
     var sonioxAPIKey: String {

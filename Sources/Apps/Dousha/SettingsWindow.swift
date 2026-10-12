@@ -4,6 +4,7 @@ import SwiftUI
 import ASRSupport
 import ConcurrencySupport
 import SonioxASR
+import MLXASR
 
 enum SettingsWindowFactory {
     @MainActor
@@ -91,6 +92,8 @@ struct SettingsView: View {
     @State private var baseURL: String = Preferences.shared.llmBaseURL
     @State private var apiKey:  String = Preferences.shared.llmAPIKey
     @State private var model:   String = Preferences.shared.llmModel
+    @State private var llmSystemPrompt: String = Preferences.shared.llmSystemPrompt
+    @State private var savedLLMSystemPrompt: String = Preferences.shared.llmSystemPrompt
     @State private var refineMode: RefineMode = Preferences.shared.refineMode
     @State private var status: String = ""
     @State private var statusIsError: Bool = false
@@ -102,6 +105,17 @@ struct SettingsView: View {
     @State private var sonioxStatus: String = ""
     @State private var sonioxStatusIsError: Bool = false
     @State private var isTestingSoniox: Bool = false
+
+    // Card expansion and model-management state belong to this view, so switching
+    // panes or collapsing a card never discards unsaved credentials/test results.
+    @State private var expandedEngines: Set<Engine> = [.qwen3]
+    @State private var activeEngines: [Engine] = Preferences.shared.activeEngines
+    @State private var qwen3ModelRepoID: String = Preferences.shared.qwen3ModelRepoID
+    @State private var modelInventory: [String: MLXModelInventory.Entry] = [:]
+    @State private var modelStoreState: MLXModelStore.State = .idle
+    @State private var requestedModelRepoID: String?
+    @State private var uninstallingModelRepoID: String?
+    @State private var modelManagementError = ""
 
     // 音频设置 — 麦克风选择
     @State private var microphoneUseSystemDefault: Bool = Preferences.shared.microphoneSelection.useSystemDefault
@@ -271,6 +285,8 @@ struct SettingsView: View {
             $0 == chineseEngine || $0 == englishEngine || $0 == mixedEngine
         }
         Preferences.shared.activeEngines = active
+        activeEngines = active
+        if active.contains(.qwen3) { MLXModelStore.shared.warmup(Preferences.shared.qwen3Model) }
         NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
     }
 
@@ -397,76 +413,329 @@ struct SettingsView: View {
     }
 
     private var modelPane: some View {
-        Form {
-            Section("引擎路由") {
-                Picker("主要语言", selection: $primaryLanguage) {
-                    Text("中文").tag(Language.zh_CN)
-                    Text("英文").tag(Language.en_US)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: primaryLanguage) { _, newValue in
-                    Preferences.shared.language = newValue.rawValue
-                    NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
-                }
-                Picker("中文", selection: $chineseEngine) { engineOptions() }
-                    .onChange(of: chineseEngine) { _, _ in persistRouting() }
-                Picker("英文", selection: $englishEngine) { engineOptions() }
-                    .onChange(of: englishEngine) { _, _ in persistRouting() }
-                Picker("中英混合", selection: $mixedEngine) { engineOptions() }
-                    .onChange(of: mixedEngine) { _, _ in persistRouting() }
-                Text("按语言把识别结果路由到对应引擎。用到的引擎会在录音时并行运行——例如「中文→豆包、英文→Soniox」就会同时跑两家，停录后按整段语言占比挑一家的结果。三个都选同一个引擎即单引擎、零额外开销。主要语言（菜单「语言」）对应的引擎为主引擎，其实时字幕显示在悬浮窗。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        ScrollView {
+            modelPaneContent
+                .padding(20)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .task {
+            refreshEnginePreferences()
+            await observeModelInventory()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .doushaEngineRoutingChanged)) { _ in
+            refreshEnginePreferences()
+        }
+    }
 
-            Section("Soniox") {
-                Picker("模式", selection: $sonioxMode) {
-                    Text("实时").tag(SonioxMode.realtime)
-                    Text("高精度（异步）").tag(SonioxMode.async)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: sonioxMode) { _, newValue in
-                    Preferences.shared.sonioxMode = newValue
-                }
-                LabeledContent("API 密钥") {
-                    HStack(spacing: 6) {
-                        SecureField("", text: $sonioxAPIKey)
-                            .disableAutocorrection(true)
-                        Button("清除") { sonioxAPIKey = "" }
-                            .help("删除已保存的 Soniox API 密钥")
-                    }
-                }
-                HStack {
-                    Spacer()
-                    testStatusLabel(isTesting: isTestingSoniox,
-                                    status: sonioxStatus,
-                                    isError: sonioxStatusIsError)
-                    Button("保存并测试") { saveAndTestSoniox() }
-                        .disabled(isTestingSoniox || sonioxAPIKey.isEmpty)
-                }
-                Text("Soniox 实时语音转写引擎。自动检测语言，无需选择。在菜单「引擎」中切换到 Soniox 后生效。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+    // Computed fragments only: all bindings and tasks remain owned by SettingsView.
+    private var modelPaneContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            routingCard
+            engineCards
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
-            Section("豆包") {
-                Button("重置豆包凭据…") { actions.resetDoubaoCredentials() }
-                Text("删除缓存的 device_id 与 token，下次听写时重新注册。遇到 exceedconcurrentquota 等错误时使用。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+    private var engineCards: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            engineCard(.qwen3, summary: qwen3Summary) { qwen3Settings }
+            engineCard(.soniox, summary: "\(sonioxMode == .realtime ? "实时" : "高精度（异步）") · \(Preferences.shared.sonioxAPIKey.isEmpty ? "未配置密钥" : "密钥已配置")") {
+                sonioxSettings
             }
-
-            Section("Apple Speech") {
+            engineCard(.doubao, summary: "实时识别 · 凭据自动管理") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Button("重置豆包凭据…") { actions.resetDoubaoCredentials() }
+                    Text("删除缓存的 device_id 与 token，下次听写时重新注册。遇到 exceedconcurrentquota 等错误时使用。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            engineCard(.apple, summary: "系统内置 · 无需配置") {
                 Text("使用系统内置语音识别，无需额外配置。语言在菜单「语言」中选择。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .formStyle(.grouped)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var routingCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("引擎路由").font(.headline)
+            Picker("主要语言", selection: $primaryLanguage) {
+                Text("中文").tag(Language.zh_CN)
+                Text("英文").tag(Language.en_US)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: primaryLanguage) { _, newValue in
+                Preferences.shared.language = newValue.rawValue
+                NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
+            }
+            Picker("中文", selection: $chineseEngine) { engineOptions() }
+                .onChange(of: chineseEngine) { _, _ in persistRouting() }
+            Picker("英文", selection: $englishEngine) { engineOptions() }
+                .onChange(of: englishEngine) { _, _ in persistRouting() }
+            Picker("中英混合", selection: $mixedEngine) { engineOptions() }
+                .onChange(of: mixedEngine) { _, _ in persistRouting() }
+            Text("按语言把识别结果路由到对应引擎。用到的引擎会在录音时并行运行——例如「中文→豆包、英文→Soniox」就会同时跑两家，停录后按整段语言占比挑一家的结果。三个都选同一个引擎即单引擎、零额外开销。主要语言（菜单「语言」）对应的引擎为主引擎，其实时字幕显示在悬浮窗。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
+    }
+
+    private func engineCard<Content: View>(_ engine: Engine, summary: String,
+                                          @ViewBuilder content: () -> Content) -> some View {
+        let isExpanded = expandedEngines.contains(engine)
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                if isExpanded { expandedEngines.remove(engine) }
+                else { expandedEngines.insert(engine) }
+            } label: {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: engine.symbol)
+                            .font(.system(size: 19, weight: .medium))
+                            .foregroundStyle(engine == .qwen3 ? Color.accentColor : .secondary)
+                            .frame(width: 36, height: 36)
+                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
+                        Text(engine.displayName).font(.headline)
+                        capsule(engine.kind)
+                        Spacer(minLength: 8)
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(summary)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 6) {
+                        ForEach(engine.tags, id: \.self) { capsule($0) }
+                        if activeEngines.contains(engine) { capsule("使用中", active: true) }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .padding(16)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(engine.displayName)，\(isExpanded ? "收起" : "展开")设置")
+            .accessibilityValue(summary)
+            if isExpanded {
+                Divider().padding(.horizontal, 16)
+                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
+    }
+
+    private func capsule(_ title: String, active: Bool = false) -> some View {
+        Text(title)
+            .font(.caption)
+            .foregroundStyle(active ? Color.accentColor : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(active ? Color.accentColor.opacity(0.1) : Color.secondary.opacity(0.08), in: Capsule())
+    }
+
+    private var sonioxSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("模式", selection: $sonioxMode) {
+                Text("实时").tag(SonioxMode.realtime)
+                Text("高精度（异步）").tag(SonioxMode.async)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: sonioxMode) { _, newValue in
+                Preferences.shared.sonioxMode = newValue
+            }
+            LabeledContent("API 密钥") {
+                HStack(spacing: 6) {
+                    SecureField("", text: $sonioxAPIKey)
+                        .disableAutocorrection(true)
+                    Button("清除") { sonioxAPIKey = "" }
+                        .help("删除已保存的 Soniox API 密钥")
+                }
+            }
+            HStack {
+                Spacer()
+                testStatusLabel(isTesting: isTestingSoniox,
+                                status: sonioxStatus,
+                                isError: sonioxStatusIsError)
+                Button("保存并测试") { saveAndTestSoniox() }
+                    .disabled(isTestingSoniox || sonioxAPIKey.isEmpty)
+            }
+            Text("Soniox 实时语音转写引擎。自动检测语言，无需选择。在菜单「引擎」中切换到 Soniox 后生效。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .textFieldStyle(.roundedBorder)
+    }
+
+    private var selectedQwen3Model: MLXModelDescriptor {
+        MLXModelCatalog.all.first { $0.repoID == qwen3ModelRepoID } ?? MLXModelCatalog.defaultModel
+    }
+
+    private var qwen3Summary: String {
+        let installed = modelInventory.values.filter(\.isInstalled).count
+        return "模型 \(MLXModelCatalog.all.count) · 已安装 \(installed)/\(MLXModelCatalog.all.count) · 使用中 \(selectedQwen3Model.displayName)"
+    }
+
+    private var isModelOperationPending: Bool {
+        if case .loading = modelStoreState { return true }
+        return requestedModelRepoID != nil || uninstallingModelRepoID != nil
+    }
+
+    private var qwen3Settings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(MLXModelCatalog.all, id: \.repoID) { descriptor in
+                if descriptor != MLXModelCatalog.all.first { Divider() }
+                qwen3ModelRow(descriptor)
+            }
+            Text("安装会下载并加载模型，首次可能需要几分钟；下载完成后可离线听写。切换模型在下一次录音生效。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("已加载的模型暂不可卸载。请先使用另一个模型并等待加载完成，或重新打开豆沙后卸载。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !modelManagementError.isEmpty {
+                Text(modelManagementError)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func qwen3ModelRow(_ descriptor: MLXModelDescriptor) -> some View {
+        let entry = modelInventory[descriptor.repoID]
+        let installed = entry?.isInstalled == true
+        let selected = qwen3ModelRepoID == descriptor.repoID
+        let loading = modelStoreState == .loading(repoID: descriptor.repoID)
+        let loaded = modelStoreState == .ready(repoID: descriptor.repoID)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(descriptor.displayName).font(.body.weight(.medium))
+                    Text(modelSizeLabel(descriptor, entry: entry))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                if selected { capsule("使用中", active: true) }
+                if installed {
+                    Button("卸载") { uninstallModel(descriptor) }
+                        .disabled(isModelOperationPending || loaded)
+                        .help(loaded ? "模型仍已加载，请先切换模型或重新打开豆沙" : "删除此模型的本地缓存")
+                    if !selected {
+                        Button("使用") { selectModel(descriptor) }
+                            .disabled(isModelOperationPending)
+                    }
+                } else {
+                    Button("安装") { installModel(descriptor) }
+                        .disabled(isModelOperationPending)
+                }
+            }
+            if loading || requestedModelRepoID == descriptor.repoID || uninstallingModelRepoID == descriptor.repoID {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(uninstallingModelRepoID == descriptor.repoID ? "正在卸载…" : (loading ? "下载并加载中…" : "等待模型空闲…"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if case .failed(let repoID, let message) = modelStoreState, repoID == descriptor.repoID {
+                HStack(alignment: .top) {
+                    Text("加载失败：\(message)")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button("重试") { installModel(descriptor) }.disabled(isModelOperationPending)
+                }
+            }
+        }
+    }
+
+    private func modelSizeLabel(_ descriptor: MLXModelDescriptor, entry: MLXModelInventory.Entry?) -> String {
+        let bytes = entry?.bytesOnDisk ?? 0
+        if entry?.isInstalled == true {
+            return "已安装 · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))"
+        }
+        let download = descriptor.downloadBytes.map {
+            "下载约 \(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file))"
+        } ?? "尚未安装"
+        return bytes > 0 ? "\(download) · 缓存 \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))" : download
+    }
+
+    private func refreshModelInventory() async {
+        let entries = await Task.detached(priority: .utility) {
+            let inventory = MLXModelInventory()
+            return Dictionary(uniqueKeysWithValues: MLXModelCatalog.all.map { ($0.repoID, inventory.entry(for: $0)) })
+        }.value
+        modelInventory = entries
+    }
+
+    private func refreshEnginePreferences() {
+        let prefs = Preferences.shared
+        chineseEngine = prefs.chineseEngine
+        englishEngine = prefs.englishEngine
+        mixedEngine = prefs.mixedEngine
+        activeEngines = prefs.activeEngines
+        qwen3ModelRepoID = prefs.qwen3ModelRepoID
+    }
+
+    private func observeModelInventory() async {
+        await refreshModelInventory()
+        while !Task.isCancelled {
+            let state = await MLXModelStore.shared.state
+            if state != modelStoreState {
+                modelStoreState = state
+                await refreshModelInventory()
+            }
+            switch state {
+            case .ready(let repoID), .failed(let repoID, _):
+                if requestedModelRepoID == repoID { requestedModelRepoID = nil }
+            default: break
+            }
+            do { try await Task.sleep(for: .milliseconds(500)) }
+            catch { return }
+        }
+    }
+
+    private func installModel(_ descriptor: MLXModelDescriptor) {
+        modelManagementError = ""
+        requestedModelRepoID = descriptor.repoID
+        MLXModelStore.shared.warmup(descriptor)
+    }
+
+    private func selectModel(_ descriptor: MLXModelDescriptor) {
+        qwen3ModelRepoID = descriptor.repoID
+        Preferences.shared.qwen3ModelRepoID = descriptor.repoID
+        installModel(descriptor)
+        NotificationCenter.default.post(name: .doushaEngineRoutingChanged, object: nil)
+    }
+
+    private func uninstallModel(_ descriptor: MLXModelDescriptor) {
+        modelManagementError = ""
+        uninstallingModelRepoID = descriptor.repoID
+        Task {
+            do { try await MLXModelInventory().uninstall(descriptor) }
+            catch { modelManagementError = error.localizedDescription }
+            await refreshModelInventory()
+            uninstallingModelRepoID = nil
+        }
     }
 
     // MARK: - 个性词库
@@ -576,12 +845,36 @@ struct SettingsView: View {
                     Button("保存并测试") { saveAndTestLLM() }
                         .disabled(isTesting || apiKey.isEmpty || baseURL.isEmpty || model.isEmpty)
                 }
-                Text("使用任意兼容 OpenAI 的对话补全接口来清理听写结果。模型只会修正明显的识别错误，不会改写内容。")
+                Text("使用任意兼容 OpenAI 的对话补全接口来清理听写结果。默认仅修正明显的识别错误；可在下方自定义润色规则。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            Section("润色提示词") {
+                TextEditor(text: $llmSystemPrompt)
+                    .font(.body)
+                    .disableAutocorrection(true)
+                    .frame(height: 220)
+                    .padding(6)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                    .accessibilityLabel("润色提示词")
+                HStack {
+                    Button("恢复默认") { llmSystemPrompt = TextRefiner.defaultSystemPrompt }
+                        .disabled(llmSystemPrompt == TextRefiner.defaultSystemPrompt)
+                    Spacer()
+                    Text(llmSystemPrompt == savedLLMSystemPrompt ? "已保存" : "未保存")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("保存提示词") { saveLLMPrompt() }
+                        .disabled(llmSystemPrompt == savedLLMSystemPrompt)
+                }
+                Text("自定义提示词会完整替换默认规则，可允许清理重复、修复断句或轻度润色。建议要求模型只输出处理后的正文。修改后点击「保存提示词」，后续润色请求生效；留空则使用默认规则。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .formStyle(.grouped)
     }
@@ -716,6 +1009,12 @@ struct SettingsView: View {
         }
     }
 
+    private func saveLLMPrompt() {
+        Preferences.shared.llmSystemPrompt = llmSystemPrompt
+        llmSystemPrompt = Preferences.shared.llmSystemPrompt
+        savedLLMSystemPrompt = llmSystemPrompt
+    }
+
     /// Save the LLM credentials, then test connectivity. Settings persist
     /// regardless of the test outcome; the test result is informational.
     private func saveAndTestLLM() {
@@ -729,7 +1028,8 @@ struct SettingsView: View {
         isTesting = true
         status = ""
         statusIsError = false
-        let refiner = TextRefiner(baseURL: baseURL, apiKey: apiKey, model: model)
+        let refiner = TextRefiner(baseURL: baseURL, apiKey: apiKey, model: model,
+                                  systemPrompt: Preferences.shared.llmSystemPrompt)
         Task {
             let result = await refiner.test()
             DispatchQueue.main.async {

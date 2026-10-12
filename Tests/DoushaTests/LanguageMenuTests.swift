@@ -41,6 +41,18 @@ final class LanguageMenuTests: XCTestCase {
         XCTAssertFalse(options.map(\.rawValue).contains(LanguageMenu.autoIdentifier))
     }
 
+    func test_singleLocalShowsOnlyAutoRegardlessOfSavedLanguage() {
+        let options = LanguageMenu.options(
+            activeEngines: [.qwen3],
+            primaryEngine: .qwen3,
+            selectedLanguage: Language.en_US.rawValue
+        )
+
+        XCTAssertEqual(options, [
+            LanguageMenu.Option(title: "自动", rawValue: LanguageMenu.autoIdentifier, isSelected: true)
+        ])
+    }
+
     // MARK: - 多引擎：强制主要语言（中文/英文），不存在「自动」
 
     func test_multiEngineShowsOnlyChineseAndEnglishNeverAuto() {
@@ -52,6 +64,19 @@ final class LanguageMenuTests: XCTestCase {
 
         XCTAssertEqual(options.map(\.rawValue), [Language.zh_CN.rawValue, Language.en_US.rawValue])
         XCTAssertFalse(options.map(\.rawValue).contains(LanguageMenu.autoIdentifier))
+    }
+
+    func test_multiEngineWithLocalKeepsPrimaryLanguageSelection() {
+        let options = LanguageMenu.options(
+            activeEngines: [.qwen3, .soniox],
+            primaryEngine: .qwen3,
+            selectedLanguage: Language.en_US.rawValue
+        )
+
+        XCTAssertEqual(options, [
+            LanguageMenu.Option(title: "中文", rawValue: Language.zh_CN.rawValue, isSelected: false),
+            LanguageMenu.Option(title: "英文", rawValue: Language.en_US.rawValue, isSelected: true)
+        ])
     }
 
     func test_multiEngineSelectsChineseForChineseLanguage() {

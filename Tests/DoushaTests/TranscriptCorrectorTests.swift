@@ -178,6 +178,15 @@ final class TranscriptCorrectorTests: XCTestCase {
 
     // MARK: - Rule 3: quotes
 
+    func testChineseQuotationAcrossSentenceBoundary() {
+        // A recognition pause inside a quotation must not reset quote pairing.
+        let text = "把自己的这种理论操作称之为\"要反对一种。英雄式的能动性观念\"。"
+        XCTAssertEqual(corrector(quotes: .corner).correct(text),
+                       "把自己的这种理论操作称之为「要反对一种。英雄式的能动性观念」。")
+        XCTAssertEqual(corrector(quotes: .curly).correct(text),
+                       "把自己的这种理论操作称之为\u{201C}要反对一种。英雄式的能动性观念\u{201D}。")
+    }
+
     func testChineseContextUsesConfiguredStyle() {
         let corner = corrector(quotes: .corner)
         XCTAssertEqual(corner.correct("什么是\"action\"，什么是\"behavior\"。"),

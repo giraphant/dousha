@@ -14,6 +14,39 @@ final class TextRefinerTests: XCTestCase {
         XCTAssertEqual(TextRefiner.cleanLLMOutput(raw), "Python is great")
     }
 
+    func testRequestUsesCustomPromptAsTheOnlySystemMessage() throws {
+        let prompt = "  清理重复、修复断句，保留 agency 等术语。\n只输出正文。\n"
+        let refiner = TextRefiner(baseURL: "https://example.test/v1", apiKey: "k",
+                                  model: "m", systemPrompt: prompt)
+        // Dictation and the settings connection probe share the request builder.
+        for (input, timeout) in [("这个、这个 agency。", 20.0), ("ping", 15.0)] {
+            let request = try XCTUnwrap(refiner.makeRequest(for: input, timeout: timeout))
+            let body = try XCTUnwrap(request.httpBody)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
+            XCTAssertEqual(messages, [
+                ["role": "system", "content": prompt],
+                ["role": "user", "content": input]
+            ])
+            XCTAssertEqual(request.timeoutInterval, timeout)
+        }
+    }
+
+    func testRequestFallsBackToDefaultForMissingOrBlankPrompt() throws {
+        let refiners = [
+            TextRefiner(baseURL: "https://example.test/v1", apiKey: "k", model: "m"),
+            TextRefiner(baseURL: "https://example.test/v1", apiKey: "k", model: "m",
+                        systemPrompt: " \n\t ")
+        ]
+        for refiner in refiners {
+            let request = try XCTUnwrap(refiner.makeRequest(for: "你好", timeout: 20))
+            let body = try XCTUnwrap(request.httpBody)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
+            XCTAssertEqual(messages.first?["content"], TextRefiner.defaultSystemPrompt)
+        }
+    }
+
     func testCleanStripsSurroundingQuotes() {
         XCTAssertEqual(TextRefiner.cleanLLMOutput("\"hello\""), "hello")
         XCTAssertEqual(TextRefiner.cleanLLMOutput("\u{201C}你好\u{201D}"), "你好")
