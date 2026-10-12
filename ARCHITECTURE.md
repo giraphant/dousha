@@ -199,6 +199,8 @@ type is used, re-derive the reason or the annotation becomes a lie.
   objects, never a newer session's lease. `.ended` signals its final channel
   before the generation guard. Only cumulative `.displayUpdate` events replace
   the transcript; confirmed/provisional events must not be appended again.
+  `MLXTranscriptState` strips complete Qwen protocol headers from partials and
+  finals, hiding incomplete tails only in auto mode and keeping a safe confirmed prefix.
   Partials, errors and the one stop completion dispatch on main and recheck
   the generation there; cancel immediately quarantines input and callbacks.
 - **`MLXModelStore` / `MLXLoadedModel` (`@unchecked Sendable`)** — the store

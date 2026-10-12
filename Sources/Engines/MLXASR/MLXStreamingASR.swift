@@ -88,15 +88,24 @@ internal final class MLXSessionInput: Sendable {
 /// Display events are authoritative cumulative snapshots. The separate
 /// confirmed/provisional events are not deltas to append a second time.
 internal struct MLXTranscriptState {
+    let suppressIncompleteHeaders: Bool
     private(set) var display = PartialTranscript.empty
+
+    init(suppressIncompleteHeaders: Bool = false) {
+        self.suppressIncompleteHeaders = suppressIncompleteHeaders
+    }
 
     mutating func consume(_ event: TranscriptionEvent) -> PartialTranscript? {
         guard case .displayUpdate(let confirmed, let provisional) = event else { return nil }
-        display = PartialTranscript(finalText: confirmed, interimText: provisional)
+        display = QwenTranscriptFilter.partial(confirmed: confirmed, provisional: provisional,
+                                              suppressIncompleteTail: suppressIncompleteHeaders)
         return display
     }
 
-    func finalText(endedText: String?) -> String { endedText ?? display.combined }
+    func finalText(endedText: String?) -> String {
+        guard let endedText else { return display.combined } // Already filtered for timeout fallback.
+        return QwenTranscriptFilter.visibleText(endedText, suppressIncompleteTail: suppressIncompleteHeaders)
+    }
 }
 
 /// All caller-side MLX operations are serialized on this private background
@@ -179,7 +188,7 @@ public actor MLXStreamingASR {
         var cleanupFinished: OneShotChannel<Void>?
         var io: MLXSessionIO?
         var lease: MLXSessionLease?
-        var transcript = MLXTranscriptState()
+        var transcript: MLXTranscriptState
         var failure: MLXASRError?
         var stopping = false
         var terminated = false
@@ -190,6 +199,7 @@ public actor MLXStreamingASR {
              onError: @escaping @Sendable (Error) -> Void) {
             self.generation = generation
             self.language = language
+            self.transcript = MLXTranscriptState(suppressIncompleteHeaders: language == nil)
             self.onPartial = onPartial
             self.onError = onError
         }

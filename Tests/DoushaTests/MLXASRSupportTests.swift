@@ -45,7 +45,7 @@ final class MLXASRSupportTests: XCTestCase {
     func testDisplayUpdatesReplaceTheCumulativeSnapshot() {
         var state = MLXTranscriptState()
         XCTAssertEqual(state.consume(.displayUpdate(confirmedText: "Hello ", provisionalText: "world")),
-                       PartialTranscript(finalText: "Hello ", interimText: "world"))
+                       PartialTranscript(finalText: "Hello", interimText: " world"))
         XCTAssertEqual(state.finalText(endedText: nil), "Hello world")
         XCTAssertNil(state.consume(.confirmed(text: "Hello world")))
         XCTAssertNil(state.consume(.provisional(text: "world!")))
