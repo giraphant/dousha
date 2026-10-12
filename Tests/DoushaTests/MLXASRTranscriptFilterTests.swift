@@ -16,6 +16,59 @@ final class MLXASRTranscriptFilterTests: XCTestCase {
         }
     }
 
+    func testCompleteHeadersAfterPunctuationAndClosingQuotesOrBrackets() {
+        for suppress in [false, true] {
+            for punctuation in ".,!?;:\"'”’»›)]}>" {
+                XCTAssertEqual(visible("Hello\(punctuation)language English<asr_text> \t world", auto: suppress),
+                               "Hello\(punctuation) world")
+            }
+            for punctuation in ".,!?;:。，！？；：、…．｡､\"'”’)]}>）］｝」』】〕〉》〗〙〛" {
+                XCTAssertEqual(visible("问题\(punctuation)language Chinese<asr_text> \t 下一句", auto: suppress),
+                               "问题\(punctuation)下一句")
+            }
+            XCTAssertEqual(visible("问题。language Chinese<asr_text>language Chinese<asr_text>下一句", auto: suppress),
+                           "问题。下一句")
+            XCTAssertEqual(visible("はい…language Japanese<asr_text> ありがとう", auto: suppress), "はい…ありがとう")
+            XCTAssertEqual(visible("안녕,language Korean<asr_text> 세상", auto: suppress), "안녕, 세상")
+        }
+    }
+
+    func testEveryPunctuationAdjacentIncompleteHeaderCutIsHiddenOnlyInAutoMode() {
+        let header = "language Chinese<asr_text>"
+        for punctuation in ".,!?;:。，！？；：、…\"'”’)]}>」』】" {
+            let prefix = "问题\(punctuation)"
+            for length in 1..<header.count {
+                let text = prefix + header.prefix(length)
+                XCTAssertEqual(visible(text), prefix, "text=\(text)")
+                XCTAssertEqual(visible(text, auto: false), text.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+    }
+
+    func testOrdinaryLanguageTextAfterPunctuationSurvives() {
+        for punctuation in ".,!?;:。，！？；：、…\"'”’)]}>」』】" {
+            for phrase in ["language model", "language is useful", "language Chinese people speak",
+                           "the language we speak", "the language.", "lantern"] {
+                let text = "Hello\(punctuation)\(phrase)"
+                for suppress in [false, true] {
+                    XCTAssertEqual(visible(text, auto: suppress), text)
+                }
+            }
+        }
+    }
+
+    func testLettersAndDigitsDoNotIntroduceHeadersOrIncompleteTails() {
+        let header = "language English<asr_text>"
+        for prefix in ["meta", "你好", "123", "é", "Ａ", "_", "("] {
+            for length in 1...header.count {
+                let text = prefix + header.prefix(length)
+                for suppress in [false, true] {
+                    XCTAssertEqual(visible(text, auto: suppress), text.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            }
+        }
+    }
+
     func testRemovalOnlyNormalizesWhitespaceAtRemovedBoundaries() {
         XCTAssertEqual(visible("  language Chinese<asr_text>  你好  "), "你好")
         XCTAssertEqual(visible("Hello \n  language English<asr_text> \t world"), "Hello world")
@@ -118,6 +171,28 @@ final class MLXASRTranscriptFilterTests: XCTestCase {
             XCTAssertEqual(state.finalText(endedText: "language Chinese<asr_text>你好 language English<asr_text>world"),
                            "你好 world")
             XCTAssertEqual(state.finalText(endedText: ""), "")
+        }
+    }
+
+    func testPunctuationAdjacentHeadersAcrossEverySplitAndStreamingFallback() {
+        let text = "language Chinese<asr_text>问题。language English<asr_text>Hello,language English<asr_text>world"
+        let expected = "问题。Hello, world"
+        for suppress in [true, false] {
+            for offset in 0...text.count {
+                var state = MLXTranscriptState(suppressIncompleteHeaders: suppress)
+                let partial = state.consume(.displayUpdate(confirmedText: String(text.prefix(offset)),
+                                                         provisionalText: String(text.dropFirst(offset))))!
+                XCTAssertEqual(partial.combined, expected, "split=\(offset), auto=\(suppress)")
+                XCTAssertTrue(expected.hasPrefix(partial.finalText))
+                XCTAssertEqual(state.finalText(endedText: nil), expected)
+                XCTAssertEqual(state.finalText(endedText: text), expected)
+            }
+            var state = MLXTranscriptState(suppressIncompleteHeaders: suppress)
+            let incomplete = text + ".language Chi"
+            let expectedTail = expected + (suppress ? "." : ".language Chi")
+            _ = state.consume(.displayUpdate(confirmedText: incomplete, provisionalText: ""))
+            XCTAssertEqual(state.finalText(endedText: nil), expectedTail)
+            XCTAssertEqual(state.finalText(endedText: incomplete), expectedTail)
         }
     }
 

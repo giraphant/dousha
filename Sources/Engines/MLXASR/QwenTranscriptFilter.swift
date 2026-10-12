@@ -32,7 +32,13 @@ internal enum QwenTranscriptFilter {
                 // Reuse only the provider-neutral spacing rule at this removed
                 // boundary; preserve ordinary text and meaningful Korean spaces.
                 let boundary = TranscriptFormatter.tightenCJKSpaces("\(left) \(right)")
-                if boundary.contains(" ") { visible.append(" ") }
+                // ASCII punctuation, ellipses and shared closing quotes also
+                // join directly to Chinese/Japanese at an encoder-window boundary.
+                let punctuationBeforeCJK = isHeaderBoundary(left)
+                    && right.unicodeScalars.contains {
+                        $0.properties.isIdeographic || (0x3040...0x30FF).contains($0.value)
+                    }
+                if boundary.contains(" "), !punctuationBeforeCJK { visible.append(" ") }
             }
             visible.append(contentsOf: fragment)
             joiningRemovedBoundary = false
@@ -42,7 +48,7 @@ internal enum QwenTranscriptFilter {
               let range = text.range(of: keyword, range: cursor..<text.endIndex) {
             append(text[cursor..<range.lowerBound])
             let atBoundary = range.lowerBound == text.startIndex
-                || text[text.index(before: range.lowerBound)].isWhitespace
+                || isHeaderBoundary(text[text.index(before: range.lowerBound)])
             let tail = text[range.upperBound...]
             if atBoundary, tail.first == " ", let end = tail.range(of: marker),
                plausibleLanguageName(tail[..<end.lowerBound]) {
@@ -61,11 +67,11 @@ internal enum QwenTranscriptFilter {
         }
 
         let remainder = text[cursor...]
-        let wordStart = remainder.lastIndex(where: \.isWhitespace).map { text.index(after: $0) } ?? cursor
+        let wordStart = remainder.lastIndex(where: isHeaderBoundary).map { text.index(after: $0) } ?? cursor
         // The keyword itself may also arrive in pieces, including after an
         // earlier window. A non-prefix word (e.g. "lantern") stays untouched.
         if suppressIncompleteTail,
-           wordStart == text.startIndex || text[text.index(before: wordStart)].isWhitespace {
+           wordStart == text.startIndex || isHeaderBoundary(text[text.index(before: wordStart)]) {
             let suffix = remainder[wordStart...]
             if !suffix.isEmpty, keyword.hasPrefix(suffix) {
                 append(remainder[..<wordStart])
@@ -74,6 +80,15 @@ internal enum QwenTranscriptFilter {
         }
         append(remainder)
         return visible.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isHeaderBoundary(_ character: Character) -> Bool {
+        if character.isWhitespace || ".,!?;:。，！？；：、…．｡､\"'>".contains(character) { return true }
+        // Closing quotes/brackets may end a clause, but letters, digits and
+        // word-internal punctuation (such as underscores) cannot start metadata.
+        return character.unicodeScalars.allSatisfy {
+            $0.properties.generalCategory == .closePunctuation || $0.properties.generalCategory == .finalPunctuation
+        }
     }
 
     private static func plausibleLanguageName(_ value: Substring) -> Bool {
