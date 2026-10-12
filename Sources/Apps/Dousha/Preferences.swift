@@ -1,6 +1,7 @@
 import ASRSupport
 import Foundation
 import SonioxASR
+import MLXASR
 
 enum Language: String, CaseIterable {
     case en_US = "en-US"
@@ -48,6 +49,7 @@ final class Preferences: @unchecked Sendable {
         static let englishEngine             = "englishEngine"
         static let mixedEngine               = "mixedEngine"
         static let activeEngines             = "activeEngines"
+        static let qwen3ModelRepoID           = "qwen3ModelRepoID"
         static let llmEnabled                = "llmEnabled"
         static let llmBaseURL                = "llmBaseURL"
         static let llmAPIKey                 = "llmAPIKey"
@@ -183,7 +185,7 @@ final class Preferences: @unchecked Sendable {
     }
 
     private func engineSlot(_ key: String) -> Engine {
-        Engine(rawValue: defaults.string(forKey: key) ?? "") ?? Preferences.defaultEngine
+        Engine(storedValue: defaults.string(forKey: key) ?? "") ?? Preferences.defaultEngine
     }
 
     /// Engine used when the transcript is ≥95% CJK.
@@ -212,7 +214,9 @@ final class Preferences: @unchecked Sendable {
             guard let raw = defaults.stringArray(forKey: Keys.activeEngines) else {
                 return [Preferences.defaultEngine]
             }
-            let engines = raw.compactMap(Engine.init(rawValue:))
+            let engines = raw.compactMap(Engine.init(storedValue:)).reduce(into: [Engine]()) { result, engine in
+                if !result.contains(engine) { result.append(engine) }
+            }
             return engines.isEmpty ? [Preferences.defaultEngine] : engines
         }
         set {
@@ -239,6 +243,19 @@ final class Preferences: @unchecked Sendable {
         englishEngine = e
         mixedEngine = e
         activeEngines = [e]
+    }
+
+    var qwen3ModelRepoID: String {
+        get { qwen3Model.repoID }
+        set {
+            let model = MLXModelCatalog.all.first { $0.repoID == newValue } ?? MLXModelCatalog.defaultModel
+            defaults.set(model.repoID, forKey: Keys.qwen3ModelRepoID)
+        }
+    }
+
+    var qwen3Model: MLXModelDescriptor {
+        let repoID = defaults.string(forKey: Keys.qwen3ModelRepoID)
+        return MLXModelCatalog.all.first { $0.repoID == repoID } ?? MLXModelCatalog.defaultModel
     }
 
     var llmEnabled: Bool {

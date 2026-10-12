@@ -4,15 +4,15 @@ import ConcurrencySupport
 @testable import Dousha
 
 final class MLXEngineWiringTests: XCTestCase {
-    func test_localEngineRoundTripsWithDisplayName() {
-        XCTAssertEqual(Engine.local.rawValue, "local")
-        XCTAssertEqual(Engine(rawValue: "local"), .local)
-        XCTAssertEqual(Engine.local.displayName, "本地 Qwen3")
-        XCTAssertTrue(Engine.allCases.contains(.local))
+    func test_qwen3EngineRoundTripsWithDisplayName() {
+        XCTAssertEqual(Engine.qwen3.rawValue, "qwen3")
+        XCTAssertEqual(Engine(rawValue: "qwen3"), .qwen3)
+        XCTAssertEqual(Engine.qwen3.displayName, "Qwen3")
+        XCTAssertTrue(Engine.allCases.contains(.qwen3))
     }
 
     func test_factoryMakesMLXBackend() {
-        let backend = SpeechBackendFactory.make(engine: .local, language: "auto")
+        let backend = SpeechBackendFactory.make(engine: .qwen3, language: "auto")
         XCTAssertTrue(backend is MLXBackend)
     }
 

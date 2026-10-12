@@ -1,0 +1,99 @@
+import Foundation
+import HuggingFace
+
+/// Disk inventory only; this never downloads or initializes the MLX runtime.
+public struct MLXModelInventory: Sendable {
+    public struct Entry: Sendable, Equatable {
+        public let isInstalled: Bool
+        /// Sum of cached file sizes, including incomplete downloads.
+        public let bytesOnDisk: Int64
+    }
+
+    public enum RemovalError: LocalizedError {
+        case modelInUse
+        case unsafePath
+
+        public var errorDescription: String? {
+            switch self {
+            case .modelInUse:
+                return "此模型仍已加载。请先使用另一个模型并等待加载完成，或退出并重新打开豆沙后卸载。"
+            case .unsafePath:
+                return "模型缓存路径无效，无法卸载。"
+            }
+        }
+    }
+
+    private let cacheRoot: URL
+
+    public init(cacheRoot: URL = HubCache.default.cacheDirectory) {
+        self.cacheRoot = cacheRoot.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    /// Coupled to mlx-audio-swift 244458d7 ModelUtils.resolveOrDownloadModel:
+    /// it has no public path-only helper. Reuse HubCache's public root (including
+    /// HF_HOME / HF_HUB_CACHE overrides), then mirror its mlx-audio/<org>_<repo>
+    /// suffix. Do not use HubCache.repoDirectory: that is a different snapshot.
+    public func directory(for model: MLXModelDescriptor) -> URL {
+        cacheRoot.appendingPathComponent("mlx-audio", isDirectory: true)
+            .appendingPathComponent(model.repoID.replacingOccurrences(of: "/", with: "_"), isDirectory: true)
+    }
+
+    public func entry(for model: MLXModelDescriptor) -> Entry {
+        let directory = directory(for: model)
+        let manager = FileManager.default
+        // Match the upstream cache-hit test: valid JSON + nonempty safetensors.
+        // "Installed" describes cached files, not an inference health check.
+        let files = (try? manager.contentsOfDirectory(at: directory,
+                                                      includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        let hasWeights = files.contains {
+            $0.pathExtension == "safetensors" &&
+                ((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
+        }
+        let config = try? Data(contentsOf: directory.appendingPathComponent("config.json"))
+        let hasConfig = config.flatMap { try? JSONSerialization.jsonObject(with: $0) } != nil
+        var bytes: Int64 = 0
+        if let enumerator = manager.enumerator(at: directory,
+                                              includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) {
+            for case let file as URL in enumerator {
+                if let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                   values.isRegularFile == true {
+                    bytes += Int64(values.fileSize ?? 0)
+                }
+            }
+        }
+        return Entry(isInstalled: hasWeights && hasConfig, bytesOnDisk: bytes)
+    }
+
+    /// Serialize deletion with downloads and complete inference sessions. Refuse
+    /// every loaded model (even if selection has since changed): state=ready is
+    /// the store's cached model, whose mapped weights must remain intact.
+    public func uninstall(_ model: MLXModelDescriptor, store: MLXModelStore = .shared) async throws {
+        let lease = try await store.acquireSessionLease()
+        do {
+            try Task.checkCancellation()
+            try Self.checkRemoval(model, state: await store.state)
+            let directory = directory(for: model).standardizedFileURL
+            let parent = cacheRoot.appendingPathComponent("mlx-audio", isDirectory: true).standardizedFileURL
+            guard directory.deletingLastPathComponent().path == parent.path,
+                  directory.resolvingSymlinksInPath().path == directory.path else {
+                throw RemovalError.unsafePath
+            }
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.removeItem(at: directory)
+            }
+            await lease.release()
+        } catch {
+            await lease.release()
+            throw error
+        }
+    }
+
+    internal static func checkRemoval(_ model: MLXModelDescriptor, state: MLXModelStore.State) throws {
+        switch state {
+        case .ready(let repoID), .loading(let repoID):
+            if repoID == model.repoID { throw RemovalError.modelInUse }
+        default:
+            break
+        }
+    }
+}

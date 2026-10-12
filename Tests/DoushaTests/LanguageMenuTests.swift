@@ -43,8 +43,8 @@ final class LanguageMenuTests: XCTestCase {
 
     func test_singleLocalShowsOnlyAutoRegardlessOfSavedLanguage() {
         let options = LanguageMenu.options(
-            activeEngines: [.local],
-            primaryEngine: .local,
+            activeEngines: [.qwen3],
+            primaryEngine: .qwen3,
             selectedLanguage: Language.en_US.rawValue
         )
 
@@ -68,8 +68,8 @@ final class LanguageMenuTests: XCTestCase {
 
     func test_multiEngineWithLocalKeepsPrimaryLanguageSelection() {
         let options = LanguageMenu.options(
-            activeEngines: [.local, .soniox],
-            primaryEngine: .local,
+            activeEngines: [.qwen3, .soniox],
+            primaryEngine: .qwen3,
             selectedLanguage: Language.en_US.rawValue
         )
 

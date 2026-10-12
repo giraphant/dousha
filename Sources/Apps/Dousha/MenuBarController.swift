@@ -111,6 +111,7 @@ final class MenuBarController: NSObject {
                                   keyEquivalent: "")
             item.target = self
             item.representedObject = e.rawValue
+            item.image = menuIcon(e.symbol)
             // Check every active engine; clicking one collapses to single-engine.
             if prefs.activeEngines.contains(e) { item.state = .on }
             engineMenu.addItem(item)
@@ -210,7 +211,7 @@ final class MenuBarController: NSObject {
         // rebuilt at the next recording.start().
         prefs.engine = e
         if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
-        if prefs.activeEngines.contains(.local) { MLXModelStore.shared.warmup(MLXModelCatalog.defaultModel) }
+        if prefs.activeEngines.contains(.qwen3) { MLXModelStore.shared.warmup(prefs.qwen3Model) }
         rebuildMenu()
     }
 
@@ -227,7 +228,7 @@ final class MenuBarController: NSObject {
         Task { @MainActor in
             await DoubaoCredentialStore.shared.reset()
             if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
-            if prefs.activeEngines.contains(.local) { MLXModelStore.shared.warmup(MLXModelCatalog.defaultModel) }
+            if prefs.activeEngines.contains(.qwen3) { MLXModelStore.shared.warmup(prefs.qwen3Model) }
         }
     }
 
