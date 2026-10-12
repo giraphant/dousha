@@ -101,7 +101,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return corrected
                 }
             },
-            inject: { [injector] text in injector.inject(text) },
+            inject: { [injector, focusTracker] text in
+                // Live, post-refinement text only; replays use copyToClipboard.
+                let target = focusTracker.current
+                injector.inject(text)
+                DictationStatsStore().record(
+                    text: text, audioSeconds: RecordingHistoryStore.duration(wavAt: AudioCapturePaths.sharedWAV),
+                    bundleID: target?.bundleID, appName: target?.name ?? "")
+            },
             isRefineEnabled: { [prefs] in
                 let enabled = prefs.llmEnabled
                 let configured = TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
@@ -315,7 +322,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
                 resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() },
                 retranscribe: { [weak self] id in self?.retranscribeEntry(id: id) },
-                canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false }
+                canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false },
+                requestMicrophone: { _ = await AVCaptureDevice.requestAccess(for: .audio) },
+                requestSpeechRecognition: {
+                    await withCheckedContinuation { continuation in
+                        SFSpeechRecognizer.requestAuthorization { @Sendable _ in continuation.resume() }
+                    }
+                }
             )
             settingsWindow = SettingsWindowFactory.create(actions: actions)
         }

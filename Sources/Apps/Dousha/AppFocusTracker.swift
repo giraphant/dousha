@@ -11,6 +11,7 @@ final class AppFocusTracker {
     struct Focus: Equatable {
         let icon: NSImage
         let name: String
+        let bundleID: String?
     }
 
     private(set) var current: Focus?
@@ -62,7 +63,7 @@ final class AppFocusTracker {
     /// update `current` and emit `onChange`.
     func applyActivation(bundleId: String?, name: String, icon: NSImage) {
         if shouldIgnore(bundleId: bundleId) { return }
-        let focus = Focus(icon: icon, name: name)
+        let focus = Focus(icon: icon, name: name, bundleID: bundleId)
         current = focus
         onChange?(focus)
     }
@@ -72,7 +73,8 @@ final class AppFocusTracker {
            !shouldIgnore(bundleId: app.bundleIdentifier) {
             current = Focus(
                 icon: app.icon ?? NSImage(),
-                name: app.localizedName ?? app.bundleIdentifier ?? ""
+                name: app.localizedName ?? app.bundleIdentifier ?? "",
+                bundleID: app.bundleIdentifier
             )
         }
     }

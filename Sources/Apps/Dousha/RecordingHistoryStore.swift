@@ -101,7 +101,7 @@ final class RecordingHistoryStore {
             let sc = readSidecar(id: id)
             return RecordingHistoryEntry(id: id,
                                          date: sc?.date ?? .distantPast,
-                                         duration: duration(id: id),
+                                         duration: Self.duration(wavAt: wavURL(id: id)),
                                          transcript: sc?.transcript ?? "",
                                          engine: sc?.engine ?? "",
                                          error: sc?.error)
@@ -142,8 +142,8 @@ final class RecordingHistoryStore {
 
     /// ponytail: assumes our own WavFileWriter's fixed 44-byte header
     /// (16 kHz mono s16 = 32000 B/s); a foreign wav just shows a wrong length.
-    private func duration(id: String) -> TimeInterval {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: wavURL(id: id).path)
+    static func duration(wavAt url: URL) -> TimeInterval {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = attrs?[.size] as? Int ?? 0
         return max(0, Double(size - 44)) / 32_000.0
     }

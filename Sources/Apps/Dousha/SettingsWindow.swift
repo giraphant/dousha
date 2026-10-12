@@ -1,6 +1,10 @@
 import Cocoa
 import CoreGraphics
 import SwiftUI
+import Charts
+import AVFoundation
+import Speech
+import ApplicationServices
 import ASRSupport
 import ConcurrencySupport
 import SonioxASR
@@ -36,6 +40,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case glossary
     case enhance
     case history
+    case statistics
+    case permissions
 
     var id: Self { self }
 
@@ -47,6 +53,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .glossary: return "个性词库"
         case .enhance:  return "智能增强"
         case .history:  return "历史记录"
+        case .statistics: return "统计"
+        case .permissions: return "权限"
         }
     }
 
@@ -58,6 +66,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .glossary: return "character.book.closed"
         case .enhance:  return "sparkles"
         case .history:  return "clock.arrow.circlepath"
+        case .statistics: return "chart.bar"
+        case .permissions: return "lock.shield"
         }
     }
 }
@@ -158,6 +168,14 @@ struct SettingsView: View {
     @State private var canRetranscribeNow = true
     private let history = RecordingHistoryStore()
 
+    @State private var stats = DictationStats()
+    @State private var confirmingStatsReset = false
+    private let statsStore = DictationStatsStore()
+
+    @State private var microphoneStatus: AVAuthorizationStatus = .notDetermined
+    @State private var speechStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
+    @State private var accessibilityGranted = false
+
     init(actions: SettingsActions) {
         self.actions = actions
         _launchAtLogin = State(initialValue: actions.isLaunchAtLoginEnabled())
@@ -180,6 +198,11 @@ struct SettingsView: View {
         .sheet(item: $selectedEngineSheet) { selection in
             engineSheet(selection.engine)
         }
+        .confirmationDialog("重置统计？", isPresented: $confirmingStatsReset) {
+            Button("重置统计", role: .destructive) { statsStore.reset() }
+        } message: {
+            Text("所有听写统计将被清除，历史录音不受影响。")
+        }
     }
 
     @ViewBuilder
@@ -191,6 +214,8 @@ struct SettingsView: View {
         case .glossary: glossaryPane
         case .enhance:  enhancePane
         case .history:  historyPane
+        case .statistics: statisticsPane
+        case .permissions: permissionsPane
         }
     }
 
@@ -847,6 +872,121 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    // MARK: - 统计
+
+    private var statisticsPane: some View {
+        Form {
+            Section("概览") {
+                if stats.totals.dictations == 0 {
+                    Text("暂无统计，完成一次听写后开始累计。")
+                        .foregroundStyle(.secondary)
+                } else {
+                    LabeledContent("听写次数", value: stats.totals.dictations.formatted())
+                    LabeledContent("总时长", value: Duration.seconds(stats.totals.audioSeconds)
+                        .formatted(.time(pattern: .hourMinuteSecond)))
+                    LabeledContent("总字数", value: stats.totals.characters.formatted())
+                    LabeledContent("平均速度（字/分钟）", value: stats.charactersPerMinute
+                        .formatted(.number.precision(.fractionLength(0))))
+                }
+            }
+            if stats.totals.dictations > 0 {
+                Section("最近 7 天") {
+                    Chart(stats.recentDays()) { day in
+                        BarMark(x: .value("日期", day.date, unit: .day),
+                                y: .value("字数", day.counts.characters))
+                    }
+                    .chartXAxis {
+                        AxisMarks(values: .stride(by: .day)) {
+                            AxisValueLabel(format: .dateTime.month().day())
+                        }
+                    }
+                    .chartYAxisLabel("字")
+                    .frame(height: 140)
+                }
+                Section("常用应用") {
+                    ForEach(Array(stats.apps.sorted {
+                        $0.value.characters == $1.value.characters
+                            ? $0.key < $1.key : $0.value.characters > $1.value.characters
+                    }.prefix(5)), id: \.key) { bundleID, app in
+                        LabeledContent {
+                            Text("\(app.dictations) 次 · \(app.characters) 字")
+                        } label: {
+                            HStack {
+                                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                                    Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                                        .resizable().frame(width: 20, height: 20)
+                                } else {
+                                    Image(systemName: "app").frame(width: 20, height: 20)
+                                }
+                                Text(app.name)
+                            }
+                        }
+                    }
+                }
+                Section {
+                    Button("重置统计…", role: .destructive) { confirmingStatsReset = true }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { stats = statsStore.load() }
+        .onReceive(NotificationCenter.default.publisher(for: .doushaStatsChanged)) { _ in
+            stats = statsStore.load()
+        }
+    }
+
+    // MARK: - 权限
+
+    private var permissionsPane: some View {
+        Form {
+            Section {
+                permissionRow("麦克风", granted: microphoneStatus == .authorized,
+                              notDetermined: microphoneStatus == .notDetermined,
+                              privacyPane: "Privacy_Microphone", request: actions.requestMicrophone)
+                permissionRow("辅助功能", granted: accessibilityGranted, notDetermined: false,
+                              privacyPane: "Privacy_Accessibility", request: {})
+                permissionRow("语音识别", subtitle: "仅 Apple 听写需要", granted: speechStatus == .authorized,
+                              notDetermined: speechStatus == .notDetermined,
+                              privacyPane: "Privacy_SpeechRecognition", request: actions.requestSpeechRecognition)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { refreshPermissions() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissions()
+        }
+    }
+
+    private func permissionRow(_ title: String, subtitle: String? = nil, granted: Bool,
+                               notDetermined: Bool, privacyPane: String,
+                               request: @escaping @MainActor () async -> Void) -> some View {
+        LabeledContent {
+            HStack {
+                statusLabel(granted ? "已授权" : (notDetermined ? "未请求" : "未授权"), isError: !granted)
+                Button(notDetermined ? "请求" : "打开系统设置") {
+                    if notDetermined {
+                        Task {
+                            await request()
+                            refreshPermissions()
+                        }
+                    } else {
+                        NSWorkspace.shared.open(URL(string:
+                            "x-apple.systempreferences:com.apple.preference.security?\(privacyPane)")!)
+                    }
+                }
+            }
+        } label: {
+            Text(title)
+            if let subtitle { Text(subtitle) }
+        }
+    }
+
+    private func refreshPermissions() {
+        microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        speechStatus = SFSpeechRecognizer.authorizationStatus()
+        accessibilityGranted = AXIsProcessTrusted()
     }
 
     // MARK: - 历史记录

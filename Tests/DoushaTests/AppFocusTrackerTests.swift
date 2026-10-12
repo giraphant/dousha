@@ -21,6 +21,7 @@ final class AppFocusTrackerTests: XCTestCase {
         let img = NSImage(size: NSSize(width: 1, height: 1))
         tracker.applyActivation(bundleId: "com.apple.Safari", name: "Safari", icon: img)
         XCTAssertEqual(tracker.current?.name, "Safari")
+        XCTAssertEqual(tracker.current?.bundleID, "com.apple.Safari")
     }
 
     func testApplyActivation_doesNotUpdateForSelf() {

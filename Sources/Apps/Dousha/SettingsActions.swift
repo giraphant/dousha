@@ -34,4 +34,7 @@ struct SettingsActions {
     var retranscribe: @MainActor (String) -> Void
     /// Whether a re-transcription may start now (controller idle / error).
     var canRetranscribe: @MainActor () -> Bool
+
+    var requestMicrophone: @MainActor () async -> Void
+    var requestSpeechRecognition: @MainActor () async -> Void
 }

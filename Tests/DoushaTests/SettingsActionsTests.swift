@@ -39,7 +39,9 @@ final class SettingsActionsTests: XCTestCase {
             setMenuBarIconVisible: { menuBarVisible = $0 },
             resetDoubaoCredentials: { doubaoResets += 1 },
             retranscribe: { _ in },
-            canRetranscribe: { true }
+            canRetranscribe: { true },
+            requestMicrophone: {},
+            requestSpeechRecognition: {}
         )
 
         XCTAssertFalse(actions.isLaunchAtLoginEnabled())
