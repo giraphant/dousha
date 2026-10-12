@@ -260,24 +260,6 @@ struct SettingsView: View {
                 }
             }
 
-            Section("诊断") {
-                Toggle(isOn: $saveDiagnosticLogs) {
-                    Text("保存诊断日志")
-                    Text("用于排查问题；不含听写内容")
-                }
-                .onChange(of: saveDiagnosticLogs) { _, enabled in
-                    actions.setSaveDiagnosticLogs(enabled)
-                }
-                HStack {
-                    Button("在 Finder 中显示") { actions.revealDiagnosticLog() }
-                    Button("删除日志…", role: .destructive) { confirmingLogDeletion = true }
-                }
-                .controlSize(.small)
-                if !logDeletionError.isEmpty {
-                    statusLabel(logDeletionError, isError: true)
-                }
-            }
-
             Section("热键") {
                 LabeledContent("触发键") {
                     HStack(spacing: 8) {
@@ -1062,6 +1044,23 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("存储")
+            }
+            Section("诊断") {
+                Toggle(isOn: $saveDiagnosticLogs) {
+                    Text("保存诊断日志")
+                    Text("用于排查问题；不含听写内容")
+                }
+                .onChange(of: saveDiagnosticLogs) { _, enabled in
+                    actions.setSaveDiagnosticLogs(enabled)
+                }
+                HStack {
+                    Button("在 Finder 中显示") { actions.revealDiagnosticLog() }
+                    Button("删除日志…", role: .destructive) { confirmingLogDeletion = true }
+                }
+                .controlSize(.small)
+                if !logDeletionError.isEmpty {
+                    statusLabel(logDeletionError, isError: true)
+                }
             }
             Section("最近录音") {
                 if historyEntries.isEmpty {
