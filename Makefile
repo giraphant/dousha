@@ -38,8 +38,10 @@ CODESIGN_ENTITLEMENTS ?= --entitlements Resources/Dousha.entitlements
 
 all: build
 
+# The auto-generated package scheme enables code coverage, which xcodebuild
+# also applies to plain builds: 0.4.5–0.5.0 shipped ~15 MB of instrumentation.
 build:
-	xcodebuild -scheme Dousha -configuration Release -destination 'platform=macOS,arch=arm64' -derivedDataPath $(BUILD_DIR)/xcode CODE_SIGNING_ALLOWED=NO build
+	xcodebuild -scheme Dousha -configuration Release -destination 'platform=macOS,arch=arm64' -derivedDataPath $(BUILD_DIR)/xcode CODE_SIGNING_ALLOWED=NO ENABLE_CODE_COVERAGE=NO build
 	@rm -rf $(APP_BUNDLE)
 	@mkdir -p $(APP_BUNDLE)/Contents/MacOS
 	@mkdir -p $(APP_BUNDLE)/Contents/Resources
@@ -57,10 +59,10 @@ build:
 	@# bundle and codesign rejects such "detritus" (broke the 0.4.0 notarize).
 	@xattr -cr $(APP_BUNDLE)
 	@if security find-identity -v -p codesigning | grep -F "$(CODESIGN_IDENTITY)" >/dev/null 2>&1; then \
-		codesign --force --deep $(CODESIGN_OPTIONS) $(CODESIGN_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(APP_BUNDLE); \
+		codesign --force --deep $(CODESIGN_OPTIONS) $(CODESIGN_ENTITLEMENTS) --sign "$(CODESIGN_IDENTITY)" $(APP_BUNDLE) && \
 		echo "Built $(APP_BUNDLE) (signed with: $(CODESIGN_IDENTITY))"; \
 	else \
-		codesign --force --deep --sign - $(APP_BUNDLE); \
+		codesign --force --deep --sign - $(APP_BUNDLE) && \
 		echo "Built $(APP_BUNDLE) (ad-hoc signed — Developer ID cert missing from keychain; TCC grants will not persist across rebuilds)"; \
 	fi
 
