@@ -2,7 +2,6 @@ import Foundation
 import ASRSupport
 import ConcurrencySupport
 import MLXAudioSTT
-import MLX
 
 /// The tap only appends bytes under this lock. Swapping the buffer on drain
 /// keeps conversion, inference, actor hops, tasks and logging off the audio thread.
@@ -145,11 +144,27 @@ internal struct MLXPreparedSession: Sendable {
     let finalPass: @Sendable (MLXFinalPassRequest) async throws -> String
 }
 
+/// Batch-only deadline; streaming shutdown retains its separate bounded waits.
+public struct MLXFinalPassDeadline: Sendable {
+    public let baseSeconds: TimeInterval
+    public let audioRatio: Double
+
+    public init(baseSeconds: TimeInterval = 5, audioRatio: Double = 0.10) {
+        self.baseSeconds = max(0, baseSeconds)
+        self.audioRatio = max(0, audioRatio)
+    }
+
+    public func seconds(forAudioSeconds audioSeconds: Double) -> TimeInterval {
+        max(baseSeconds, audioRatio * audioSeconds)
+    }
+}
+
 public struct MLXFinalPassMetrics: Sendable {
     public let source: String
     /// Elapsed batch time at delivery; on a deadline this is not its eventual runtime.
     public let batchMilliseconds: Double
     public let audioSeconds: Double
+    public let deadlineSeconds: TimeInterval
     public let streamLength: Int
     public let finalLength: Int
 }
@@ -254,7 +269,7 @@ public actor MLXStreamingASR {
     private let model: MLXModelDescriptor
     private let store: MLXModelStore
     private let finalPassEnabled: Bool
-    private let finalPassTimeout: TimeInterval
+    private let finalPassDeadline: MLXFinalPassDeadline
     private let streamEndTimeout: TimeInterval
     private let streamCleanupTimeout: TimeInterval
     internal typealias SessionFactory = @Sendable (MLXModelDescriptor, MLXModelStore, MLXSessionLease, String?) async throws -> MLXPreparedSession
@@ -303,23 +318,23 @@ public actor MLXStreamingASR {
     private var recording: Recording?
 
     public init(model: MLXModelDescriptor = MLXModelCatalog.defaultModel, store: MLXModelStore = .shared,
-                finalPass: Bool = true, finalPassTimeout: TimeInterval = 30) {
+                finalPass: Bool = true, finalPassDeadline: MLXFinalPassDeadline = MLXFinalPassDeadline()) {
         self.model = model
         self.store = store
         self.finalPassEnabled = finalPass
-        self.finalPassTimeout = max(0, finalPassTimeout)
+        self.finalPassDeadline = finalPassDeadline
         self.streamEndTimeout = 10
         self.streamCleanupTimeout = 3
         self.makeSession = Self.makeNativeSession
     }
 
     internal init(store: MLXModelStore = .shared, finalPass: Bool = true,
-                  finalPassTimeout: TimeInterval = 30, streamEndTimeout: TimeInterval = 10,
+                  finalPassDeadline: MLXFinalPassDeadline = MLXFinalPassDeadline(), streamEndTimeout: TimeInterval = 10,
                   streamCleanupTimeout: TimeInterval = 3, makeSession: @escaping SessionFactory) {
         self.model = MLXModelCatalog.defaultModel
         self.store = store
         self.finalPassEnabled = finalPass
-        self.finalPassTimeout = max(0, finalPassTimeout)
+        self.finalPassDeadline = finalPassDeadline
         self.streamEndTimeout = streamEndTimeout
         self.streamCleanupTimeout = streamCleanupTimeout
         self.makeSession = makeSession
@@ -331,17 +346,7 @@ public actor MLXStreamingASR {
         try Task.checkCancellation()
         // Construction and generation both allocate MLX arrays; run off main.
         return await Task.detached(priority: .userInitiated) {
-            MLXPreparedSession(
-                stream: StreamingInferenceSession(model: loaded.model, config: StreamingConfig(language: language)),
-                finalPass: { request in
-                    let samples = MLXASRSupport.floatSamples(fromPCM16LE: request.pcm)
-                    guard !samples.isEmpty else { return "" }
-                    return loaded.model.generate(audio: MLXArray(samples), maxTokens: 8192,
-                                                 temperature: 0, context: request.context,
-                                                 language: request.language, chunkDuration: 1200,
-                                                 minChunkDuration: 1, repetitionPenalty: 1.15,
-                                                 repetitionContextSize: 32).text
-                })
+            loaded.prepareSession(language: language)
         }.value
     }
 
@@ -505,13 +510,14 @@ public actor MLXStreamingASR {
         }
         let pcm = input.fullAudio(generation)
         let audioSeconds = Double(pcm.count / 2) / 16_000
+        let deadlineSeconds = finalPassDeadline.seconds(forAudioSeconds: audioSeconds)
         let work = startFinalPass(current, pcm: pcm)
         // Includes up to 3s for streaming cleanup. After a streaming timeout,
         // natural .ended is still required before batch inference can start.
         // A detached owner retains the lease if either stage exceeds this wait.
         let output: WaitOutcome<MLXFinalPassWork.Output>
         if case .signaled = await work.ready.wait(timeout: streamCleanupTimeout) {
-            output = await work.result.wait(timeout: max(0, finalPassTimeout - work.elapsedMilliseconds / 1_000))
+            output = await work.result.wait(timeout: max(0, deadlineSeconds - work.elapsedMilliseconds / 1_000))
         } else {
             output = .timeout
         }
@@ -519,7 +525,7 @@ public actor MLXStreamingASR {
         guard isCurrent(current) else { return }
         let batch: String
         let milliseconds: Double
-        if case .signaled(let value) = output, value.milliseconds <= finalPassTimeout * 1_000 {
+        if case .signaled(let value) = output, value.milliseconds <= deadlineSeconds * 1_000 {
             batch = value.text
             milliseconds = value.milliseconds
         } else {
@@ -579,10 +585,11 @@ public actor MLXStreamingASR {
 
     private func recordFinalPass(_ current: Recording, text: String, fallback: String,
                                  batchMilliseconds: Double, audioSeconds: Double, source: String = "stream") {
+        let deadlineSeconds = finalPassDeadline.seconds(forAudioSeconds: audioSeconds)
         finalPassMetrics = MLXFinalPassMetrics(source: source, batchMilliseconds: batchMilliseconds,
-                                               audioSeconds: audioSeconds, streamLength: fallback.count,
+                                               audioSeconds: audioSeconds, deadlineSeconds: deadlineSeconds, streamLength: fallback.count,
                                                finalLength: text.count)
-        log(current, "finalPass source=\(source) batchMs=\(Int(batchMilliseconds)) audioSeconds=\(audioSeconds) streamLength=\(fallback.count) finalLength=\(text.count)")
+        log(current, "finalPass source=\(source) batchMs=\(Int(batchMilliseconds)) audioSeconds=\(audioSeconds) deadlineSeconds=\(deadlineSeconds) streamLength=\(fallback.count) finalLength=\(text.count)")
     }
 
     public nonisolated func cancel() {

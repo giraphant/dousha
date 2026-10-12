@@ -8,6 +8,7 @@ import AVFoundation
 import ServiceManagement
 import DoubaoASR
 import SonioxASR
+import MLXASR
 import ASRSupport
 import ConcurrencySupport
 
@@ -197,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if prefs.activeEngines.contains(.doubao) {
             DoubaoCredentialStore.shared.warmup()
         }
+        if prefs.activeEngines.contains(.qwen3) { MLXModelStore.shared.warmup(prefs.qwen3Model) }
     }
 
     /// If the app is relaunched while already running (Finder/Spotlight), bring
@@ -389,8 +391,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func handleEngineRoutingChanged() {
         // Routing slots / primary language changed in Settings. Refresh the menu
-        // (engine summary, checkmarks, language) and warm Doubao if now active.
+        // (engine summary, checkmarks, language) and warm active engines.
         if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
+        if prefs.activeEngines.contains(.qwen3) { MLXModelStore.shared.warmup(prefs.qwen3Model) }
         menuBar.rebuildMenu()
     }
 

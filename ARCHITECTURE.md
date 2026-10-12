@@ -109,7 +109,11 @@ fatal `.error` stream event.
 
 `MLXBackend` passes the snapshotted Dousha language identifier (`zh-CN`,
 `en-US`, `auto`) unchanged; `MLXStreamingASR` alone maps it to the Qwen3
-language name. Nil, auto and unknown identifiers mean auto-detect. Local
+language name. Nil, auto and unknown identifiers mean auto-detect. Keep the
+user's selection for both streaming and batch: in the 2026-10-12 code-switched
+clip comparison, forced Chinese retained a Chinese lead-in that the full-audio
+`auto` pass dropped. The earlier observation that forced Chinese garbled English
+was streaming-only, so it is not evidence to force auto for the final pass. Local
 streaming text is a HUD preview; stop transcribes the entire retained recording
 with Qwen3's batch API, and that nonempty result becomes the final text. Empty,
 failed or overdue batch output falls back to the filtered streaming text.
@@ -141,7 +145,7 @@ visibility. Timing constants live as statics on the controller
 | `SpeechBackend` | one session = one `AsyncStream<RecordingEvent>`; `stop()` yields exactly one terminal `.final`, `cancel()` finishes with none | `MockSpeechBackend` (RecordingControllerTests) |
 | `PushCaptureEngine` (+ `PCMCaptureEngine` / `BufferCaptureEngine`) | engines receive pushed audio from the hub; two-phase `beginSession`/`openStream` | `MockBackend` (MultiEngineBackendTests, hub = nil) |
 | `MLXBackend` (`Engine.local`, `PCMCaptureEngine`) | adapts prepare / open / ingest / stop / cancel to `MLXStreamingASR`; snapshots the unmapped language identifier and glossary context | injected prepare closure + isolated Preferences (MLXEngineWiringTests) |
-| `MLXModelStore` loader + process-wide session lease | loads/caches Qwen3 weights once; serializes local inference sessions | injected failing/suspended loader (MLXASRLifecycleTests); lease tests never allocate MLX arrays |
+| `MLXModelStore` loader + process-wide session lease | loads/caches Qwen3 weights once; serializes prewarm and local inference sessions | injected loader / `MLXLoadedModel` fake (MLXASRLifecycleTests, MLXModelPrewarmTests); lease tests never allocate MLX arrays |
 | `MLXPreparedSession` stream + final-pass runner | exercises real stop/cancel/deadline/lease ownership without a model | fake event stream + suspended runner (MLXFinalPassTests) |
 | `RecordingEnvironment` | struct-of-closures: ALL side effects the controller performs (HUD, inject, refine, scheduling, clock) | closure fakes + virtual clock |
 | `SettingsActions` | struct-of-closures: system-touching settings effects (login item, dock icon, credentials) | closure fakes |
@@ -218,19 +222,37 @@ type is used, re-derive the reason or the annotation becomes a lie.
   auto-language headers.
   Partials, errors and the one stop completion dispatch on main and recheck
   the generation there; cancel immediately quarantines input and callbacks.
-- **`MLXModelStore` / `MLXLoadedModel` (`@unchecked Sendable`)** — the store
+- **`MLXModelStore` / `QwenLoadedModel` (`@unchecked Sendable`)** — the store
   actor caches weights and coalesces loading/warmup. A single process-wide
   lease gate, shared even by separately constructed stores, covers model load,
-  replacement, the complete streaming session and the subsequent batch pass.
+  replacement, kernel prewarm, the complete streaming session and the subsequent
+  batch pass. App launch (after hotkey installation) and engine-routing changes
+  call fire-and-forget `warmup` when Qwen3 is active; menu/model selection also
+  uses this path. A preload-owned new load runs one 1s silent batch (8-token
+  limit) off main under the same lease, discarding output. Cached models and
+  recording-owned loads never prewarm, including a warmup joining or queued
+  behind such a load. Prewarm failure logs an error but leaves weights `.ready`;
+  release the lease only after prewarm actually returns. State `.ready` denotes
+  loaded weights, not completion of prewarm; recordings still wait on the lease.
+  `[MLXModelStore] prewarm repoID=… ms=…` records its cost.
+  A separate 1s streaming-session prewarm was tested on the two 2026-10-12
+  clips with 1.7B-8bit: first preview was 145/143ms versus 147/153ms with
+  batch-only prewarm, while total prewarm grew from 89–92ms to 200ms. This
+  small single-run difference did not demonstrate a useful streaming benefit;
+  keep only the batch prewarm (the installed app's initial batch was 1225ms
+  versus 284–377ms subsequently).
   Streaming cleanup precedes batch generation; never run both at once.
-  The loaded model is never
-  mutated by the store after publication and is only used by the lease holder;
+  The store never mutates the published model; only the lease holder uses it;
   model construction/loading runs off main. Cancelled callers do not cancel a
   shared download, and setup retains the lease until that load settles.
 - **MLX final-pass ownership and deadline** — stop waits up to 30s for setup,
   then up to 10s for `.ended` (saving the latest display text on timeout), then
-  up to 3s for streaming cleanup and up to `finalPassTimeout` (default 30s)
-  for batch. The batch runs off main with temperature 0, repetition penalty
+  up to 3s for streaming cleanup and up to `max(baseSeconds, audioRatio ×
+  audioSeconds)` for batch. The injectable `MLXFinalPassDeadline` defaults to
+  5s base and 0.10 ratio: ≤50s audio gets 5s; a five-minute recording gets 30s.
+  Batch elapsed time starts when generation begins, not during stream cleanup.
+  The existing `finalPass` log and smoke metrics include the computed deadline.
+  The batch runs off main with temperature 0, repetition penalty
   1.15 and upstream's 32-token repetition context: a modest discouragement of
   loops without aggressively suppressing ordinary repeated words. The full PCM
   is passed in one `generate` call (upstream only splits very long audio at its
@@ -346,6 +368,8 @@ xcodebuild -scheme smoke-cli -configuration Release \
   ~/Library/Caches/Dousha/last_recording.wav --language auto --final-pass off
 .build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
   ~/Library/Caches/Dousha/last_recording.wav --language zh-CN --context 'Vocabulary: Dousha, Qwen3'
+.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
+  ~/Library/Caches/Dousha/last_recording.wav --language zh-CN --realtime --prewarm
 ```
 
 `mlx-transcribe` uses `WavReader` (16kHz mono s16le only) and the actual engine
@@ -356,12 +380,17 @@ accepts a compatible Hugging Face repo. Model load time includes any download
 ingest, and stop latency ends at completion. The command prints partial count,
 final length, streaming preview and final transcript; keep private transcripts
 out of shared reports. `--final-pass on|off` defaults to on; `--context` supplies
-only the final batch system message. `stop_to_final_ms` includes streaming drain,
+only the final batch system message. `--prewarm` awaits the same preload path
+used at launch before opening the recording; `preload_ms` includes load and
+kernel prewarm, while `model_load_ms` then measures the cached open. Compare
+with/without prewarm in separate fresh processes. `stop_to_final_ms` includes streaming drain,
 cleanup and batch; `batch_ms` measures batch only (elapsed time at fallback
-delivery on a deadline), and `final_source` is `batch` or `stream`.
-It services main-queue callbacks through async waits, with 600s model-load and
-80s stop watchdogs. Inspect engine logs for `finalTimedOut` even when a nonempty
-fallback makes the command succeed.
+delivery on a deadline), `deadline_seconds` is the computed batch allowance,
+and `final_source` is `batch` or `stream`.
+It services main-queue callbacks through async waits, with a 600s model-load
+watchdog after open and a stop watchdog of max(80s, 48s + batch deadline).
+Inspect engine logs for `finalTimedOut` even when a nonempty fallback makes the
+command succeed.
 
 `Package.resolved` is committed and the mlx-audio-swift revision is pinned in
 `Package.swift`. Upgrade mlx-audio-swift, mlx-swift, mlx-swift-lm and their

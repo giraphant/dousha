@@ -1,15 +1,43 @@
 import Foundation
 import MLXAudioSTT
+import MLX
 import ConcurrencySupport
 
-/// Safe to transfer after loading: the store never mutates the published model,
-/// and only the holder of the process-wide lease creates a streaming session
-/// or runs its subsequent full-audio batch pass using it. MLXAudioSTT owns
-/// synchronization inside the streaming session. Do not expose
-/// the model to callers that bypass the lease (ARCHITECTURE §4).
-internal final class MLXLoadedModel: @unchecked Sendable {
+/// Offline seam for successful loads and prewarm without allocating MLX arrays.
+/// Both operations require the process-wide lease and run off main.
+internal protocol MLXLoadedModel: Sendable {
+    func prepareSession(language: String?) -> MLXPreparedSession
+    func prewarm() async throws
+}
+
+/// Safe to transfer after loading: only the process-wide lease holder accesses
+/// the native model, including prewarm, streaming and the final full-audio pass.
+/// MLXAudioSTT owns synchronization inside the streaming session (§4).
+private final class QwenLoadedModel: MLXLoadedModel, @unchecked Sendable {
     let model: Qwen3ASRModel
     init(_ model: Qwen3ASRModel) { self.model = model }
+
+    func prepareSession(language: String?) -> MLXPreparedSession {
+        MLXPreparedSession(
+            stream: StreamingInferenceSession(model: model, config: StreamingConfig(language: language)),
+            finalPass: { request in
+                let samples = MLXASRSupport.floatSamples(fromPCM16LE: request.pcm)
+                guard !samples.isEmpty else { return "" }
+                return self.model.generate(audio: MLXArray(samples), maxTokens: 8192,
+                                           temperature: 0, context: request.context,
+                                           language: request.language, chunkDuration: 1200,
+                                           minChunkDuration: 1, repetitionPenalty: 1.15,
+                                           repetitionContextSize: 32).text
+            })
+    }
+
+    func prewarm() async throws {
+        // One second of silence exercises encoder + decoder kernels. Bound the
+        // token count so a silent-input hallucination cannot prolong startup.
+        _ = model.generate(audio: MLXArray(Array(repeating: Float(0), count: 16_000)),
+                           maxTokens: 8, temperature: 0, language: "Chinese",
+                           repetitionPenalty: 1.15, repetitionContextSize: 32)
+    }
 }
 
 /// A token can be released repeatedly, including after a cancelled acquire:
@@ -75,21 +103,21 @@ public actor MLXModelStore {
     }
 
     public private(set) var state: State = .idle
-    private var cached: (repoID: String, model: MLXLoadedModel)?
-    private var inFlight: (repoID: String, task: Task<MLXLoadedModel, Error>)?
+    private var cached: (repoID: String, model: any MLXLoadedModel)?
+    private var inFlight: (repoID: String, task: Task<any MLXLoadedModel, Error>)?
     private var warming: Set<String> = []
-    private let loadModel: @Sendable (String) async throws -> MLXLoadedModel
+    private let loadModel: @Sendable (String) async throws -> any MLXLoadedModel
 
     public init() {
         loadModel = { repoID in
-            MLXLoadedModel(try await Qwen3ASRModel.fromPretrained(repoID))
+            QwenLoadedModel(try await Qwen3ASRModel.fromPretrained(repoID))
         }
         doushaLog("[MLXModelStore] state=idle")
     }
 
-    /// Offline failure/cancellation tests inject a loader that never touches
-    /// Hugging Face or Metal. The production API always uses fromPretrained.
-    internal init(loadModel: @escaping @Sendable (String) async throws -> MLXLoadedModel) {
+    /// Offline lifecycle/prewarm tests inject a loader and model operations
+    /// that never touch Hugging Face or Metal. Production uses fromPretrained.
+    internal init(loadModel: @escaping @Sendable (String) async throws -> any MLXLoadedModel) {
         self.loadModel = loadModel
         doushaLog("[MLXModelStore] state=idle")
     }
@@ -103,7 +131,8 @@ public actor MLXModelStore {
         try await MLXSessionLeaseGate.shared.acquire()
     }
 
-    private func preload(_ descriptor: MLXModelDescriptor) async {
+    /// Awaitable warmup for the smoke harness; app call sites use fire-and-forget warmup.
+    public func preload(_ descriptor: MLXModelDescriptor) async {
         if cached?.repoID == descriptor.repoID { return }
         // Coalesce warmups even while they are waiting for another session's
         // lease, including a failed load (no queue of identical retry loads).
@@ -118,7 +147,22 @@ public actor MLXModelStore {
         do {
             let lease = try await acquireSessionLease()
             do {
-                _ = try await load(descriptor, lease: lease)
+                // Recheck after waiting: a recording may have loaded this model
+                // first. Never add prewarm to a recording-triggered load.
+                if cached?.repoID != descriptor.repoID {
+                    let model = try await load(descriptor, lease: lease)
+                    await Task.detached(priority: .userInitiated) {
+                        let started = ProcessInfo.processInfo.systemUptime
+                        do {
+                            try await model.prewarm()
+                        } catch {
+                            // Weights remain usable; prewarm is only an optimization.
+                            doushaLog("[MLXModelStore] prewarmFailed repoID=\(descriptor.repoID) error=\(error.localizedDescription)")
+                        }
+                        let milliseconds = Int((ProcessInfo.processInfo.systemUptime - started) * 1_000)
+                        doushaLog("[MLXModelStore] prewarm repoID=\(descriptor.repoID) ms=\(milliseconds)")
+                    }.value
+                }
             } catch {
                 // load() publishes and logs the error; warmup never emits an
                 // engine error or changes an active recording's callbacks.
@@ -133,7 +177,7 @@ public actor MLXModelStore {
     /// Keeping the lease throughout loading prevents a model switch while the
     /// old session is still draining or running its final batch pass. A cancelled caller does not cancel the
     /// shared download; its setup path releases the lease after the load settles.
-    internal func load(_ descriptor: MLXModelDescriptor, lease: MLXSessionLease) async throws -> MLXLoadedModel {
+    internal func load(_ descriptor: MLXModelDescriptor, lease: MLXSessionLease) async throws -> any MLXLoadedModel {
         if let cached, cached.repoID == descriptor.repoID { return cached.model }
         if let inFlight, inFlight.repoID == descriptor.repoID {
             return try await inFlight.task.value
