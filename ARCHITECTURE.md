@@ -309,7 +309,9 @@ without new evidence.
 - **`SettingsView` is one struct; panes are not child views.** API keys and
   test results live only in `@State` until 保存并测试; `NavigationSplitView`
   destroys child views on pane switch, so child-view panes would silently drop
-  unsaved edits.
+  unsaved edits. Sheets follow the same rule: present them from `SettingsView`
+  and keep their editable state there across dismissal; helpers accept only
+  values, bindings, and closures, without owning draft state.
 - **`HotkeyMonitor` and `CancelKeyMonitor` stay separate classes.** The shared
   part (tap lifecycle) is already extracted into `EventTap`; merging the rest
   couples two independently-fragile event paths.
