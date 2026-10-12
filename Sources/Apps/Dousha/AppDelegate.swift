@@ -102,22 +102,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             inject: { [injector] text in injector.inject(text) },
             isRefineEnabled: { [prefs] in
-                prefs.llmEnabled && TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
-                                                model: prefs.llmModel).isConfigured
+                let enabled = prefs.llmEnabled
+                let configured = TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
+                                             model: prefs.llmModel).isConfigured
+                if !enabled || !configured {
+                    doushaLog("[TextRefiner] bypassed reason=\(enabled ? "not_configured" : "disabled") enabled=\(enabled) configured=\(configured)")
+                }
+                return enabled && configured
             },
             refineMode: { [prefs] in prefs.refineMode },
             refineImmediate: { [prefs] text, done in
                 let refiner = TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
-                                          model: prefs.llmModel)
+                                          model: prefs.llmModel, systemPrompt: prefs.llmSystemPrompt)
                 Task { let refined = await refiner.refine(text); done(refined) }
             },
             refineLater: { [prefs] text in
+                let traceId = UUID().uuidString
+                let originalChangeCount = NSPasteboard.general.changeCount
                 let refiner = TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
-                                          model: prefs.llmModel)
-                _ = refiner.refineLater(text) { refined in
+                                          model: prefs.llmModel, systemPrompt: prefs.llmSystemPrompt)
+                _ = refiner.refineLater(text, traceId: traceId) { refined in
                     let pb = NSPasteboard.general
-                    pb.clearContents(); pb.setString(refined, forType: .string)
-                    doushaLog("[Dousha] deferred refine wrote refined text to clipboard (len=\(refined.count))")
+                    let changedWhileRefining = pb.changeCount != originalChangeCount
+                    pb.clearContents()
+                    let setOK = pb.setString(refined, forType: .string)
+                    if setOK {
+                        doushaLog("[Dousha] deferred refine wrote refined text to clipboard (len=\(refined.count)) traceId=\(traceId) OK=true changedWhileRefining=\(changedWhileRefining) changeCount=\(pb.changeCount)")
+                    } else {
+                        doushaLog("[Dousha] deferred refine clipboard write failed traceId=\(traceId) OK=false changedWhileRefining=\(changedWhileRefining)")
+                    }
                 }
             },
             language: { [prefs] in prefs.language },

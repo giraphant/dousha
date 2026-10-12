@@ -12,11 +12,11 @@ final class SonioxConfigTests: XCTestCase {
         let obj = try configObject(apiKey: "secret-key")
 
         XCTAssertEqual(obj["api_key"] as? String, "secret-key")
-        XCTAssertEqual(obj["model"] as? String, "stt-rt-v4")
+        XCTAssertEqual(obj["model"] as? String, "stt-rt-v5")
         XCTAssertEqual(obj["audio_format"] as? String, "pcm_s16le")
         XCTAssertEqual(obj["sample_rate"] as? Int, 16_000)
         XCTAssertEqual(obj["num_channels"] as? Int, 1)
-        XCTAssertEqual(obj["enable_endpoint_detection"] as? Bool, true)
+        XCTAssertEqual(obj["enable_endpoint_detection"] as? Bool, false)
     }
 
     func test_configOmitsLanguageHintsAndTranslationInAutoMode() throws {
@@ -37,7 +37,7 @@ final class SonioxConfigTests: XCTestCase {
 
     func test_asyncConstants() {
         XCTAssertEqual(SonioxConfig.asyncBaseURL, "https://api.soniox.com")
-        XCTAssertEqual(SonioxConfig.asyncModel, "stt-async-v4")
+        XCTAssertEqual(SonioxConfig.asyncModel, "stt-async-v5")
     }
 
     func test_sonioxModeRawValuesRoundTrip() {
@@ -74,7 +74,7 @@ final class SonioxConfigTests: XCTestCase {
         XCTAssertEqual(ctx["terms"] as? [String], ["布迪厄", "哈贝马斯"])
         // Required fields still present alongside context.
         XCTAssertEqual(obj["api_key"] as? String, "k")
-        XCTAssertEqual(obj["model"] as? String, "stt-rt-v4")
+        XCTAssertEqual(obj["model"] as? String, "stt-rt-v5")
     }
 
     func test_config_isValidJSONWithContext() {
@@ -85,8 +85,8 @@ final class SonioxConfigTests: XCTestCase {
     // MARK: - Async POST body (QUA-133)
 
     func test_asyncBody_carriesModelAndFileId() {
-        let body = SonioxAsyncClient.transcriptionRequestBody(model: "stt-async-v4", fileId: "f1", contextTerms: [])
-        XCTAssertEqual(body["model"] as? String, "stt-async-v4")
+        let body = SonioxAsyncClient.transcriptionRequestBody(model: "stt-async-v5", fileId: "f1", contextTerms: [])
+        XCTAssertEqual(body["model"] as? String, "stt-async-v5")
         XCTAssertEqual(body["file_id"] as? String, "f1")
     }
 

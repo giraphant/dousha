@@ -1,9 +1,9 @@
 import Foundation
 
 /// How Soniox transcribes a recording.
-/// - `realtime`: stream PCM live over the WebSocket (`stt-rt-v4`), low latency.
+/// - `realtime`: stream PCM live over the WebSocket (`stt-rt-v5`), low latency.
 /// - `async`: capture to a WAV, then upload the whole file to the async REST
-///   API (`stt-async-v4`) on stop — higher accuracy, no live feedback.
+///   API (`stt-async-v5`) on stop — higher accuracy, no live feedback.
 public enum SonioxMode: String, Sendable, CaseIterable {
     case realtime
     case async
@@ -17,14 +17,14 @@ public enum SonioxMode: String, Sendable, CaseIterable {
 /// subsequent frame is binary PCM.
 public enum SonioxConfig {
     public static let endpoint = "wss://stt-rt.soniox.com/transcribe-websocket"
-    public static let model = "stt-rt-v4"
+    public static let model = "stt-rt-v5"
     public static let sampleRate = 16_000
     public static let channels = 1
 
     /// Async (batch) REST API. Higher accuracy than real-time, no live feedback:
     /// the whole WAV is uploaded on stop, transcribed server-side, then polled.
     public static let asyncBaseURL = "https://api.soniox.com"
-    public static let asyncModel = "stt-async-v4"
+    public static let asyncModel = "stt-async-v5"
 
     /// 20ms of int16 mono @16kHz = 320 samples = 640 bytes.
     public static let samplesPerFrame = 320
@@ -61,7 +61,13 @@ public enum SonioxConfig {
             "audio_format": "pcm_s16le",
             "sample_rate": sampleRate,
             "num_channels": channels,
-            "enable_endpoint_detection": true
+            // Dictation ends explicitly via the end-of-audio marker in stop().
+            // Automatic endpoints can bake a sentence mark into a thinking
+            // pause before the rest of the phrase arrives. Even the maximum
+            // 3s endpoint delay cannot cover long pauses (saved-WAV regression:
+            // "一种 [13s pause] 英雄式" became "一种。英雄式"). Keep streaming
+            // partials, but let the user's stop action trigger the final flush.
+            "enable_endpoint_detection": false
         ]
         if let context = contextObject(terms: contextTerms) {
             payload["context"] = context
