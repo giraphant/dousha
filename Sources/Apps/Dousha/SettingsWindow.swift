@@ -53,8 +53,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .glossary: return "个性词库"
         case .enhance:  return "智能增强"
         case .history:  return "历史记录"
-        case .statistics: return "统计"
-        case .permissions: return "权限"
+        case .statistics:  return "听写统计"
+        case .permissions: return "权限管理"
         }
     }
 
