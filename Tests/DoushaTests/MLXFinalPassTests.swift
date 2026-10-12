@@ -195,13 +195,17 @@ final class MLXFinalPassTests: XCTestCase {
         }
         await prepare(engine)
         let completed = expectation(description: "one fallback completion")
+        completed.expectedFulfillmentCount = 1
+        completed.assertForOverFulfill = true
         let count = Lock(0)
-        engine.stop { result in
+        let completion: @Sendable (TranscriptionResult) -> Void = { result in
             XCTAssertEqual(result.text, "preview")
             count.withLock { $0 += 1 }
             completed.fulfill()
         }
-        engine.stop { _ in XCTFail("Duplicate stop emitted a completion") }
+        // Nonisolated stop calls schedule unordered tasks; either callback may win.
+        engine.stop(completion: completion)
+        engine.stop(completion: completion)
         _ = try await started.wait()
         await fulfillment(of: [completed], timeout: 1)
         let store = MLXModelStore()
