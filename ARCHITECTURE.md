@@ -50,7 +50,7 @@ Rules:
 - Library targets never read `Preferences` (or any app singleton). The app
   snapshots config at recording start and passes it in
   (`SonioxBackend`/`DoubaoBackend` snapshot glossary + language and `MLXBackend`
-  snapshots the language identifier in `beginSession`). This keeps mid-recording
+  snapshots the language identifier and glossary in `beginSession`). This keeps mid-recording
   Settings changes from mutating a live session, and keeps the libraries testable.
 - All logging goes through `doushaLog` (ConcurrencySupport). Log strings are part
   of the observable surface — field debugging greps for them — so don't reword
@@ -110,9 +110,13 @@ fatal `.error` stream event.
 `MLXBackend` passes the snapshotted Dousha language identifier (`zh-CN`,
 `en-US`, `auto`) unchanged; `MLXStreamingASR` alone maps it to the Qwen3
 language name. Nil, auto and unknown identifiers mean auto-detect. Local
-streaming does not yet receive glossary/context hints because the upstream
-session lacks that input ([giraphant/dousha#53](https://github.com/giraphant/dousha/issues/53));
-downstream `TranscriptCorrector` still applies local corrections.
+streaming text is a HUD preview; stop transcribes the entire retained recording
+with Qwen3's batch API, and that nonempty result becomes the final text. Empty,
+failed or overdue batch output falls back to the filtered streaming text.
+`MLXBackend` snapshots the enabled, normalized glossary as a short plain-text
+vocabulary list for the batch system context. Streaming still cannot receive
+context ([giraphant/dousha#53](https://github.com/giraphant/dousha/issues/53));
+downstream `TranscriptCorrector` also continues to apply local corrections.
 
 Fatal ≠ session end during live capture (issue #46): a fatal `.error` arriving
 while the controller is still `.recording` is latched (`pendingErrorMessage`),
@@ -136,8 +140,9 @@ visibility. Timing constants live as statics on the controller
 |---|---|---|
 | `SpeechBackend` | one session = one `AsyncStream<RecordingEvent>`; `stop()` yields exactly one terminal `.final`, `cancel()` finishes with none | `MockSpeechBackend` (RecordingControllerTests) |
 | `PushCaptureEngine` (+ `PCMCaptureEngine` / `BufferCaptureEngine`) | engines receive pushed audio from the hub; two-phase `beginSession`/`openStream` | `MockBackend` (MultiEngineBackendTests, hub = nil) |
-| `MLXBackend` (`Engine.local`, `PCMCaptureEngine`) | adapts prepare / open / ingest / stop / cancel to `MLXStreamingASR`; snapshots the unmapped language identifier | injected prepare closure + isolated Preferences (MLXEngineWiringTests) |
+| `MLXBackend` (`Engine.local`, `PCMCaptureEngine`) | adapts prepare / open / ingest / stop / cancel to `MLXStreamingASR`; snapshots the unmapped language identifier and glossary context | injected prepare closure + isolated Preferences (MLXEngineWiringTests) |
 | `MLXModelStore` loader + process-wide session lease | loads/caches Qwen3 weights once; serializes local inference sessions | injected failing/suspended loader (MLXASRLifecycleTests); lease tests never allocate MLX arrays |
+| `MLXPreparedSession` stream + final-pass runner | exercises real stop/cancel/deadline/lease ownership without a model | fake event stream + suspended runner (MLXFinalPassTests) |
 | `RecordingEnvironment` | struct-of-closures: ALL side effects the controller performs (HUD, inject, refine, scheduling, clock) | closure fakes + virtual clock |
 | `SettingsActions` | struct-of-closures: system-touching settings effects (login item, dock icon, credentials) | closure fakes |
 
@@ -189,6 +194,10 @@ type is used, re-derive the reason or the annotation becomes a lie.
 - **`MLXStreamingASR` / `MLXSessionInput`** — lifecycle state is actor-isolated;
   `ingest` is a nonisolated, lock-only PCM append for the real-time audio path:
   no conversion, MLX calls, tasks, logging or actor hops on the tap thread.
+  The same lock protects both the drain buffer and an append-only full-session
+  PCM copy; prepare, cancel and completion clear both. Only append happens on
+  the tap thread. A final-pass request may retain its frozen PCM after delivery
+  or cancellation until the non-cancellable batch call returns.
   The detached feeder wakes every 100ms and schedules PCM conversion +
   `feedAudio` on a private serial queue, off both audio and main threads.
   Final drain, native `stop` and native `cancel` use that same queue, so they
@@ -201,24 +210,48 @@ type is used, re-derive the reason or the annotation becomes a lie.
   the transcript; confirmed/provisional events must not be appended again.
   `MLXTranscriptState` strips complete Qwen protocol headers from partials and
   finals, hiding incomplete tails only in auto mode and keeping a safe confirmed prefix.
+  The preview and streaming fallback also shorten five-or-more consecutive
+  repeats of a 1–4 character unit (with optional punctuation) to four repeats;
+  ordinary reduplication such as 哈哈哈 / 很多很多 stays untouched. This guard
+  never transforms batch text. Batch output is still passed through
+  `QwenTranscriptFilter`, although upstream `parseGeneratedChunk` already strips
+  auto-language headers.
   Partials, errors and the one stop completion dispatch on main and recheck
   the generation there; cancel immediately quarantines input and callbacks.
 - **`MLXModelStore` / `MLXLoadedModel` (`@unchecked Sendable`)** — the store
   actor caches weights and coalesces loading/warmup. A single process-wide
   lease gate, shared even by separately constructed stores, covers model load,
-  replacement and the complete streaming session. The loaded model is never
+  replacement, the complete streaming session and the subsequent batch pass.
+  Streaming cleanup precedes batch generation; never run both at once.
+  The loaded model is never
   mutated by the store after publication and is only used by the lease holder;
   model construction/loading runs off main. Cancelled callers do not cancel a
   shared download, and setup retains the lease until that load settles.
-- **MLX bounded teardown** — stop waits up to 30s for setup, then up to 10s
-  for `.ended` (falling back to the latest display text), then up to 3s for
-  cleanup before returning. Cleanup waits 3s for queued native cancel; if a
+- **MLX final-pass ownership and deadline** — stop waits up to 30s for setup,
+  then up to 10s for `.ended` (saving the latest display text on timeout), then
+  up to 3s for streaming cleanup and up to `finalPassTimeout` (default 30s)
+  for batch. The batch runs off main with temperature 0, repetition penalty
+  1.15 and upstream's 32-token repetition context: a modest discouragement of
+  loops without aggressively suppressing ordinary repeated words. The full PCM
+  is passed in one `generate` call (upstream only splits very long audio at its
+  default 1200s low-energy boundaries). `finalPass: false` disables the pass for
+  A/B smoke checks; `prepareSession` context defaults to empty for compatibility.
+  Deadline expiry delivers streaming fallback exactly once; the detached owner
+  keeps the lease until batch returns, discarding its late text. Cancel during
+  batch suppresses completion and likewise does not release the lease early.
+  Final-pass metrics log lengths and timings, never transcript or context text.
+- **MLX streaming shutdown** — cleanup waits 3s for queued native cancel; if a
   synchronous feed is stuck, it retains the lease until cancel actually returns.
   It then waits up to 3s for event-stream closure before cancelling the consumer
   and releasing the lease. Upstream `cancel()` has **no native decoder completion
   barrier**: event-stream closure is its strongest exposed signal, not proof
-  that all detached GPU work has completed. Do not describe this as an awaited
-  native shutdown or weaken the lease to permit concurrent sessions.
+  that all detached GPU work has completed. Therefore the final-pass owner
+  waits for natural `.ended` before invoking cancel/cleanup and batch, including
+  after the initial 10s wait timed out. If natural stop outlasts the cleanup
+  allowance, deliver fallback, abandon batch and retain the lease until natural
+  stop actually ends; a stuck upstream decoder can consequently block subsequent
+  sessions. Do not substitute cancel's event closure for this barrier or weaken
+  the lease to permit concurrent inference.
 - **`AudioTapHub` (actor)** — the tap closure runs on the audio thread and
   captures only local snapshots; it never hops back into the actor (real-time
   safety). The `nonisolated(unsafe) var fed` is safe because the converter
@@ -278,7 +311,7 @@ Sources/
   Engines/            one streaming ASR client per provider
     DoubaoASR/          Doubao WS client (protobuf, opus, reconnect, credentials)
     SonioxASR/          Soniox WS + async-batch client
-    MLXASR/             local Qwen3 streaming, model store and session lease
+    MLXASR/             local Qwen3 streaming preview + batch final, model store and session lease
   Apps/
     Dousha/             macOS app: AppDelegate wiring, RecordingController,
                         MultiEngineBackend + AudioTapHub, backends (adapters),
@@ -309,6 +342,10 @@ xcodebuild -scheme smoke-cli -configuration Release \
   ~/Library/Caches/Dousha/last_recording.wav --language zh-CN
 .build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
   ~/Library/Caches/Dousha/last_recording.wav --language auto --realtime
+.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
+  ~/Library/Caches/Dousha/last_recording.wav --language auto --final-pass off
+.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
+  ~/Library/Caches/Dousha/last_recording.wav --language zh-CN --context 'Vocabulary: Dousha, Qwen3'
 ```
 
 `mlx-transcribe` uses `WavReader` (16kHz mono s16le only) and the actual engine
@@ -317,9 +354,13 @@ rate with `--realtime`. It downloads the default model on first use; `--model`
 accepts a compatible Hugging Face repo. Model load time includes any download
 (open→store ready, sampled every 20ms); first-partial latency starts at first
 ingest, and stop latency ends at completion. The command prints partial count,
-final length and the transcript; keep private transcripts out of shared reports.
+final length, streaming preview and final transcript; keep private transcripts
+out of shared reports. `--final-pass on|off` defaults to on; `--context` supplies
+only the final batch system message. `stop_to_final_ms` includes streaming drain,
+cleanup and batch; `batch_ms` measures batch only (elapsed time at fallback
+delivery on a deadline), and `final_source` is `batch` or `stream`.
 It services main-queue callbacks through async waits, with 600s model-load and
-50s stop watchdogs. Inspect engine logs for `finalTimedOut` even when a nonempty
+80s stop watchdogs. Inspect engine logs for `finalTimedOut` even when a nonempty
 fallback makes the command succeed.
 
 `Package.resolved` is committed and the mlx-audio-swift revision is pinned in

@@ -10,7 +10,8 @@ final class MLXBackend: PCMCaptureEngine {
     typealias PrepareSession = @Sendable (
         @escaping @Sendable (PartialTranscript) -> Void,
         @escaping @Sendable (Error) -> Void,
-        String?
+        String?,
+        String
     ) async -> Void
 
     private let asr = MLXStreamingASR(model: MLXModelCatalog.defaultModel, store: .shared)
@@ -19,8 +20,8 @@ final class MLXBackend: PCMCaptureEngine {
 
     init(preferences: Preferences = .shared, prepareSession: PrepareSession? = nil) {
         self.preferences = preferences
-        self.prepareSession = prepareSession ?? { [asr] onPartial, onError, language in
-            await asr.prepareSession(onPartial: onPartial, onError: onError, language: language)
+        self.prepareSession = prepareSession ?? { [asr] onPartial, onError, language, context in
+            await asr.prepareSession(onPartial: onPartial, onError: onError, language: language, context: context)
         }
     }
 
@@ -35,10 +36,13 @@ final class MLXBackend: PCMCaptureEngine {
         // Pass the Dousha identifier unchanged: mapping twice turns Chinese
         // into auto-detect because "Chinese" is not a "zh" identifier.
         let language = preferences.language
-        // The glossary is not applied here yet: the upstream streaming session
-        // lacks context support (giraphant/dousha#53). TranscriptCorrector still
-        // applies local corrections downstream.
-        await prepareSession(onPartial, onError, language)
+        let terms = preferences.glossaryEnabled
+            ? GlossaryContext.normalize(preferences.glossaryTerms)
+            : []
+        // Qwen receives this verbatim as its system context, only in the final
+        // full-audio pass; streaming has no context input (giraphant/dousha#53).
+        let context = terms.isEmpty ? "" : "Vocabulary:\n" + terms.map { "- \($0)" }.joined(separator: "\n")
+        await prepareSession(onPartial, onError, language, context)
     }
 
     func openStream() { asr.openStream() }

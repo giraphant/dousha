@@ -23,7 +23,7 @@ final class MLXEngineWiringTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = Preferences(defaults: defaults)
         let languages = Lock<[String?]>([])
-        let backend = MLXBackend(preferences: preferences) { _, _, language in
+        let backend = MLXBackend(preferences: preferences) { _, _, language, _ in
             languages.withLock { $0.append(language) }
         }
         for identifier in ["zh-CN", "en-US", "auto"] {
@@ -34,5 +34,23 @@ final class MLXEngineWiringTests: XCTestCase {
         XCTAssertEqual(MLXASRSupport.qwenLanguage(forIdentifier: languages.value()[0]!), "Chinese")
         XCTAssertNil(MLXASRSupport.qwenLanguage(forIdentifier: "Chinese"),
                      "Passing an already-mapped Qwen3 name silently selects auto-detect")
+    }
+
+    @MainActor
+    func testGlossaryIsNormalizedAndDisabledGlossaryPassesEmptyContext() async {
+        let suite = "MLXEngineWiringTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = Preferences(defaults: defaults)
+        preferences.glossaryEnabled = true
+        preferences.glossaryTerms = [" Qwen3 ", "Dousha", "Qwen3", ""]
+        let contexts = Lock<[String]>([])
+        let backend = MLXBackend(preferences: preferences) { _, _, _, context in
+            contexts.withLock { $0.append(context) }
+        }
+        await backend.beginSession(onPartial: { _ in }, onError: { _ in })
+        preferences.glossaryEnabled = false
+        await backend.beginSession(onPartial: { _ in }, onError: { _ in })
+        XCTAssertEqual(contexts.value(), ["Vocabulary:\n- Qwen3\n- Dousha", ""])
     }
 }

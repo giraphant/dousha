@@ -4,7 +4,8 @@ import ConcurrencySupport
 
 /// Safe to transfer after loading: the store never mutates the published model,
 /// and only the holder of the process-wide lease creates a streaming session
-/// using it. MLXAudioSTT owns synchronization inside that session. Do not expose
+/// or runs its subsequent full-audio batch pass using it. MLXAudioSTT owns
+/// synchronization inside the streaming session. Do not expose
 /// the model to callers that bypass the lease (ARCHITECTURE §4).
 internal final class MLXLoadedModel: @unchecked Sendable {
     let model: Qwen3ASRModel
@@ -130,7 +131,7 @@ public actor MLXModelStore {
 
     /// Only a lease holder may replace the cache or create an inference session.
     /// Keeping the lease throughout loading prevents a model switch while the
-    /// old session is still draining. A cancelled caller does not cancel the
+    /// old session is still draining or running its final batch pass. A cancelled caller does not cancel the
     /// shared download; its setup path releases the lease after the load settles.
     internal func load(_ descriptor: MLXModelDescriptor, lease: MLXSessionLease) async throws -> MLXLoadedModel {
         if let cached, cached.repoID == descriptor.repoID { return cached.model }

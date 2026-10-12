@@ -7,6 +7,8 @@ struct MLXSmokeOptions {
     var model = MLXModelCatalog.defaultModel.repoID
     var language = "auto"
     var realtime = false
+    var finalPass = true
+    var context = ""
 
     private struct UsageError: LocalizedError {
         let errorDescription: String?
@@ -18,14 +20,22 @@ struct MLXSmokeOptions {
         while index < arguments.count {
             let argument = arguments[index]
             switch argument {
-            case "--model", "--language":
+            case "--model", "--language", "--context", "--final-pass":
                 guard index + 1 < arguments.count,
                       !arguments[index + 1].hasPrefix("--"), !arguments[index + 1].isEmpty else {
                     throw UsageError(errorDescription: "\(argument) requires a value")
                 }
                 index += 1
-                if argument == "--model" { model = arguments[index] }
-                else { language = arguments[index] }
+                switch argument {
+                case "--model": model = arguments[index]
+                case "--language": language = arguments[index]
+                case "--context": context = arguments[index]
+                default:
+                    guard ["on", "off"].contains(arguments[index]) else {
+                        throw UsageError(errorDescription: "--final-pass requires on or off")
+                    }
+                    finalPass = arguments[index] == "on"
+                }
             case "--realtime":
                 realtime = true
             default:
@@ -50,6 +60,7 @@ final class MLXSmokeTranscriber {
     private var firstPartialAt: TimeInterval?
     private var audioStartedAt: TimeInterval?
     private var failure: String?
+    private var previewText = ""
     private var completion: CheckedContinuation<TranscriptionResult?, Never>?
     private var watchdog: Task<Void, Never>?
 
@@ -64,14 +75,15 @@ final class MLXSmokeTranscriber {
             return false
         }
         print("wav: \(pcm.count) bytes, \(String(format: "%.3f", Double(pcm.count) / 32_000))s @16kHz mono s16le")
-        print("mlx: model=\(options.model) language=\(options.language) realtime=\(options.realtime)")
+        print("mlx: model=\(options.model) language=\(options.language) realtime=\(options.realtime) final_pass=\(options.finalPass ? "on" : "off")")
 
         let model = MLXModelDescriptor(repoID: options.model, displayName: options.model)
         let store = MLXModelStore.shared
-        let engine = MLXStreamingASR(model: model, store: store)
-        await engine.prepareSession(onPartial: { _ in
+        let engine = MLXStreamingASR(model: model, store: store, finalPass: options.finalPass)
+        await engine.prepareSession(onPartial: { partial in
             MainActor.assumeIsolated {
                 self.partialCount += 1
+                self.previewText = partial.combined
                 if self.firstPartialAt == nil { self.firstPartialAt = self.now }
             }
         }, onError: { error in
@@ -79,7 +91,7 @@ final class MLXSmokeTranscriber {
                 self.failure = error.localizedDescription
                 print("mlx: ERROR — \(error.localizedDescription)")
             }
-        }, language: options.language)
+        }, language: options.language, context: options.context)
         let loadStarted = now
         engine.openStream()
 
@@ -127,6 +139,10 @@ final class MLXSmokeTranscriber {
         let result = await finish(engine)
         let stopSeconds = now - stopStarted
         printMetrics(load: loadSeconds, stop: stopSeconds, finalLength: result?.text.count ?? 0)
+        if let metrics = await engine.finalPassMetrics {
+            print("final_pass: batch_ms=\(String(format: "%.1f", metrics.batchMilliseconds)) final_source=\(metrics.source)")
+        }
+        print("streaming_preview_text: \(previewText)")
         if let result {
             print("trace_id: \(result.traceId ?? "none")")
             print("final_text: \(result.text)")
@@ -137,12 +153,12 @@ final class MLXSmokeTranscriber {
     private func finish(_ engine: MLXStreamingASR) async -> TranscriptionResult? {
         await withCheckedContinuation { continuation in
             completion = continuation
-            // The engine allows 30s setup + 10s final + 3s cleanup. A separate
+            // The engine allows 30s setup + 10s stream + 3s cleanup + 30s batch. A separate
             // CLI watchdog makes a missing callback visible instead of hanging.
             watchdog = Task {
-                do { try await Task.sleep(for: .seconds(50)) }
+                do { try await Task.sleep(for: .seconds(80)) }
                 catch { return }
-                failure = "stop completion timed out after 50s"
+                failure = "stop completion timed out after 80s"
                 print("mlx: ERROR — \(failure!)")
                 engine.cancel()
                 resolve(nil)

@@ -122,6 +122,46 @@ final class MLXASRSupportTests: XCTestCase {
         XCTAssertFalse(input.claimCompletion(generation))
         XCTAssertFalse(input.permitsCallback(generation))
     }
+
+    func testFullPCMRetainsDrainedSamplesAndClearsOnCompletionCancelAndPrepare() {
+        let input = MLXSessionInput()
+        let first = input.prepare()
+        input.append(Data([0, 1, 2]))
+        _ = input.drain(first)
+        input.append(Data([3]))
+        input.stopAccepting(first)
+        _ = input.drain(first, final: true)
+        input.append(Data([4, 5]))
+        XCTAssertEqual(input.fullAudio(first), Data([0, 1, 2, 3]))
+        XCTAssertTrue(input.claimCompletion(first))
+        XCTAssertEqual(input.fullAudio(first), Data())
+        let second = input.prepare()
+        input.append(Data([6, 7]))
+        input.cancel(second)
+        XCTAssertEqual(input.fullAudio(second), Data())
+        let third = input.prepare()
+        input.append(Data([8, 9]))
+        let fourth = input.prepare()
+        XCTAssertEqual(input.fullAudio(third), Data())
+        XCTAssertEqual(input.fullAudio(fourth), Data())
+    }
+
+    func testPreviewGuardOnlyCollapsesDegenerateShortRepeats() {
+        for unit in ["我，", "test, ", "很多", "一二三四。", "哈"] {
+            XCTAssertEqual(MLXPreviewRepetitionGuard.collapse(String(repeating: unit, count: 38)),
+                           String(repeating: unit, count: 4))
+        }
+        for normal in ["哈哈哈", "很多很多", "我，我，我，我，", "这是正常句子。", "go away, go again", "一二三四五一二三四五"] {
+            XCTAssertEqual(MLXPreviewRepetitionGuard.collapse(normal), normal)
+        }
+        XCTAssertEqual(MLXPreviewRepetitionGuard.collapse("我，我，我，我，我"), "我，我，我，我")
+        XCTAssertEqual(MLXPreviewRepetitionGuard.collapse("哈，哈，哈，哈，哈。后面很很很很很"), "哈，哈，哈，哈。后面很很很很")
+        var state = MLXTranscriptState()
+        let partial = state.consume(.displayUpdate(confirmedText: "开头我，我，", provisionalText: String(repeating: "我，", count: 10) + "结束"))
+        XCTAssertEqual(partial?.combined, "开头我，我，我，我，结束")
+        XCTAssertEqual(state.finalText(endedText: nil), partial?.combined)
+        XCTAssertEqual(state.finalText(endedText: String(repeating: "我，", count: 38)), String(repeating: "我，", count: 4))
+    }
 }
 
 @MainActor
