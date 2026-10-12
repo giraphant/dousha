@@ -1,6 +1,7 @@
 import Foundation
 import MLXAudioSTT
 import MLX
+import HuggingFace
 import ConcurrencySupport
 
 /// Offline seam for successful loads and prewarm without allocating MLX arrays.
@@ -45,7 +46,10 @@ private final class QwenLoadedModel: MLXLoadedModel, @unchecked Sendable {
 internal struct MLXSessionLease: Sendable {
     fileprivate let id: UUID
     fileprivate let gate: MLXSessionLeaseGate
-    func release() async { await gate.release(id) }
+    fileprivate let store: MLXModelStore?
+    func release() async {
+        if await gate.release(id) { await store?.didReleaseSessionLease() }
+    }
 }
 
 /// Shared even by separately constructed stores: two engine instances must
@@ -55,7 +59,7 @@ internal actor MLXSessionLeaseGate {
     private var owner: UUID?
     private var waiters: [(id: UUID, ready: OneShotChannel<Void>)] = []
 
-    func acquire() async throws -> MLXSessionLease {
+    func acquire(store: MLXModelStore? = nil) async throws -> MLXSessionLease {
         try Task.checkCancellation()
         let id = UUID()
         if owner == nil {
@@ -72,13 +76,14 @@ internal actor MLXSessionLeaseGate {
                 throw error
             }
         }
-        return MLXSessionLease(id: id, gate: self)
+        return MLXSessionLease(id: id, gate: self, store: store)
     }
 
-    fileprivate func release(_ id: UUID) {
+    @discardableResult
+    fileprivate func release(_ id: UUID) -> Bool {
         guard owner == id else {
             waiters.removeAll { $0.id == id }
-            return
+            return false
         }
         if waiters.isEmpty {
             owner = nil
@@ -87,6 +92,7 @@ internal actor MLXSessionLeaseGate {
             owner = next.id
             next.ready.finish(())
         }
+        return true
     }
 }
 
@@ -106,18 +112,28 @@ public actor MLXModelStore {
     private var cached: (repoID: String, model: any MLXLoadedModel)?
     private var inFlight: (repoID: String, task: Task<any MLXLoadedModel, Error>)?
     private var warming: Set<String> = []
+    // Includes requests waiting on another store's process-wide lease.
+    private var leaseRequests = 0
+    private var idleUnloadDelay: TimeInterval = 60
+    private var idleUnloadTask: Task<Void, Never>?
+    private let clearCache: @Sendable () -> Void
     private let loadModel: @Sendable (String) async throws -> any MLXLoadedModel
 
     public init() {
+        clearCache = { Memory.clearCache() }
         loadModel = { repoID in
-            QwenLoadedModel(try await Qwen3ASRModel.fromPretrained(repoID))
+            try MLXModelInventory.legacyMigration.get()
+            return QwenLoadedModel(try await Qwen3ASRModel.fromPretrained(repoID,
+                cache: HubCache(cacheDirectory: MLXModelInventory.modelsDirectory)))
         }
         doushaLog("[MLXModelStore] state=idle")
     }
 
     /// Offline lifecycle/prewarm tests inject a loader and model operations
     /// that never touch Hugging Face or Metal. Production uses fromPretrained.
-    internal init(loadModel: @escaping @Sendable (String) async throws -> any MLXLoadedModel) {
+    internal init(clearCache: @escaping @Sendable () -> Void = {},
+                  loadModel: @escaping @Sendable (String) async throws -> any MLXLoadedModel) {
+        self.clearCache = clearCache
         self.loadModel = loadModel
         doushaLog("[MLXModelStore] state=idle")
     }
@@ -128,11 +144,53 @@ public actor MLXModelStore {
     }
 
     internal func acquireSessionLease() async throws -> MLXSessionLease {
-        try await MLXSessionLeaseGate.shared.acquire()
+        idleUnloadTask?.cancel()
+        leaseRequests += 1
+        do {
+            return try await MLXSessionLeaseGate.shared.acquire(store: self)
+        } catch {
+            didReleaseSessionLease()
+            throw error
+        }
     }
 
-    /// Awaitable warmup for the smoke harness; app call sites use fire-and-forget warmup.
+    /// Applies to the next idle period; an active session keeps its lease.
+    public func setIdleUnloadDelay(_ seconds: TimeInterval) {
+        idleUnloadDelay = seconds
+    }
+
+    fileprivate func didReleaseSessionLease() {
+        leaseRequests -= 1
+        scheduleIdleUnload()
+    }
+
+    private func scheduleIdleUnload() {
+        idleUnloadTask?.cancel()
+        guard leaseRequests == 0, let repoID = cached?.repoID else { return }
+        let delay = idleUnloadDelay
+        idleUnloadTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+                // Cache eviction also obeys the process-wide MLX lease.
+                let lease = try await MLXSessionLeaseGate.shared.acquire()
+                await self?.unloadIfIdle(repoID: repoID, delay: delay)
+                await lease.release()
+            } catch { } // Activity cancels the pending unload.
+        }
+    }
+
+    private func unloadIfIdle(repoID: String, delay: TimeInterval) {
+        guard !Task.isCancelled else { return }
+        cached = nil
+        state = .idle
+        clearCache()
+        doushaLog("[MLXModelStore] idleUnload repoID=\(repoID) idleSeconds=\(delay)")
+    }
+
+    /// Awaitable preload; warmup() wraps this for fire-and-forget callers.
     public func preload(_ descriptor: MLXModelDescriptor) async {
+        idleUnloadTask?.cancel()
+        defer { scheduleIdleUnload() }
         if cached?.repoID == descriptor.repoID { return }
         // Coalesce warmups even while they are waiting for another session's
         // lease, including a failed load (no queue of identical retry loads).

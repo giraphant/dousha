@@ -37,9 +37,14 @@ final class SettingsActionsTests: XCTestCase {
             setDockIconVisible: { dockVisible = $0 },
             isMenuBarIconVisible: { menuBarVisible },
             setMenuBarIconVisible: { menuBarVisible = $0 },
+            setSaveDiagnosticLogs: { _ in },
+            revealDiagnosticLog: {},
+            deleteDiagnosticLogs: {},
             resetDoubaoCredentials: { doubaoResets += 1 },
             retranscribe: { _ in },
-            canRetranscribe: { true }
+            canRetranscribe: { true },
+            requestMicrophone: {},
+            requestSpeechRecognition: {}
         )
 
         XCTAssertFalse(actions.isLaunchAtLoginEnabled())

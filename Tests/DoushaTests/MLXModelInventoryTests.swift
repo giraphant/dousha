@@ -24,6 +24,13 @@ final class MLXModelInventoryTests: XCTestCase {
         XCTAssertEqual(path.path, root.appendingPathComponent("mlx-audio/mlx-community_Qwen3-ASR-0.6B-8bit").path)
     }
 
+    func testDefaultRootUsesApplicationSupport() {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Dousha/Models")
+        XCTAssertEqual(MLXModelInventory().directory(for: model).path,
+                       root.appendingPathComponent("mlx-audio/mlx-community_Qwen3-ASR-0.6B-8bit").path)
+    }
+
     func testInventoryDistinguishesAbsentPartialAndCompleteCache() throws {
         let inventory = MLXModelInventory(cacheRoot: try temporaryRoot())
         XCTAssertFalse(inventory.entry(for: model).isInstalled)
@@ -41,15 +48,62 @@ final class MLXModelInventoryTests: XCTestCase {
     }
 
     func testUninstallDeletesOnlyTargetModelAndIsIdempotent() async throws {
-        let inventory = MLXModelInventory(cacheRoot: try temporaryRoot())
+        let root = try temporaryRoot()
+        let inventory = MLXModelInventory(cacheRoot: root)
         let other = MLXModelCatalog.qwen3ASR_1_7B_8bit
+        let hubDirectory = root.appendingPathComponent("models--mlx-community--Qwen3-ASR-0.6B-8bit")
+        let otherHubDirectory = root.appendingPathComponent("models--mlx-community--Qwen3-ASR-1.7B-8bit")
+        try FileManager.default.createDirectory(at: hubDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: otherHubDirectory, withIntermediateDirectories: true)
+        try Data([1]).write(to: hubDirectory.appendingPathComponent("blob"))
         try writeModel(inventory, model: model)
         try writeModel(inventory, model: other)
         let store = MLXModelStore()
         try await inventory.uninstall(model, store: store)
         XCTAssertFalse(FileManager.default.fileExists(atPath: inventory.directory(for: model).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hubDirectory.path))
         XCTAssertTrue(inventory.entry(for: other).isInstalled)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: otherHubDirectory.path))
         try await inventory.uninstall(model, store: store)
+    }
+
+    func testMigrationMovesCatalogModelsAndPreservesLegacyHubAndUnrelatedModels() throws {
+        let legacyRoot = try temporaryRoot()
+        let legacy = MLXModelInventory(cacheRoot: legacyRoot)
+        let inventory = MLXModelInventory(cacheRoot: try temporaryRoot())
+        let unrelated = MLXModelDescriptor(repoID: "other/model", displayName: "Other")
+        try writeModel(legacy, model: unrelated)
+        let hubDirectory = legacyRoot.appendingPathComponent("models--mlx-community--Qwen3-ASR-0.6B-8bit")
+        try FileManager.default.createDirectory(at: hubDirectory, withIntermediateDirectories: true)
+        for model in MLXModelCatalog.all { try writeModel(legacy, model: model) }
+
+        try inventory.migrateLegacyModels(from: legacyRoot)
+
+        for model in MLXModelCatalog.all {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.directory(for: model).path))
+            XCTAssertTrue(inventory.entry(for: model).isInstalled)
+            XCTAssertEqual(inventory.entry(for: model).bytesOnDisk, 130)
+        }
+        XCTAssertTrue(legacy.entry(for: unrelated).isInstalled)
+        XCTAssertFalse(inventory.entry(for: unrelated).isInstalled)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: hubDirectory.path))
+    }
+
+    func testMigrationLeavesExistingDestinationAndSourceUntouched() throws {
+        let legacyRoot = try temporaryRoot()
+        let legacy = MLXModelInventory(cacheRoot: legacyRoot)
+        let inventory = MLXModelInventory(cacheRoot: try temporaryRoot())
+        try writeModel(legacy, model: model)
+        let destination = inventory.directory(for: model)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let marker = destination.appendingPathComponent("keep")
+        try Data([42]).write(to: marker)
+
+        try inventory.migrateLegacyModels(from: legacyRoot)
+
+        XCTAssertTrue(legacy.entry(for: model).isInstalled)
+        XCTAssertEqual(try Data(contentsOf: marker), Data([42]))
+        XCTAssertFalse(inventory.entry(for: model).isInstalled)
     }
 
     func testLoadedAndLoadingModelsCannotBeRemoved() {

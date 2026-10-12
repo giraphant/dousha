@@ -267,6 +267,12 @@ final class PreferencesTests: XCTestCase {
         XCTAssertFalse(fresh.showMenuBarIcon)
     }
 
+    func testSaveDiagnosticLogs_defaultsOnAndPersistsOff() {
+        XCTAssertTrue(prefs.saveDiagnosticLogs)
+        prefs.saveDiagnosticLogs = false
+        XCTAssertFalse(Preferences(defaults: defaults).saveDiagnosticLogs)
+    }
+
     // MARK: - Audio processing
 
     func testMicrophoneSelection_defaultsToSystemDefault() {

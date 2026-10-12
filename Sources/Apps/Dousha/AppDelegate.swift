@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancelKeyRetryDelay: TimeInterval = 3
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DoushaFileLog.shared?.setEnabled(prefs.saveDiagnosticLogs)
         doushaLog("[Dousha] HUD layout revision: \(FloatingHUDView.layoutRevision)")
         applyDockIconVisibility()
         installMainMenu()
@@ -101,7 +102,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return corrected
                 }
             },
-            inject: { [injector] text in injector.inject(text) },
+            inject: { [injector, focusTracker] text in
+                // Live, post-refinement text only; replays use copyToClipboard.
+                let target = focusTracker.current
+                injector.inject(text)
+                DictationStatsStore().record(
+                    text: text, audioSeconds: RecordingHistoryStore.duration(wavAt: AudioCapturePaths.sharedWAV),
+                    bundleID: target?.bundleID, appName: target?.name ?? "")
+            },
             isRefineEnabled: { [prefs] in
                 let enabled = prefs.llmEnabled
                 let configured = TextRefiner(baseURL: prefs.llmBaseURL, apiKey: prefs.llmAPIKey,
@@ -202,7 +210,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if prefs.activeEngines.contains(.doubao) {
             DoubaoCredentialStore.shared.warmup()
         }
-        if prefs.activeEngines.contains(.qwen3) { MLXModelStore.shared.warmup(prefs.qwen3Model) }
+        Task {
+            await MLXModelStore.shared.setIdleUnloadDelay(prefs.qwen3IdleUnloadSeconds)
+            if prefs.activeEngines.contains(.qwen3) { await MLXModelStore.shared.preload(prefs.qwen3Model) }
+        }
     }
 
     /// If the app is relaunched while already running (Finder/Spotlight), bring
@@ -313,9 +324,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 setDockIconVisible: { [weak self] visible in self?.setDockIconVisible(visible) },
                 isMenuBarIconVisible: { [weak self] in self?.prefs.showMenuBarIcon ?? true },
                 setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
+                setSaveDiagnosticLogs: { [prefs] enabled in
+                    prefs.saveDiagnosticLogs = enabled
+                    DoushaFileLog.shared?.setEnabled(enabled)
+                },
+                revealDiagnosticLog: {
+                    if let log = DoushaFileLog.shared {
+                        NSWorkspace.shared.activateFileViewerSelecting([log.fileURL])
+                    }
+                },
+                deleteDiagnosticLogs: { try DoushaFileLog.shared?.deleteLogs() },
                 resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() },
                 retranscribe: { [weak self] id in self?.retranscribeEntry(id: id) },
-                canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false }
+                canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false },
+                requestMicrophone: { _ = await AVCaptureDevice.requestAccess(for: .audio) },
+                requestSpeechRecognition: {
+                    await withCheckedContinuation { continuation in
+                        SFSpeechRecognizer.requestAuthorization { @Sendable _ in continuation.resume() }
+                    }
+                }
             )
             settingsWindow = SettingsWindowFactory.create(actions: actions)
         }

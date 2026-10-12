@@ -50,6 +50,7 @@ final class Preferences: @unchecked Sendable {
         static let mixedEngine               = "mixedEngine"
         static let activeEngines             = "activeEngines"
         static let qwen3ModelRepoID           = "qwen3ModelRepoID"
+        static let qwen3IdleUnloadSeconds     = "qwen3IdleUnloadSeconds"
         static let llmEnabled                = "llmEnabled"
         static let llmBaseURL                = "llmBaseURL"
         static let llmAPIKey                 = "llmAPIKey"
@@ -80,6 +81,7 @@ final class Preferences: @unchecked Sendable {
         static let refineMode                = "refineMode"
         static let showDockIcon              = "showDockIcon"
         static let showMenuBarIcon           = "showMenuBarIcon"
+        static let saveDiagnosticLogs        = "saveDiagnosticLogs"
         // 麦克风选择：useSystemDefault=true 时沿用 macOS 默认输入设备；否则按
         // priorityUIDs 的顺序挑选第一个可用设备，找不到再退回推荐排序。
         static let microphoneUseSystemDefault = "microphoneUseSystemDefault"
@@ -117,6 +119,7 @@ final class Preferences: @unchecked Sendable {
             // Menu-bar accessory app by default: no Dock icon, status item shown.
             Keys.showDockIcon:             false,
             Keys.showMenuBarIcon:          true,
+            Keys.saveDiagnosticLogs:       true,
             Keys.microphoneUseSystemDefault: true,
             Keys.microphonePriorityUIDs:     [String](),
             // Spokenly-style background-audio controls. Muting is a safe default for
@@ -135,6 +138,11 @@ final class Preferences: @unchecked Sendable {
     var showMenuBarIcon: Bool {
         get { defaults.bool(forKey: Keys.showMenuBarIcon) }
         set { defaults.set(newValue, forKey: Keys.showMenuBarIcon) }
+    }
+
+    var saveDiagnosticLogs: Bool {
+        get { defaults.bool(forKey: Keys.saveDiagnosticLogs) }
+        set { defaults.set(newValue, forKey: Keys.saveDiagnosticLogs) }
     }
 
     var microphoneSelection: MicrophoneSelectionPreference {
@@ -257,6 +265,11 @@ final class Preferences: @unchecked Sendable {
     var qwen3Model: MLXModelDescriptor {
         let repoID = defaults.string(forKey: Keys.qwen3ModelRepoID)
         return MLXModelCatalog.all.first { $0.repoID == repoID } ?? MLXModelCatalog.defaultModel
+    }
+
+    var qwen3IdleUnloadSeconds: TimeInterval {
+        get { defaults.object(forKey: Keys.qwen3IdleUnloadSeconds) as? Double ?? 60 }
+        set { defaults.set(newValue, forKey: Keys.qwen3IdleUnloadSeconds) }
     }
 
     var llmEnabled: Bool {

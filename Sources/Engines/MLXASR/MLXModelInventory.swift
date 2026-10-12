@@ -1,8 +1,17 @@
 import Foundation
-import HuggingFace
+import ConcurrencySupport
 
 /// Disk inventory only; this never downloads or initializes the MLX runtime.
 public struct MLXModelInventory: Sendable {
+    public static let modelsDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Dousha/Models", isDirectory: true)
+
+    /// Shared by loading and settings; Swift runs this migration once per process.
+    public static let legacyMigration = Result {
+        try MLXModelInventory().migrateLegacyModels(from: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface/hub", isDirectory: true))
+    }
+
     public struct Entry: Sendable, Equatable {
         public let isInstalled: Bool
         /// Sum of cached file sizes, including incomplete downloads.
@@ -25,17 +34,31 @@ public struct MLXModelInventory: Sendable {
 
     private let cacheRoot: URL
 
-    public init(cacheRoot: URL = HubCache.default.cacheDirectory) {
+    public init(cacheRoot: URL = MLXModelInventory.modelsDirectory) {
         self.cacheRoot = cacheRoot.resolvingSymlinksInPath().standardizedFileURL
     }
 
     /// Coupled to mlx-audio-swift 244458d7 ModelUtils.resolveOrDownloadModel:
-    /// it has no public path-only helper. Reuse HubCache's public root (including
-    /// HF_HOME / HF_HUB_CACHE overrides), then mirror its mlx-audio/<org>_<repo>
-    /// suffix. Do not use HubCache.repoDirectory: that is a different snapshot.
+    /// it has no public path-only helper. Mirror its mlx-audio/<org>_<repo>
+    /// suffix under our app-owned HubCache root.
     public func directory(for model: MLXModelDescriptor) -> URL {
         cacheRoot.appendingPathComponent("mlx-audio", isDirectory: true)
             .appendingPathComponent(model.repoID.replacingOccurrences(of: "/", with: "_"), isDirectory: true)
+    }
+
+    internal func migrateLegacyModels(from legacyRoot: URL) throws {
+        let legacy = MLXModelInventory(cacheRoot: legacyRoot)
+        let manager = FileManager.default
+        try manager.createDirectory(at: cacheRoot.appendingPathComponent("mlx-audio", isDirectory: true),
+                                    withIntermediateDirectories: true)
+        for model in MLXModelCatalog.all {
+            let source = legacy.directory(for: model)
+            let destination = directory(for: model)
+            if manager.fileExists(atPath: source.path), !manager.fileExists(atPath: destination.path) {
+                try manager.moveItem(at: source, to: destination)
+                doushaLog("[MLXModelStore] migrated repoID=\(model.repoID) from=\(source.path)")
+            }
+        }
     }
 
     public func entry(for model: MLXModelDescriptor) -> Entry {
@@ -72,14 +95,17 @@ public struct MLXModelInventory: Sendable {
         do {
             try Task.checkCancellation()
             try Self.checkRemoval(model, state: await store.state)
-            let directory = directory(for: model).standardizedFileURL
-            let parent = cacheRoot.appendingPathComponent("mlx-audio", isDirectory: true).standardizedFileURL
-            guard directory.deletingLastPathComponent().path == parent.path,
-                  directory.resolvingSymlinksInPath().path == directory.path else {
-                throw RemovalError.unsafePath
-            }
-            if FileManager.default.fileExists(atPath: directory.path) {
-                try FileManager.default.removeItem(at: directory)
+            let hubDirectory = cacheRoot.appendingPathComponent("models--" + model.repoID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
+            let directories = [(directory(for: model), cacheRoot.appendingPathComponent("mlx-audio", isDirectory: true)),
+                               (hubDirectory, cacheRoot)]
+            for (directory, parent) in directories {
+                guard directory.standardizedFileURL.deletingLastPathComponent().path == parent.path,
+                      directory.resolvingSymlinksInPath().path == directory.path else {
+                    throw RemovalError.unsafePath
+                }
+                if FileManager.default.fileExists(atPath: directory.path) {
+                    try FileManager.default.removeItem(at: directory)
+                }
             }
             await lease.release()
         } catch {
