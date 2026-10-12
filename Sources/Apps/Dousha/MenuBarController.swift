@@ -1,5 +1,6 @@
 import Cocoa
 import DoubaoASR
+import MLXASR
 
 enum AboutPanel {
     static func applicationVersion(bundle: Bundle = .main) -> String {
@@ -209,6 +210,7 @@ final class MenuBarController: NSObject {
         // rebuilt at the next recording.start().
         prefs.engine = e
         if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
+        if prefs.activeEngines.contains(.local) { MLXModelStore.shared.warmup(MLXModelCatalog.defaultModel) }
         rebuildMenu()
     }
 
@@ -225,6 +227,7 @@ final class MenuBarController: NSObject {
         Task { @MainActor in
             await DoubaoCredentialStore.shared.reset()
             if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
+            if prefs.activeEngines.contains(.local) { MLXModelStore.shared.warmup(MLXModelCatalog.defaultModel) }
         }
     }
 
