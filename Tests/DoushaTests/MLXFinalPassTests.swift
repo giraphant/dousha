@@ -5,7 +5,7 @@ import ConcurrencySupport
 import MLXAudioSTT
 @testable import MLXASR
 
-private final class FakeMLXStream: MLXStreamingSession {
+final class FakeMLXStream: MLXStreamingSession {
     let events: AsyncStream<TranscriptionEvent>
     let continuation: AsyncStream<TranscriptionEvent>.Continuation
     let stopped = OneShotChannel<Void>()
@@ -52,6 +52,57 @@ final class MLXFinalPassTests: XCTestCase {
             result.finish($0)
         }
         return result
+    }
+
+    func testShortAudioUsesBaseDeadline() {
+        XCTAssertEqual(MLXFinalPassDeadline().seconds(forAudioSeconds: 1), 5)
+        XCTAssertEqual(MLXFinalPassDeadline().seconds(forAudioSeconds: 0), 5)
+    }
+
+    func testLongAudioUsesScaledDeadline() {
+        XCTAssertEqual(MLXFinalPassDeadline().seconds(forAudioSeconds: 300), 30)
+    }
+
+    func testDeadlineBoundaryAndInjectedPolicy() {
+        let deadline = MLXFinalPassDeadline()
+        XCTAssertEqual(deadline.seconds(forAudioSeconds: 49), 5)
+        XCTAssertEqual(deadline.seconds(forAudioSeconds: 50), 5)
+        XCTAssertEqual(deadline.seconds(forAudioSeconds: 51), 5.1, accuracy: 0.0001)
+        XCTAssertEqual(MLXFinalPassDeadline(baseSeconds: 2, audioRatio: 0.5).seconds(forAudioSeconds: 10), 5)
+    }
+
+    func testTimeoutUsesAudioScaledDeadlineRatherThanBase() async throws {
+        let started = OneShotChannel<Void>()
+        let releaseBatch = OneShotChannel<Void>()
+        let engine = MLXStreamingASR(finalPassDeadline: MLXFinalPassDeadline(baseSeconds: 0.01, audioRatio: 0.1)) { _, _, _, _ in
+            MLXPreparedSession(stream: FakeMLXStream()) { _ in
+                started.finish(())
+                try await releaseBatch.wait()
+                return "too late"
+            }
+        }
+        await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") }, language: "auto")
+        engine.ingest(Data(repeating: 0, count: 64_000)) // Exactly two seconds → 0.2s deadline.
+        engine.openStream()
+        let result = stop(engine)
+        _ = try await started.wait()
+        if case .signaled = await result.wait(timeout: 0.05) {
+            XCTFail("The base deadline was used instead of the audio-scaled deadline")
+        }
+        let outcome = await result.wait(timeout: 1)
+        releaseBatch.finish(())
+        guard case .signaled(let final) = outcome else {
+            XCTFail("Computed deadline did not deliver fallback")
+            engine.cancel()
+            return
+        }
+        XCTAssertEqual(final.text, "preview")
+        let metrics = await engine.finalPassMetrics
+        XCTAssertEqual(metrics?.deadlineSeconds, 0.2)
+        XCTAssertEqual(metrics?.source, "stream")
+        XCTAssertGreaterThanOrEqual(metrics?.batchMilliseconds ?? 0, 190)
+        let lease = try await MLXModelStore().acquireSessionLease()
+        await lease.release()
     }
 
     func testBatchWinsAfterStreamingCleanupAndReceivesFullPCMContextAndLanguage() async throws {
@@ -135,7 +186,7 @@ final class MLXFinalPassTests: XCTestCase {
         let stream = FakeMLXStream()
         let started = OneShotChannel<Void>()
         let releaseBatch = OneShotChannel<Void>()
-        let engine = MLXStreamingASR(finalPassTimeout: 0.03) { _, _, _, _ in
+        let engine = MLXStreamingASR(finalPassDeadline: MLXFinalPassDeadline(baseSeconds: 0.03, audioRatio: 0)) { _, _, _, _ in
             MLXPreparedSession(stream: stream) { _ in
                 started.finish(())
                 try await releaseBatch.wait()
@@ -144,13 +195,17 @@ final class MLXFinalPassTests: XCTestCase {
         }
         await prepare(engine)
         let completed = expectation(description: "one fallback completion")
+        completed.expectedFulfillmentCount = 1
+        completed.assertForOverFulfill = true
         let count = Lock(0)
-        engine.stop { result in
+        let completion: @Sendable (TranscriptionResult) -> Void = { result in
             XCTAssertEqual(result.text, "preview")
             count.withLock { $0 += 1 }
             completed.fulfill()
         }
-        engine.stop { _ in XCTFail("Duplicate stop emitted a completion") }
+        // Nonisolated stop calls schedule unordered tasks; either callback may win.
+        engine.stop(completion: completion)
+        engine.stop(completion: completion)
         _ = try await started.wait()
         await fulfillment(of: [completed], timeout: 1)
         let store = MLXModelStore()
@@ -196,7 +251,7 @@ final class MLXFinalPassTests: XCTestCase {
 
     func testStreamingTimeoutNeverStartsConcurrentBatchAndRetainsLeaseUntilNaturalEnd() async throws {
         let stream = FakeMLXStream(endOnStop: false)
-        let engine = MLXStreamingASR(finalPassTimeout: 0.03, streamEndTimeout: 0.03, streamCleanupTimeout: 0.03) { _, _, _, _ in
+        let engine = MLXStreamingASR(finalPassDeadline: MLXFinalPassDeadline(baseSeconds: 0.03, audioRatio: 0), streamEndTimeout: 0.03, streamCleanupTimeout: 0.03) { _, _, _, _ in
             MLXPreparedSession(stream: stream) { _ in
                 XCTFail("An abandoned final pass must not start late")
                 return "batch"

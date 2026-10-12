@@ -30,7 +30,7 @@ final class TextInjector {
             doushaLog("[Dousha] TextInjector.inject: SKIPPED (empty text)")
             return
         }
-        doushaLog("[Dousha] TextInjector.inject: text=\"\(text.prefix(60))\" len=\(text.count)")
+        doushaLog("[Dousha] TextInjector.inject: len=\(text.count)")
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()

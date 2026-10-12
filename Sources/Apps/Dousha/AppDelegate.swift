@@ -8,6 +8,7 @@ import AVFoundation
 import ServiceManagement
 import DoubaoASR
 import SonioxASR
+import MLXASR
 import ASRSupport
 import ConcurrencySupport
 
@@ -124,6 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 _ = refiner.refineLater(text, traceId: traceId) { refined in
                     let pb = NSPasteboard.general
                     let changedWhileRefining = pb.changeCount != originalChangeCount
+                    guard !changedWhileRefining else {
+                        doushaLog("[Dousha] deferred refine skipped reason=clipboard_changed traceId=\(traceId)")
+                        return
+                    }
                     pb.clearContents()
                     let setOK = pb.setString(refined, forType: .string)
                     if setOK {
@@ -197,6 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if prefs.activeEngines.contains(.doubao) {
             DoubaoCredentialStore.shared.warmup()
         }
+        if prefs.activeEngines.contains(.qwen3) { MLXModelStore.shared.warmup(prefs.qwen3Model) }
     }
 
     /// If the app is relaunched while already running (Finder/Spotlight), bring
@@ -389,8 +395,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func handleEngineRoutingChanged() {
         // Routing slots / primary language changed in Settings. Refresh the menu
-        // (engine summary, checkmarks, language) and warm Doubao if now active.
+        // (engine summary, checkmarks, language) and warm active engines.
         if prefs.activeEngines.contains(.doubao) { DoubaoCredentialStore.shared.warmup() }
+        if prefs.activeEngines.contains(.qwen3) { MLXModelStore.shared.warmup(prefs.qwen3Model) }
         menuBar.rebuildMenu()
     }
 

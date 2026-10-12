@@ -31,30 +31,23 @@ settings                 Doubao servers;
                          mlx-transcribe with local MLX weights
 ```
 
-macOS-only. (A tier-2 Windows shell, `DoushaWin`, existed under QUA-209; it
-was removed in 2026-07 when its one user stopped using it — its platform
-gates, the hand-rolled `InsecureMD5`, and the `OpusEncoding` seam went with
-it. Resurrect from git history if a port is ever needed again.)
+macOS-only; retired Windows code is recoverable from git history.
 
 Rules:
 
 - Lower layers never import higher ones. The three ASR libraries are peers, and
   the two entry points never import each other.
-- `MLXASR` depends on mlx-audio-swift's `MLXAudioSTT`, pinned to revision
-  `244458d7b61e54ff135073ddc9ed76782bb20758`. Local model support is restricted
-  to real-time streaming models by product decision; the current catalog is
-  Qwen3-ASR 0.6B / 1.7B (8-bit), with 0.6B as the default. Do not introduce a
-  batch-only local model behind the streaming engine contract.
+- Local-engine layering, lifecycle and verification are defined in §2.1.
 - Platform APIs (AppKit) live only in the entry points under `Apps/` and
   `Tools/`.
 - Library targets never read `Preferences` (or any app singleton). The app
   snapshots config at recording start and passes it in
-  (`SonioxBackend`/`DoubaoBackend` snapshot glossary + language and `MLXBackend`
-  snapshots the language identifier and glossary in `beginSession`). This keeps mid-recording
-  Settings changes from mutating a live session, and keeps the libraries testable.
+  (backends snapshot language + glossary in `beginSession`). Mid-recording
+  Settings changes must not mutate a live session.
 - All logging goes through `doushaLog` (ConcurrencySupport). Log strings are part
   of the observable surface — field debugging greps for them — so don't reword
-  them casually.
+  them casually. Log lengths, flags and timings, never user content (transcripts,
+  prompts, glossary/context or credentials). File logging is disabled under XCTest.
 
 ## 2. Recording pipeline data flow
 
@@ -107,17 +100,6 @@ engine is still alive (`ErrorGate`); a primary failure hands the HUD to the
 secondary immediately. Only all-engines-dead (or capture failure) becomes a
 fatal `.error` stream event.
 
-`MLXBackend` passes the snapshotted Dousha language identifier (`zh-CN`,
-`en-US`, `auto`) unchanged; `MLXStreamingASR` alone maps it to the Qwen3
-language name. Nil, auto and unknown identifiers mean auto-detect. Local
-streaming text is a HUD preview; stop transcribes the entire retained recording
-with Qwen3's batch API, and that nonempty result becomes the final text. Empty,
-failed or overdue batch output falls back to the filtered streaming text.
-`MLXBackend` snapshots the enabled, normalized glossary as a short plain-text
-vocabulary list for the batch system context. Streaming still cannot receive
-context ([giraphant/dousha#53](https://github.com/giraphant/dousha/issues/53));
-downstream `TranscriptCorrector` also continues to apply local corrections.
-
 Fatal ≠ session end during live capture (issue #46): a fatal `.error` arriving
 while the controller is still `.recording` is latched (`pendingErrorMessage`),
 NOT transitioned — the mic + WAV don't need the network, so capture runs until
@@ -134,23 +116,138 @@ thread reads it), then status + HUD glow, then dispatcher reset, then HUD
 visibility. Timing constants live as statics on the controller
 (`cancelTeardownGuard` 0.25s, `injectGreenFlash` 0.25s, `errorAutoReset` 3.0s).
 
+### 2.1 Local MLX engine
+
+**Layering and input.** `MLXBackend` (`Engine.qwen3`, `PCMCaptureEngine`) adapts
+app sessions to `MLXStreamingASR` → `MLXModelStore` → `MLXAudioSTT` from
+mlx-audio-swift. Only streaming-capable models belong in this contract: Qwen3-ASR
+0.6B / 1.7B (8-bit), default 0.6B. The backend snapshots Dousha's language
+identifier and enabled, normalized glossary in `beginSession`; only the library
+maps identifiers to Qwen language names (nil/auto/unknown → auto-detect).
+Keep the user-selected language for **both** passes: the 2026-10-12 mixed-language
+comparison retained a Chinese lead-in with forced Chinese that batch auto lost;
+earlier English garbling was streaming-only evidence. Glossary is a short
+plain-text vocabulary list for the final batch context only; streaming context
+is unavailable ([#53](https://github.com/giraphant/dousha/issues/53)).
+`TranscriptCorrector` still applies downstream; `prepareSession` context defaults to empty.
+
+**Preview and final.** Streaming text previews the HUD. Stop transcribes all
+retained audio in one batch `generate` call; nonempty batch text wins, while
+empty/failed/overdue output falls back to filtered streaming text. Batch runs
+off main, after streaming cleanup, with temperature 0, repetition penalty 1.15
+and 32-token repetition context; upstream splits only very long audio at 1200s
+low-energy boundaries. `finalPass: false` is for A/B smoke checks.
+`MLXTranscriptState` strips complete Qwen headers from partials/finals, hides
+incomplete tails only in auto mode, and preserves a safe confirmed prefix.
+Preview/fallback reduce five-or-more consecutive repeats of a 1–4 character
+unit (optional punctuation) to four; ordinary 哈哈哈 / 很多很多 stays intact.
+Never apply that repetition guard to batch text, but always apply
+`QwenTranscriptFilter`, even though upstream already strips auto-language headers.
+
+**Audio and generations.** `MLXStreamingASR` lifecycle is actor-isolated;
+nonisolated `ingest` only appends PCM under the `MLXSessionInput` lock: no
+conversion, MLX calls, tasks, logging or actor hops on the tap thread. That lock
+protects the drain buffer and append-only full-session copy; prepare/cancel/
+completion clear both. A frozen final-pass PCM copy may survive delivery/cancel
+until the non-cancellable batch returns. The detached feeder wakes every 100ms;
+conversion, `feedAudio`, final drain and native stop/cancel share a private
+serial queue off audio/main threads, so teardown cannot overtake feed. Carry
+odd bytes into the next feed; discard only a malformed final odd byte.
+Each recording owns fresh setup/final/event-finished channels; stale setup/cleanup
+retains captured objects, never a newer lease. `.ended` signals final before
+the generation guard. Only cumulative `.displayUpdate` replaces text; never
+append confirmed/provisional events again. Partials, errors and exactly one
+stop completion dispatch on main and recheck generation; cancel immediately
+quarantines input and callbacks.
+
+**Model ownership.** The store actor coalesces loading/warmup and caches weights;
+`QwenLoadedModel` is `@unchecked Sendable` only because a process-wide lease
+(shared across separately constructed stores) covers loading/replacement,
+prewarm, the whole streaming session and batch. Never overlap streaming and
+batch inference. The store never mutates a published model; only its lease
+holder uses it. Construction/loading runs off main; caller cancellation does
+not cancel shared downloads, and setup retains its lease until loading settles.
+
+**Preload/prewarm.** Launch preloads after hotkey installation when Qwen3 is
+active; routing/menu/model changes use the same fire-and-forget `warmup` path.
+Only a preload-owned new load runs one off-main, 1s silent batch (8-token limit)
+under the lease and discards output. Cached models and recording-owned loads
+never prewarm, even when warmup joins or queues behind them. Failure logs an
+error but leaves weights `.ready`; this state means loaded, not prewarm finished.
+Recordings wait on the lease, released only after prewarm returns.
+`[MLXModelStore] prewarm repoID=… ms=…` records cost. Keep batch-only prewarm:
+a separate streaming prewarm on two 2026-10-12 clips showed no useful preview
+benefit and roughly doubled prewarm cost.
+
+**Stop deadlines and shutdown.** Stop allows 30s for setup, 10s for `.ended`
+(saving latest display text on timeout), 3s for streaming cleanup, then
+`MLXFinalPassDeadline` defaults to `max(5 s, 0.10 × audioSeconds)` for batch
+(injectable). The `finalPass` log includes the deadline; batch timing starts at
+generation, not cleanup. Deadline expiry delivers fallback exactly once; the detached owner
+retains the lease until batch returns and discards late text. Cancel suppresses
+completion without releasing the lease early.
+Cleanup waits 3s for queued native cancel; a stuck synchronous feed retains
+the lease until cancel returns, then event closure gets 3s before consumer
+cancellation/release. Upstream cancel has **no native decoder completion
+barrier**: event closure does not prove detached GPU work ended. The final-pass
+owner must therefore wait for natural `.ended` before cancel/cleanup/batch,
+even after the initial 10s timeout. If natural stop exceeds the cleanup
+allowance, deliver fallback, abandon batch and retain the lease until natural
+stop ends. A stuck decoder can block subsequent sessions; never substitute
+cancel's event closure or weaken the lease to allow concurrent inference.
+
+**Build and smoke verification.** Full Xcode's `xcodebuild` compiles Metal and
+places `mlx-swift_Cmlx.bundle` beside the executable; the Makefile copies
+resources into the app. SwiftPM builds/tests check compilation/offline logic
+but do not supply the inference metallib. Build and run the headless scheme:
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+xcodebuild -scheme smoke-cli -configuration Release \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/xcode \
+  CODE_SIGNING_ALLOWED=NO build
+.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
+  ~/Library/Caches/Dousha/last_recording.wav --language zh-CN
+.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
+  ~/Library/Caches/Dousha/last_recording.wav --language auto --realtime
+```
+
+`WavReader` accepts 16kHz mono s16le WAVs. The harness uses the real lifecycle,
+100ms chunks and 10ms sleeps (audio-rate with `--realtime`), downloads the default
+model on first use, and accepts compatible repos via `--model`. Options:
+`--final-pass on|off` (default on), `--context` (batch only), `--prewarm` (awaits
+launch preload). Compare prewarm in fresh processes. `preload_ms` includes
+load/prewarm; `model_load_ms` samples open→ready every 20ms, including downloads;
+first-partial latency starts at ingest. `stop_to_final_ms` includes drain,
+cleanup and batch; `batch_ms` is generation time (elapsed at fallback delivery
+on timeout), `deadline_seconds` the allowance, `final_source` batch/stream.
+Partials/final text are printed: keep private transcripts out of shared reports.
+Async waits service main callbacks; watchdogs are 600s for model load and
+max(80s, 48s + batch deadline) for stop. Inspect `finalTimedOut` logs even when
+fallback makes the command succeed.
+
+Keep `Package.resolved` tracked with mlx-audio-swift revision
+`244458d7b61e54ff135073ddc9ed76782bb20758` in `Package.swift`. Upgrade it,
+mlx-swift, mlx-swift-lm and resolved dependencies together; rerun offline tests
+and both language smoke checks.
+
 ## 3. Protocol seams & testing
 
 | Seam | Purpose | Faked by |
 |---|---|---|
 | `SpeechBackend` | one session = one `AsyncStream<RecordingEvent>`; `stop()` yields exactly one terminal `.final`, `cancel()` finishes with none | `MockSpeechBackend` (RecordingControllerTests) |
 | `PushCaptureEngine` (+ `PCMCaptureEngine` / `BufferCaptureEngine`) | engines receive pushed audio from the hub; two-phase `beginSession`/`openStream` | `MockBackend` (MultiEngineBackendTests, hub = nil) |
-| `MLXBackend` (`Engine.local`, `PCMCaptureEngine`) | adapts prepare / open / ingest / stop / cancel to `MLXStreamingASR`; snapshots the unmapped language identifier and glossary context | injected prepare closure + isolated Preferences (MLXEngineWiringTests) |
-| `MLXModelStore` loader + process-wide session lease | loads/caches Qwen3 weights once; serializes local inference sessions | injected failing/suspended loader (MLXASRLifecycleTests); lease tests never allocate MLX arrays |
-| `MLXPreparedSession` stream + final-pass runner | exercises real stop/cancel/deadline/lease ownership without a model | fake event stream + suspended runner (MLXFinalPassTests) |
+| `MLXBackend` | app adapter (§2.1) | injected prepare closure + isolated Preferences (MLXEngineWiringTests) |
+| `MLXModelStore` loader + lease | model ownership (§2.1) | injected loader / `MLXLoadedModel` fake (MLXASRLifecycleTests, MLXModelPrewarmTests); lease tests never allocate MLX arrays |
+| `MLXPreparedSession` stream + final-pass runner | stop/cancel/deadline ownership (§2.1) | fake event stream + suspended runner (MLXFinalPassTests) |
 | `RecordingEnvironment` | struct-of-closures: ALL side effects the controller performs (HUD, inject, refine, scheduling, clock) | closure fakes + virtual clock |
 | `SettingsActions` | struct-of-closures: system-touching settings effects (login item, dock icon, credentials) | closure fakes |
 
 Rules: a new side effect enters through a seam, never through a singleton
 reached from inside the controller/backends. Tests use `@testable import`, so
 `internal` visibility is test-reachable — never widen to `public` for tests.
-Run `swift test` (not just `swift build`) before committing; the test target is
-not built by `make install`.
+For code changes, run the full offline suite (§6) before committing;
+`make install` does not build the test target.
 
 ## 4. Concurrency model — `@unchecked Sendable` invariants
 
@@ -191,67 +288,8 @@ type is used, re-derive the reason or the annotation becomes a lie.
 - **`AppleSpeechBackend`** — `sessionGen` behind a `Lock`, because three
   threads touch it: main, the audio-frame path, and Speech framework callbacks.
   Codes 203/216/1110/301 are benign and intentionally dropped.
-- **`MLXStreamingASR` / `MLXSessionInput`** — lifecycle state is actor-isolated;
-  `ingest` is a nonisolated, lock-only PCM append for the real-time audio path:
-  no conversion, MLX calls, tasks, logging or actor hops on the tap thread.
-  The same lock protects both the drain buffer and an append-only full-session
-  PCM copy; prepare, cancel and completion clear both. Only append happens on
-  the tap thread. A final-pass request may retain its frozen PCM after delivery
-  or cancellation until the non-cancellable batch call returns.
-  The detached feeder wakes every 100ms and schedules PCM conversion +
-  `feedAudio` on a private serial queue, off both audio and main threads.
-  Final drain, native `stop` and native `cancel` use that same queue, so they
-  cannot overtake an in-progress feed. Odd PCM bytes carry into the next feed;
-  only a malformed final odd byte is discarded.
-- **MLX generations and callbacks** — every recording owns fresh setup,
-  final and event-finished channels; stale setup/cleanup retains its captured
-  objects, never a newer session's lease. `.ended` signals its final channel
-  before the generation guard. Only cumulative `.displayUpdate` events replace
-  the transcript; confirmed/provisional events must not be appended again.
-  `MLXTranscriptState` strips complete Qwen protocol headers from partials and
-  finals, hiding incomplete tails only in auto mode and keeping a safe confirmed prefix.
-  The preview and streaming fallback also shorten five-or-more consecutive
-  repeats of a 1–4 character unit (with optional punctuation) to four repeats;
-  ordinary reduplication such as 哈哈哈 / 很多很多 stays untouched. This guard
-  never transforms batch text. Batch output is still passed through
-  `QwenTranscriptFilter`, although upstream `parseGeneratedChunk` already strips
-  auto-language headers.
-  Partials, errors and the one stop completion dispatch on main and recheck
-  the generation there; cancel immediately quarantines input and callbacks.
-- **`MLXModelStore` / `MLXLoadedModel` (`@unchecked Sendable`)** — the store
-  actor caches weights and coalesces loading/warmup. A single process-wide
-  lease gate, shared even by separately constructed stores, covers model load,
-  replacement, the complete streaming session and the subsequent batch pass.
-  Streaming cleanup precedes batch generation; never run both at once.
-  The loaded model is never
-  mutated by the store after publication and is only used by the lease holder;
-  model construction/loading runs off main. Cancelled callers do not cancel a
-  shared download, and setup retains the lease until that load settles.
-- **MLX final-pass ownership and deadline** — stop waits up to 30s for setup,
-  then up to 10s for `.ended` (saving the latest display text on timeout), then
-  up to 3s for streaming cleanup and up to `finalPassTimeout` (default 30s)
-  for batch. The batch runs off main with temperature 0, repetition penalty
-  1.15 and upstream's 32-token repetition context: a modest discouragement of
-  loops without aggressively suppressing ordinary repeated words. The full PCM
-  is passed in one `generate` call (upstream only splits very long audio at its
-  default 1200s low-energy boundaries). `finalPass: false` disables the pass for
-  A/B smoke checks; `prepareSession` context defaults to empty for compatibility.
-  Deadline expiry delivers streaming fallback exactly once; the detached owner
-  keeps the lease until batch returns, discarding its late text. Cancel during
-  batch suppresses completion and likewise does not release the lease early.
-  Final-pass metrics log lengths and timings, never transcript or context text.
-- **MLX streaming shutdown** — cleanup waits 3s for queued native cancel; if a
-  synchronous feed is stuck, it retains the lease until cancel actually returns.
-  It then waits up to 3s for event-stream closure before cancelling the consumer
-  and releasing the lease. Upstream `cancel()` has **no native decoder completion
-  barrier**: event-stream closure is its strongest exposed signal, not proof
-  that all detached GPU work has completed. Therefore the final-pass owner
-  waits for natural `.ended` before invoking cancel/cleanup and batch, including
-  after the initial 10s wait timed out. If natural stop outlasts the cleanup
-  allowance, deliver fallback, abandon batch and retain the lease until natural
-  stop actually ends; a stuck upstream decoder can consequently block subsequent
-  sessions. Do not substitute cancel's event closure for this barrier or weaken
-  the lease to permit concurrent inference.
+- **MLX types** — §2.1 defines actor/lock isolation, generation guards, serial
+  feed/teardown ordering and the process-wide lease protecting `QwenLoadedModel`.
 - **`AudioTapHub` (actor)** — the tap closure runs on the audio thread and
   captures only local snapshots; it never hops back into the actor (real-time
   safety). The `nonisolated(unsafe) var fed` is safe because the converter
@@ -284,10 +322,15 @@ without new evidence.
 - **`TextInjector` does not switch input sources** (QUA-132, Chromium desync)
   **and does not restore the clipboard** (matches Superwhisper/Vistaflow UX).
   Both are decisions, not omissions.
-- **`SettingsView` is one struct; panes are not child views.** API keys and
-  test results live only in `@State` until 保存并测试; `NavigationSplitView`
+- **`SettingsView` is one struct; panes are not child views.** All state,
+  including sheets, lives here. API keys and test results stay in `@State`
+  until 保存并测试; `NavigationSplitView`
   destroys child views on pane switch, so child-view panes would silently drop
-  unsaved edits.
+  unsaved edits. Sheets follow the same rule: present them from `SettingsView`
+  and keep their editable state there across dismissal; helpers accept only
+  values, bindings, and closures, without owning draft state. Use native
+  `Form` with `.formStyle(.grouped)` and standard controls, an engine list with
+  option sheets, and row subtitles / ⓘ help instead of footers. No chips/cards.
 - **`HotkeyMonitor` and `CancelKeyMonitor` stay separate classes.** The shared
   part (tap lifecycle) is already extracted into `EventTap`; merging the rest
   couples two independently-fragile event paths.
@@ -296,8 +339,10 @@ without new evidence.
   agents: locality beats file count, and splitting an actor across extension
   files separates state from the code that guards it. Don't split files for
   size alone.
-- **`MultiEngineBackend`'s helpers stay nested** — they are private to its
-  orchestration and their doc comments reference its callback ordering.
+- **Keep multi-engine routing** even when only one engine is selected; parallel
+  capture, language selection and partial/error fallback are deliberate features.
+  `MultiEngineBackend` helpers stay nested: they are private to its orchestration
+  and their comments reference its callback ordering.
 
 ## 6. Directory map & verification discipline
 
@@ -305,75 +350,19 @@ Directories group targets by role:
 
 ```
 Sources/
-  Common/             bottom of the graph — libraries everything imports
-    ConcurrencySupport/   concurrency utils (no deps)
-    ASRSupport/         shared ASR domain types + TranscriptFormatter
-  Engines/            one streaming ASR client per provider
-    DoubaoASR/          Doubao WS client (protobuf, opus, reconnect, credentials)
-    SonioxASR/          Soniox WS + async-batch client
-    MLXASR/             local Qwen3 streaming preview + batch final, model store and session lease
-  Apps/
-    Dousha/             macOS app: AppDelegate wiring, RecordingController,
-                        MultiEngineBackend + AudioTapHub, backends (adapters),
-                        HUD (FloatingHUD*), Settings, hotkey monitors, Preferences
-  Tools/              developer-facing executables, never shipped
-    SmokeCLI/           smoke harness — real Doubao servers or real local MLX
-                        weights; never Tests/ (suite must stay offline/deterministic)
-    SmokeCLISupport/    Doubao file-transcription helper
-Tests/DoushaTests/    all unit tests (one target, @testable imports everything;
-                      macOS-only because it imports the app target)
+  Common/                ConcurrencySupport (no deps), ASRSupport
+  Engines/               DoubaoASR, SonioxASR, MLXASR
+  Apps/Dousha/           app wiring, capture, orchestration, UI, preferences
+  Tools/SmokeCLI/        real-server / real-model checks; never shipped
+  Tools/SmokeCLISupport/ Doubao file-transcription helper
+Tests/DoushaTests/       one target, @testable imports everything; macOS-only
+                        (imports app); must stay offline/deterministic
 ```
-
-Builds use Xcode (`xcodebuild`) so MLX's Metal shaders are compiled and the
-`mlx-swift_Cmlx.bundle` resource is placed beside the executable (and copied
-into the app by the Makefile). `swift build` / `swift test` remain useful for
-compilation and offline logic tests, but the SwiftPM build path does not supply
-the metallib needed to run MLX inference. Use full Xcode, not CommandLineTools:
-
-```sh
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-swift build
-swift test
-xcodebuild -list  # smoke-cli is the headless executable scheme
-xcodebuild -scheme smoke-cli -configuration Release \
-  -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/xcode \
-  CODE_SIGNING_ALLOWED=NO build
-.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
-  ~/Library/Caches/Dousha/last_recording.wav --language zh-CN
-.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
-  ~/Library/Caches/Dousha/last_recording.wav --language auto --realtime
-.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
-  ~/Library/Caches/Dousha/last_recording.wav --language auto --final-pass off
-.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
-  ~/Library/Caches/Dousha/last_recording.wav --language zh-CN --context 'Vocabulary: Dousha, Qwen3'
-```
-
-`mlx-transcribe` uses `WavReader` (16kHz mono s16le only) and the actual engine
-lifecycle, with 100ms PCM chunks, 10ms inter-chunk sleeps by default, or audio
-rate with `--realtime`. It downloads the default model on first use; `--model`
-accepts a compatible Hugging Face repo. Model load time includes any download
-(open→store ready, sampled every 20ms); first-partial latency starts at first
-ingest, and stop latency ends at completion. The command prints partial count,
-final length, streaming preview and final transcript; keep private transcripts
-out of shared reports. `--final-pass on|off` defaults to on; `--context` supplies
-only the final batch system message. `stop_to_final_ms` includes streaming drain,
-cleanup and batch; `batch_ms` measures batch only (elapsed time at fallback
-delivery on a deadline), and `final_source` is `batch` or `stream`.
-It services main-queue callbacks through async waits, with 600s model-load and
-80s stop watchdogs. Inspect engine logs for `finalTimedOut` even when a nonempty
-fallback makes the command succeed.
-
-`Package.resolved` is committed and the mlx-audio-swift revision is pinned in
-`Package.swift`. Upgrade mlx-audio-swift, mlx-swift, mlx-swift-lm and their
-resolved dependencies as one compatibility set; rerun offline tests and both
-language smoke checks after an upgrade.
 
 Verification for any pipeline change:
 
-1. `swift test` — full suite, green.
-2. `make install` (quit the running app first) + relaunch — see CLAUDE.md for
-   the TCC/signing rules; a worktree needs `Makefile.local` or signing falls
-   back to ad-hoc and resets TCC grants.
+1. `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` — full suite.
+2. Installed-bundle verification: follow AGENTS.md (quit → install → relaunch).
 3. Real-device regression set for engine/network changes:
    - short dictation round-trip;
    - 3+ minute dictation with mid-sentence pauses (ping keepalive);
@@ -381,26 +370,19 @@ Verification for any pipeline change:
      log for reconnect outcome);
    - rapid back-to-back recordings (detached close / concurrent-quota path).
 
-For local-engine inference, also run the Xcode-built `mlx-transcribe` checks
-above. They validate file-based inference without touching the installed app;
-they do not replace installed-bundle testing of audio, hotkeys, HUD or TCC.
+For local inference, also run §2.1’s Xcode-built smoke checks; they do not
+replace installed-app testing of audio, hotkeys, HUD or TCC.
 
 ## 7. Removed design assets (QUA-263 / QUA-265)
 
 `ASRSegmentModel` (QUA-265) and `StreamingTextReconciler` (QUA-263) were
-pure, fully-tested logic written ahead of features that never materialized.
-They sat unwired with zero production evidence for their differentiators
-(`nonstream_result=true`: **0 of 2935** streamed results across two log
-files; `pauseBoundary`: no consumer) and were deleted in 2026-07. Resurrect
-from git history — or rewrite against the notes below — only when a trigger
-fires:
+unwired speculative logic, deleted in 2026-07. Restore from history only when:
 
-- Segment model: Doubao `nonstream_result` late revisions observed in
-  production, a third engine needs a shared segmentation layer, or
+- Segment model: production Doubao `nonstream_result` late revisions appear
+  (previously 0/2935 results), a third engine needs shared segmentation, or
   pause-aware utterance boundaries become a product feature.
-- Reconciler: text injection becomes incremental (per-key backspace +
-  retype). Today `TextInjector` is clipboard+⌘V by design (§5) and the HUD
-  reveal already keeps the stable prefix stable.
+- Reconciler: injection becomes incremental (backspace/retype); today it is
+  clipboard+⌘V (§5), and HUD reveal already preserves the stable prefix.
 
 Decisions worth not re-deriving:
 
@@ -420,6 +402,5 @@ Decisions worth not re-deriving:
   utterance's VAD final → revision; Soniox growing token tail → partial,
   utterance text at `<end>` → final.
 
-`TranscriptCorrector` (QUA-264) is unrelated to the above and IS wired —
-`RecordingController.handleFinal` applies it once per dictation. The other
-two are not, and should not be wired without the triggers above.
+`TranscriptCorrector` (QUA-264) remains wired once per dictation in
+`RecordingController.handleFinal`; the removed designs require the triggers above.

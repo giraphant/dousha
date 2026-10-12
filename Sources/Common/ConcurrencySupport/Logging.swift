@@ -17,14 +17,14 @@ private let _doushaLogger = Logger(subsystem: "com.dousha.app", category: "gener
 /// it never captured a failure either. This file is the durable record.
 public func doushaLog(_ message: String) {
     _doushaLogger.log("\(message, privacy: .public)")
-    DoushaFileLog.shared.append(message)
+    DoushaFileLog.shared?.append(message)
 }
 
 /// Append-only persistent log at `~/Library/Logs/Dousha/dousha.log`, mirroring
 /// every `doushaLog` line with a timestamp. Thread-safe via a private serial
 /// queue; rotates once at ~5 MB so it can't grow unbounded.
 final class DoushaFileLog: @unchecked Sendable {
-    static let shared = DoushaFileLog()
+    static let shared = NSClassFromString("XCTestCase") == nil ? DoushaFileLog() : nil
 
     private let queue = DispatchQueue(label: "com.dousha.app.filelog")
     private let fileURL: URL?

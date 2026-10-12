@@ -1,67 +1,66 @@
 # Agent instructions — Dousha
 
-## Architecture invariants (READ FIRST for pipeline/concurrency changes)
+## Read first
 
 Before touching the recording pipeline, any `@unchecked Sendable` type, the
 ASR clients, or anything that looks like duplicated code worth abstracting,
-read `ARCHITECTURE.md`. It records the load-bearing invariants (three-phase
-start order, generation guards, flag-before-HUD ordering) and the list of
-**deliberately rejected refactors** — do not re-propose those without new
-evidence.
+read [ARCHITECTURE.md](ARCHITECTURE.md). Its invariants and deliberately rejected
+refactors are normative; do not re-propose rejected designs without new evidence.
+`CLAUDE.md` is a symlink to this file; keep it that way.
 
 ## Testing workflow (REQUIRED)
 
-This is a menu-bar / accessibility app on macOS. You cannot test changes by running `swift build` or `swift run` directly — TCC permissions (Microphone, Accessibility, Speech Recognition) are bound to the signed bundle at `/Applications/Dousha.app`, and global hotkeys only work for the installed bundle the user already granted permissions to.
+TCC permissions (Microphone, Accessibility, Speech Recognition) belong to the
+signed bundle at `/Applications/Dousha.app`. Test audio, hotkeys, HUD and
+permissions through that installed app, never a `swift run` product.
 
-`make build` / `make install` now use `xcodebuild` with full Xcode to compile MLX's Metal shaders and package its resource bundles. `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build` and `swift test` still check compilation and offline logic, but their products cannot run MLX inference without the metallib. For headless real-model checks, build the `smoke-cli` scheme with `xcodebuild` and run the products-dir `smoke-cli mlx-transcribe`; see `ARCHITECTURE.md` §6 for commands. Keep the committed `Package.resolved` and pinned mlx-audio-swift revision together when upgrading dependencies.
+`make build` / `make install` use full Xcode's `xcodebuild` to compile MLX Metal
+shaders and package resources. For offline logic checks, run:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
+```
+
+`swift build` checks compilation only; neither SwiftPM product supplies the
+metallib for inference. See ARCHITECTURE.md §2.1 for MLX smoke commands and
+dependency pins, and §6 for pipeline verification. `make install` does not run tests.
 
 Every time you want the user to test a change, you must:
 
-1. **Ask the user to quit the running Dousha** (menu bar → Quit, or `killall Dousha`). `make install` will not replace a running `.app` cleanly, and the user will end up testing the old build without noticing.
-2. Run `make install` — this does an Xcode release build, codesigns with the configured Developer ID identity (see below), and copies to `/Applications/Dousha.app`.
-3. Launch the new bundle (`open /Applications/Dousha.app`) or ask the user to launch it.
-4. Then ask the user to reproduce / test.
+1. **Ask the user to quit Dousha** (menu bar → Quit, or `killall Dousha`), so they
+   cannot unknowingly keep running the old build.
+2. Run `make install` (release build, signing, copy to `/Applications/Dousha.app`).
+3. Launch with `open /Applications/Dousha.app`, or ask the user to launch it.
+4. Ask the user to reproduce / test.
 
-Do **not** report a feature as "ready to test" after only `swift build` or `swift test`. Unit tests are fine for logic, but anything touching audio capture, hotkeys, HUD, or permissions must go through `make install` + relaunch before the user can verify it.
+Do not call a feature "ready to test" after only `swift build` or `swift test`.
 
 ## Release workflow
 
-Public releases go to GitHub Releases as a signed + notarized DMG. The pipeline is fully wired in the `Makefile`:
+1. Bump both `CFBundleShortVersionString` (semver) and `CFBundleVersion`
+   (monotonic integer) in `Resources/Info.plist`.
+2. Commit and push the bump; the release target requires a clean tree and matching version.
+3. Run `make release VERSION=X.Y.Z`. It builds with hardened runtime, notarizes
+   and staples the app, packs and signs the DMG, notarizes and staples the DMG,
+   publishes GitHub release `vX.Y.Z`, then updates the Homebrew cask.
 
+## Signing setup
+
+Reuse the configured Developer ID Application certificate and private key in the
+login keychain. Store notary credentials with `xcrun notarytool store-credentials`.
+Each checkout/worktree needs a gitignored `Makefile.local` overriding the placeholders:
+
+```make
+DEVELOPER_ID_IDENTITY := Developer ID Application: <Your Name> (<TEAMID>)
+NOTARY_PROFILE        := <YourNotaryProfile>
 ```
-make release VERSION=0.1.2
-```
 
-This target asserts the version matches `Resources/Info.plist`, requires a clean working tree, builds with hardened runtime + Developer ID, packs a DMG with an `/Applications` symlink, signs the DMG, submits to Apple notary, staples, and `gh release create`s the DMG at `vX.Y.Z`.
-
-Per-release checklist:
-
-1. Bump `Resources/Info.plist` — both `CFBundleShortVersionString` (semver) and `CFBundleVersion` (monotonic integer; notary rejects re-used build numbers for the same short version).
-2. Commit + push the bump.
-3. Run `make release VERSION=X.Y.Z`. Notarization usually takes 2–5 min; the target blocks until Accepted.
-
-One-time setup (per dev machine):
-
-- Apple Developer ID cert must be in the login keychain with its private key.
-- Notary credentials stored as a keychain profile:
-  ```
-  xcrun notarytool store-credentials <YourNotaryProfile> \
-    --apple-id <your apple id> --team-id <YourTeamID> \
-    --password <app-specific password>
-  ```
-- Create a `Makefile.local` (gitignored) overriding the public Makefile placeholders:
-  ```
-  DEVELOPER_ID_IDENTITY := Developer ID Application: <Your Name> (<TEAMID>)
-  NOTARY_PROFILE        := <YourNotaryProfile>
-  ```
-
-### Release gotchas — do not regress
-
-- **Entitlements are mandatory for the dist build.** Hardened runtime auto-denies mic/camera access unless the relevant entitlement is present. `dist` passes `--entitlements Resources/Dousha.entitlements` (currently grants `com.apple.security.device.audio-input`). Symptom of the regression: TCC shows `kTCCServiceMicrophone com.dousha.app auth_value=2 auth_reason=4` (system_set deny), no prompt ever appears to the user. v0.1.0 shipped without this and was broken; v0.1.1 fixed it.
-- The DMG must also be codesigned (not just the .app) — `dist` does this. Notary will reject an unsigned DMG.
-
-## Other notes
-
-- Single signing identity for everything: `Developer ID Application: <Your Name> (<TEAMID>)`. Both `make install` (local dev) and `make release` (DMG) sign with it. TCC grants persist across both because the csreq is anchored to the team ID, not the cdhash — so a fresh local build and the latest DMG release share Mic / Speech / Accessibility approvals.
-- If the Developer ID cert is missing from the keychain (fresh clone / CI), the Makefile falls back to ad-hoc signing and TCC grants reset on every rebuild. Flag this if you see the ad-hoc fallback message.
-- `make reset-perms` wipes Mic / SpeechRecognition / Accessibility grants for `com.dousha.app`. Don't run it without asking.
+- Local installs and releases use the same identity; the team-anchored TCC
+  requirement preserves grants across rebuilds. Flag any ad-hoc fallback:
+  missing configuration/certificate means grants will not persist.
+- Preserve `Resources/Dousha.entitlements` with
+  `com.apple.security.device.audio-input`; hardened runtime otherwise denies the
+  mic without prompting (the v0.1.0 regression).
+- Sign the DMG too, and staple **both** app and DMG: a DMG ticket does not travel
+  with the extracted app for offline Gatekeeper checks.
+- Never run `make reset-perms` without asking; it wipes all three TCC grants.

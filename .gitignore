@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 *.xcodeproj/
+*.profraw
 .DS_Store
 icon.iconset/
 
@@ -8,12 +9,5 @@ icon.iconset/
 *.apk
 DoubaoIME-decompiled/
 
-# Third-party reference projects kept locally for inspiration
-BorderBeam/
-
 # Per-developer signing config (Apple Developer ID, notary profile)
 Makefile.local
-
-# Internal docs (reverse-engineering notes, manual test logs) — not for public repo
-docs/
-.playwright-mcp/
