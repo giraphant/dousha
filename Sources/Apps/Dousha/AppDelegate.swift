@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancelKeyRetryDelay: TimeInterval = 3
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DoushaFileLog.shared?.setEnabled(prefs.saveDiagnosticLogs)
         doushaLog("[Dousha] HUD layout revision: \(FloatingHUDView.layoutRevision)")
         applyDockIconVisibility()
         installMainMenu()
@@ -323,6 +324,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 setDockIconVisible: { [weak self] visible in self?.setDockIconVisible(visible) },
                 isMenuBarIconVisible: { [weak self] in self?.prefs.showMenuBarIcon ?? true },
                 setMenuBarIconVisible: { [weak self] visible in self?.setMenuBarIconVisible(visible) },
+                setSaveDiagnosticLogs: { [prefs] enabled in
+                    prefs.saveDiagnosticLogs = enabled
+                    DoushaFileLog.shared?.setEnabled(enabled)
+                },
+                revealDiagnosticLog: {
+                    if let log = DoushaFileLog.shared {
+                        NSWorkspace.shared.activateFileViewerSelecting([log.fileURL])
+                    }
+                },
+                deleteDiagnosticLogs: { try DoushaFileLog.shared?.deleteLogs() },
                 resetDoubaoCredentials: { [weak self] in self?.menuBar.resetDoubaoCredentials() },
                 retranscribe: { [weak self] id in self?.retranscribeEntry(id: id) },
                 canRetranscribe: { [weak self] in self?.recording.canRetranscribe ?? false },

@@ -27,6 +27,10 @@ struct SettingsActions {
     /// Show/hide the menu-bar status item, applied immediately.
     var setMenuBarIconVisible: @MainActor (Bool) -> Void
 
+    var setSaveDiagnosticLogs: @MainActor (Bool) -> Void
+    var revealDiagnosticLog: @MainActor () -> Void
+    var deleteDiagnosticLogs: @MainActor () throws -> Void
+
     /// Reset cached Doubao credentials (shows its own confirmation alert).
     var resetDoubaoCredentials: @MainActor () -> Void
 

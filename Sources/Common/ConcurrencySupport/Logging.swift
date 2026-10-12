@@ -9,7 +9,7 @@ private let _doushaLogger = Logger(subsystem: "com.dousha.app", category: "gener
 /// Console.app. Centralised here so both DoubaoASR and the Dousha app
 /// target route through the same subsystem/category.
 ///
-/// Also tees every line to a persistent on-disk log so failures can be
+/// When enabled, also tees every line to a persistent on-disk log so failures can be
 /// inspected after the fact — the unified-log store has a short retention
 /// window (`log show` routinely returns nothing a day or two later), which
 /// made past failures (stuck Doubao credentials, silent capture, near-hangs)
@@ -22,12 +22,13 @@ public func doushaLog(_ message: String) {
 
 /// Append-only persistent log at `~/Library/Logs/Dousha/dousha.log`, mirroring
 /// every `doushaLog` line with a timestamp. Thread-safe via a private serial
-/// queue; rotates once at ~5 MB so it can't grow unbounded.
-final class DoushaFileLog: @unchecked Sendable {
-    static let shared = NSClassFromString("XCTestCase") == nil ? DoushaFileLog() : nil
+/// queue, including the enabled flag and formatter; rotates at ~5 MB on open.
+public final class DoushaFileLog: @unchecked Sendable {
+    public static let shared = NSClassFromString("XCTestCase") == nil ? DoushaFileLog() : nil
 
     private let queue = DispatchQueue(label: "com.dousha.app.filelog")
-    private let fileURL: URL?
+    public let fileURL: URL
+    private var enabled = true
     private var handle: FileHandle?
     private let maxBytes: UInt64 = 5 * 1024 * 1024
 
@@ -37,22 +38,35 @@ final class DoushaFileLog: @unchecked Sendable {
         return f
     }()
 
-    private init() {
-        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
-        let dirOrNil = base?.appendingPathComponent("Logs/Dousha", isDirectory: true)
-        guard let dir = dirOrNil else {
-            fileURL = nil
-            return
+    init(fileURL: URL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Dousha/dousha.log")) {
+        self.fileURL = fileURL
+    }
+
+    /// Returns only after earlier writes finish; later appends obey the new value.
+    public func setEnabled(_ enabled: Bool) {
+        queue.sync { self.enabled = enabled }
+    }
+
+    public func deleteLogs() throws {
+        try queue.sync {
+            try handle?.close()
+            handle = nil
+            for url in [fileURL, fileURL.appendingPathExtension("1")]
+                where FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
         }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        fileURL = dir.appendingPathComponent("dousha.log")
     }
 
     func append(_ message: String) {
-        let line = "\(stamp.string(from: Date()))  \(message)\n"
         queue.async { [weak self] in
-            guard let self, let url = self.fileURL else { return }
+            guard let self, self.enabled else { return }
+            let url = self.fileURL
+            let line = "\(self.stamp.string(from: Date()))  \(message)\n"
             if self.handle == nil {
+                try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                        withIntermediateDirectories: true)
                 if !FileManager.default.fileExists(atPath: url.path) {
                     FileManager.default.createFile(atPath: url.path, contents: nil)
                 }
@@ -66,8 +80,7 @@ final class DoushaFileLog: @unchecked Sendable {
     }
 
     /// If the existing log already exceeds the cap, roll it to `dousha.log.1`
-    /// (overwriting any previous roll) and start fresh. Called once per process
-    /// before the handle is opened.
+    /// (overwriting any previous roll) and start fresh before opening the handle.
     private func rotateIfNeeded(_ url: URL) {
         let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? nil
         guard let size, size > maxBytes else { return }

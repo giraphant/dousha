@@ -98,6 +98,9 @@ struct SettingsView: View {
     @State private var launchAtLoginError: String = ""
     @State private var showDockIcon: Bool
     @State private var showMenuBarIcon: Bool
+    @State private var saveDiagnosticLogs = Preferences.shared.saveDiagnosticLogs
+    @State private var confirmingLogDeletion = false
+    @State private var logDeletionError = ""
 
     // 智能增强 — 文本格式
     @State private var quoteStyle: TranscriptCorrector.QuoteStyle = Preferences.shared.quoteStyle
@@ -204,6 +207,18 @@ struct SettingsView: View {
         } message: {
             Text("所有听写统计将被清除，历史录音不受影响。")
         }
+        .confirmationDialog("删除诊断日志？", isPresented: $confirmingLogDeletion) {
+            Button("删除日志", role: .destructive) {
+                do {
+                    try actions.deleteDiagnosticLogs()
+                    logDeletionError = ""
+                } catch {
+                    logDeletionError = "删除日志失败：\(error.localizedDescription)"
+                }
+            }
+        } message: {
+            Text("当前及备份日志将被删除。若仍开启保存，之后会生成新日志。")
+        }
     }
 
     @ViewBuilder
@@ -242,6 +257,24 @@ struct SettingsView: View {
                 }
                 .onChange(of: showMenuBarIcon) { _, newValue in
                     actions.setMenuBarIconVisible(newValue)
+                }
+            }
+
+            Section("诊断") {
+                Toggle(isOn: $saveDiagnosticLogs) {
+                    Text("保存诊断日志")
+                    Text("用于排查问题；不含听写内容")
+                }
+                .onChange(of: saveDiagnosticLogs) { _, enabled in
+                    actions.setSaveDiagnosticLogs(enabled)
+                }
+                HStack {
+                    Button("在 Finder 中显示") { actions.revealDiagnosticLog() }
+                    Button("删除日志…", role: .destructive) { confirmingLogDeletion = true }
+                }
+                .controlSize(.small)
+                if !logDeletionError.isEmpty {
+                    statusLabel(logDeletionError, isError: true)
                 }
             }
 
