@@ -198,7 +198,7 @@ struct SettingsView: View {
 
     private var generalPane: some View {
         Form {
-            Section("启动行为") {
+            Section("启动与显示") {
                 Toggle("开机时启动豆沙", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in
                         applyLaunchAtLogin(newValue)
@@ -206,24 +206,20 @@ struct SettingsView: View {
                 if !launchAtLoginError.isEmpty {
                     statusLabel(launchAtLoginError, isError: true)
                 }
-            }
-
-            Section {
                 Toggle("显示程序坞图标", isOn: $showDockIcon)
                     .onChange(of: showDockIcon) { _, newValue in
                         actions.setDockIconVisible(newValue)
                     }
-                Toggle("显示状态栏图标", isOn: $showMenuBarIcon)
-                    .onChange(of: showMenuBarIcon) { _, newValue in
-                        actions.setMenuBarIconVisible(newValue)
-                    }
-            } header: {
-                Text("显示")
-            } footer: {
-                Text("两者都隐藏后，可从 Finder 或聚焦搜索重新打开豆沙以再次显示本窗口。")
+                Toggle(isOn: $showMenuBarIcon) {
+                    Text("显示状态栏图标")
+                    Text("均隐藏后，从 Finder 或聚焦搜索重开豆沙")
+                }
+                .onChange(of: showMenuBarIcon) { _, newValue in
+                    actions.setMenuBarIconVisible(newValue)
+                }
             }
 
-            Section {
+            Section("热键") {
                 LabeledContent("触发键") {
                     HStack(spacing: 8) {
                         Text(HotkeyMonitor.displayName(forKeyCode: hotkeyKeyCode))
@@ -231,22 +227,15 @@ struct SettingsView: View {
                     }
                 }
                 Picker("模式", selection: $hotkeyMode) {
-                    Text("长按说话").tag(HotkeyMode.pushToTalk)
-                    Text("切换").tag(HotkeyMode.toggle)
+                    Text("长按说话（按住录音）").tag(HotkeyMode.pushToTalk)
+                    Text("切换（按一下开始／停止）").tag(HotkeyMode.toggle)
                 }
                 .onChange(of: hotkeyMode) { _, newMode in
                     let cfg = HotkeyConfig(keyCode: Preferences.shared.hotkey.keyCode, mode: newMode)
                     Preferences.shared.hotkey = cfg
                     NotificationCenter.default.post(name: .doushaHotkeyConfigChanged, object: nil)
                 }
-            } header: {
-                Text("热键")
-            } footer: {
-                Text("长按说话：按住时录音；切换：每次按下开始/停止。")
-            }
-
-            Section {
-                LabeledContent("取消键") {
+                LabeledContent {
                     HStack(spacing: 8) {
                         Text(cancelHotkey.displayName)
                         Button(isRecordingCancelHotkey ? "按任意键…" : "录制") { toggleCancelHotkeyRecording() }
@@ -256,13 +245,13 @@ struct SettingsView: View {
                             NotificationCenter.default.post(name: .doushaCancelHotkeyConfigChanged, object: nil)
                         }
                         .disabled(!cancelHotkey.isEnabled)
+                        settingsHelp("取消键仅在录音时丢弃当前录音且不转写。",
+                                     details: "取消会丢弃当前录音且不转写。仅在录音时生效，其余情况下按键正常透传。")
                     }
+                } label: {
+                    Text("取消键")
+                    Text("仅在录音时丢弃，不转写")
                 }
-            } header: {
-                Text("取消")
-            } footer: {
-                sectionFooter("取消键仅在录音时丢弃当前录音且不转写。",
-                              details: "取消会丢弃当前录音且不转写。仅在录音时生效，其余情况下按键正常透传。")
             }
         }
         .formStyle(.grouped)
@@ -366,8 +355,11 @@ struct SettingsView: View {
     private var audioPane: some View {
         Form {
             Section {
-                Toggle("使用系统默认", isOn: $microphoneUseSystemDefault)
-                    .onChange(of: microphoneUseSystemDefault) { _, _ in persistMicrophoneSelection() }
+                Toggle(isOn: $microphoneUseSystemDefault) {
+                    Text("使用系统默认")
+                    Text("关闭后按下方顺序选择，下次录音生效")
+                }
+                .onChange(of: microphoneUseSystemDefault) { _, _ in persistMicrophoneSelection() }
 
                 if orderedMicrophones.isEmpty {
                     Text("未找到可用麦克风。")
@@ -384,26 +376,34 @@ struct SettingsView: View {
                 }
                 Button("刷新设备") { refreshMicrophones() }
             } header: {
-                Text("麦克风")
-            } footer: {
-                sectionFooter("关闭系统默认后，按上方顺序选择麦克风，下一次录音生效。",
-                              details: "关闭「使用系统默认」后，豆沙会按上方顺序尝试麦克风；内建或外接麦克风会优先尝试。下一次录音起生效。")
+                HStack {
+                    Text("麦克风")
+                    settingsHelp("关闭系统默认后，按上方顺序选择麦克风，下一次录音生效。",
+                                 details: "关闭「使用系统默认」后，豆沙会按列表顺序尝试麦克风；内建或外接麦克风会优先尝试。下一次录音起生效。")
+                }
             }
 
             Section {
-                Toggle("录音时静音", isOn: $muteSystemAudioDuringRecording)
-                    .onChange(of: muteSystemAudioDuringRecording) { _, newValue in
-                        Preferences.shared.muteSystemAudioDuringRecording = newValue
-                    }
-                Toggle("录音时暂停媒体", isOn: $pauseMediaDuringRecording)
-                    .onChange(of: pauseMediaDuringRecording) { _, newValue in
-                        Preferences.shared.pauseMediaDuringRecording = newValue
-                    }
+                Toggle(isOn: $muteSystemAudioDuringRecording) {
+                    Text("录音时静音")
+                    Text("临时静音系统输出，结束后恢复")
+                }
+                .onChange(of: muteSystemAudioDuringRecording) { _, newValue in
+                    Preferences.shared.muteSystemAudioDuringRecording = newValue
+                }
+                Toggle(isOn: $pauseMediaDuringRecording) {
+                    Text("录音时暂停媒体")
+                    Text("暂停正在播放的媒体，结束后恢复")
+                }
+                .onChange(of: pauseMediaDuringRecording) { _, newValue in
+                    Preferences.shared.pauseMediaDuringRecording = newValue
+                }
             } header: {
-                Text("音频和反馈")
-            } footer: {
-                sectionFooter("录音时静音或暂停正在播放的媒体，结束后恢复。",
-                              details: "录音时静音会临时静音系统输出并在结束后恢复；暂停媒体会在系统 Now Playing 显示正在播放时暂停，并在录音结束后恢复，未播放时不会启动媒体。少数不发布 Now Playing 状态的应用或网页可能不会被暂停，可同时开启录音时静音作为兜底。系统语音隔离当前不作为可用选项暴露，避免再次切到系统播放/多通道输入。")
+                HStack {
+                    Text("音频和反馈")
+                    settingsHelp("录音时静音或暂停正在播放的媒体，结束后恢复。",
+                                 details: "录音时静音会临时静音系统输出并在结束后恢复；暂停媒体会在系统 Now Playing 显示正在播放时暂停，并在录音结束后恢复，未播放时不会启动媒体。少数不发布 Now Playing 状态的应用或网页可能不会被暂停，可同时开启录音时静音作为兜底。系统语音隔离当前不作为可用选项暴露，避免再次切到系统播放/多通道输入。")
+                }
             }
         }
         .formStyle(.grouped)
@@ -413,9 +413,12 @@ struct SettingsView: View {
     private var modelPane: some View {
         Form {
             Section {
-                Picker("主要语言", selection: $primaryLanguage) {
+                Picker(selection: $primaryLanguage) {
                     Text("中文").tag(Language.zh_CN)
                     Text("英文").tag(Language.en_US)
+                } label: {
+                    Text("主要语言")
+                    Text("对应引擎提供悬浮窗实时字幕")
                 }
                 .onChange(of: primaryLanguage) { _, newValue in
                     Preferences.shared.language = newValue.rawValue
@@ -428,10 +431,11 @@ struct SettingsView: View {
                 Picker("中英混合", selection: $mixedEngine) { engineOptions() }
                     .onChange(of: mixedEngine) { _, _ in persistRouting() }
             } header: {
-                Text("引擎路由")
-            } footer: {
-                sectionFooter("用到的引擎会在录音时并行运行，停录后按语言挑选结果。",
-                              details: "按语言把识别结果路由到对应引擎。用到的引擎会在录音时并行运行——例如「中文→豆包、英文→Soniox」就会同时跑两家，停录后按整段语言占比挑一家的结果。三个都选同一个引擎即单引擎、零额外开销。主要语言（菜单「语言」）对应的引擎为主引擎，其实时字幕显示在悬浮窗。")
+                HStack {
+                    Text("引擎路由")
+                    settingsHelp("用到的引擎会在录音时并行运行，停录后按语言挑选结果。",
+                                 details: "按语言把识别结果路由到对应引擎。用到的引擎会在录音时并行运行——例如「中文→豆包、英文→Soniox」就会同时跑两家，停录后按整段语言占比挑一家的结果。三个都选同一个引擎即单引擎、零额外开销。主要语言（菜单「语言」）对应的引擎为主引擎，其实时字幕显示在悬浮窗。")
+                }
             }
             Section("引擎") {
                 engineRow(.qwen3)
@@ -512,9 +516,12 @@ struct SettingsView: View {
 
     private var sonioxSettings: some View {
         Section {
-            Picker("模式", selection: $sonioxMode) {
+            Picker(selection: $sonioxMode) {
                 Text("实时").tag(SonioxMode.realtime)
                 Text("高精度（异步）").tag(SonioxMode.async)
+            } label: {
+                Text("模式")
+                Text("自动检测语言，无需手动选择")
             }
             .onChange(of: sonioxMode) { _, newValue in
                 Preferences.shared.sonioxMode = newValue
@@ -538,21 +545,22 @@ struct SettingsView: View {
                             isError: sonioxStatusIsError, isProgress: isTestingSoniox)
             }
         } header: {
-            Text("Soniox")
-        } footer: {
-            sectionFooter("Soniox 自动检测语言，无需手动选择。",
-                          details: "Soniox 实时语音转写引擎。自动检测语言，无需选择。在菜单「引擎」中切换到 Soniox 后生效。")
+            HStack {
+                Text("Soniox")
+                settingsHelp("Soniox 自动检测语言，无需手动选择。",
+                             details: "Soniox 实时语音转写引擎。自动检测语言，无需选择。在菜单「引擎」中切换到 Soniox 后生效。")
+            }
         }
     }
 
     private var doubaoSettings: some View {
-        Section {
-            Button("重置豆包凭据…", role: .destructive) { actions.resetDoubaoCredentials() }
-        } header: {
-            Text("豆包")
-        } footer: {
-            sectionFooter("重置后，下次听写时自动重新注册凭据。",
-                          details: "删除缓存的 device_id 与 token，下次听写时重新注册。遇到 exceedconcurrentquota 等错误时使用。")
+        Section("豆包") {
+            HStack {
+                Button("重置豆包凭据…", role: .destructive) { actions.resetDoubaoCredentials() }
+                Spacer()
+                settingsHelp("重置后，下次听写时自动重新注册凭据。",
+                             details: "删除缓存的 device_id 与 token，下次听写时自动重新注册。遇到 exceedconcurrentquota 等错误时使用。")
+            }
         }
     }
 
@@ -574,10 +582,11 @@ struct SettingsView: View {
                 statusLabel(modelManagementError, isError: true)
             }
         } header: {
-            Text("Qwen3 模型")
-        } footer: {
-            sectionFooter("下载后可离线听写，切换模型在下一次录音生效。",
-                          details: "安装会下载并加载模型，首次可能需要几分钟；下载完成后可离线听写。切换模型在下一次录音生效。\n\n已加载的模型暂不可卸载。请先使用另一个模型并等待加载完成，或重新打开豆沙后卸载。")
+            HStack {
+                Text("Qwen3 模型")
+                settingsHelp("下载后可离线听写，切换模型在下一次录音生效。",
+                             details: "安装会下载并加载模型，首次可能需要几分钟；下载完成后可离线听写。切换模型在下一次录音生效。\n\n已加载的模型暂不可卸载。请先使用另一个模型并等待加载完成，或重新打开豆沙后卸载。")
+            }
         }
     }
 
@@ -712,10 +721,13 @@ struct SettingsView: View {
     private var glossaryPane: some View {
         Form {
             Section {
-                Toggle("启用个性词库", isOn: $glossaryEnabled)
-                    .onChange(of: glossaryEnabled) { _, newValue in
-                        Preferences.shared.glossaryEnabled = newValue
-                    }
+                Toggle(isOn: $glossaryEnabled) {
+                    Text("启用个性词库")
+                    Text("顿号、逗号或换行分隔，下次录音生效")
+                }
+                .onChange(of: glossaryEnabled) { _, newValue in
+                    Preferences.shared.glossaryEnabled = newValue
+                }
                 // Parse without rewriting the draft so the insertion point stays put.
                 settingsEditor("个性词库", text: $glossaryText,
                                placeholder: "输入关键词、专业术语…\n示例：布迪厄、哈贝马斯、福柯")
@@ -725,10 +737,11 @@ struct SettingsView: View {
                     .disabled(!glossaryEnabled)
                 LabeledContent("术语数量", value: "共 \(GlossaryText.parse(glossaryText).count) 个术语")
             } header: {
-                Text("个性词库")
-            } footer: {
-                sectionFooter("用顿号、逗号或换行分隔术语，下一次录音生效。",
-                              details: "把常用术语、专有名词加进词库，用顿号、逗号或换行分隔；识别时会优先往这些词上靠，提高准确率。对豆包和 Soniox 引擎都生效，下一次录音起作用。Soniox 用词表（terms）偏置，效果通常更明显。")
+                HStack {
+                    Text("个性词库")
+                    settingsHelp("用顿号、逗号或换行分隔术语，下一次录音生效。",
+                                 details: "把常用术语、专有名词加进词库，用顿号、逗号或换行分隔；识别时会优先往这些词上靠，提高准确率。对豆包和 Soniox 引擎都生效，下一次录音起作用。Soniox 用词表（terms）偏置，效果通常更明显。")
+                }
             }
         }
         .formStyle(.grouped)
@@ -739,28 +752,35 @@ struct SettingsView: View {
     private var enhancePane: some View {
         Form {
             Section {
-                Picker("引号", selection: $quoteStyle) {
+                Picker(selection: $quoteStyle) {
                     Text("中文用「」").tag(TranscriptCorrector.QuoteStyle.corner)
                     Text("中文用“”").tag(TranscriptCorrector.QuoteStyle.curly)
                     Text("不处理").tag(TranscriptCorrector.QuoteStyle.off)
+                } label: {
+                    Text("引号")
+                    Text("将听写中的直引号配对成规范引号")
                 }
                 .pickerStyle(.menu)
                 .onChange(of: quoteStyle) { _, newValue in
                     Preferences.shared.quoteStyle = newValue
                 }
             } header: {
-                Text("文本格式")
-            } footer: {
-                sectionFooter("将听写中的直引号配对成规范引号。",
-                              details: "把听写出来的直引号配对成规范引号。英文始终用 “ ”，撇号写成 don’t；上面这项只决定中文语境用哪套。")
+                HStack {
+                    Text("文本格式")
+                    settingsHelp("将听写中的直引号配对成规范引号。",
+                                 details: "把听写出来的直引号配对成规范引号。英文始终用 “ ”，撇号写成 don’t；这项只决定中文语境用哪套。")
+                }
             }
 
             Section {
-                Toggle("启用润色", isOn: $llmEnabled)
-                    .onChange(of: llmEnabled) { _, newValue in
-                        Preferences.shared.llmEnabled = newValue
-                        NotificationCenter.default.post(name: .doushaLLMEnabledChanged, object: nil)
-                    }
+                Toggle(isOn: $llmEnabled) {
+                    Text("启用润色")
+                    Text("通过兼容 OpenAI 的接口清理听写结果")
+                }
+                .onChange(of: llmEnabled) { _, newValue in
+                    Preferences.shared.llmEnabled = newValue
+                    NotificationCenter.default.post(name: .doushaLLMEnabledChanged, object: nil)
+                }
                 TextField("API 地址", text: $baseURL,
                           prompt: Text("https://api.openai.com/v1"))
                     .disableAutocorrection(true)
@@ -794,17 +814,23 @@ struct SettingsView: View {
                                 isError: statusIsError, isProgress: isTesting)
                 }
             } header: {
-                Text("润色")
-            } footer: {
-                sectionFooter("使用兼容 OpenAI 的接口，按润色规则清理听写结果。",
-                              details: "使用任意兼容 OpenAI 的对话补全接口来清理听写结果。默认仅修正明显的识别错误；可在下方自定义润色规则。")
+                HStack {
+                    Text("润色")
+                    settingsHelp("使用兼容 OpenAI 的接口，按润色规则清理听写结果。",
+                                 details: "使用任意兼容 OpenAI 的对话补全接口来清理听写结果。默认仅修正明显的识别错误；可在下方自定义润色规则。")
+                }
             }
 
             Section {
                 settingsEditor("润色提示词", text: $llmSystemPrompt,
                                placeholder: "输入润色规则…\n留空则使用默认规则。")
                     .disableAutocorrection(true)
-                LabeledContent("保存状态", value: llmSystemPrompt == savedLLMSystemPrompt ? "已保存" : "未保存")
+                LabeledContent {
+                    Text(llmSystemPrompt == savedLLMSystemPrompt ? "已保存" : "未保存")
+                } label: {
+                    Text("保存状态")
+                    Text("保存后生效；留空使用默认规则")
+                }
                 HStack {
                     Button("恢复默认", role: .destructive) { llmSystemPrompt = TextRefiner.defaultSystemPrompt }
                         .disabled(llmSystemPrompt == TextRefiner.defaultSystemPrompt)
@@ -813,10 +839,11 @@ struct SettingsView: View {
                         .disabled(llmSystemPrompt == savedLLMSystemPrompt)
                 }
             } header: {
-                Text("润色提示词")
-            } footer: {
-                sectionFooter("保存后用于后续润色，留空则使用默认规则。",
-                              details: "自定义提示词会完整替换默认规则，可允许清理重复、修复断句或轻度润色。建议要求模型只输出处理后的正文。修改后点击「保存提示词」，后续润色请求生效；留空则使用默认规则。")
+                HStack {
+                    Text("润色提示词")
+                    settingsHelp("保存后用于后续润色，留空则使用默认规则。",
+                                 details: "自定义提示词会完整替换默认规则，可允许清理重复、修复断句或轻度润色。建议要求模型只输出处理后的正文。修改后点击「保存提示词」，后续润色请求生效；留空则使用默认规则。")
+                }
             }
         }
         .formStyle(.grouped)
@@ -827,15 +854,16 @@ struct SettingsView: View {
     private var historyPane: some View {
         Form {
             Section {
-                Stepper("保留最近 \(historyLimit) 条录音", value: $historyLimit, in: 1...50)
-                    .onChange(of: historyLimit) { _, newValue in
-                        Preferences.shared.historyLimit = newValue
-                        history.prune(limit: newValue)
-                    }
+                Stepper(value: $historyLimit, in: 1...50) {
+                    Text("保留最近 \(historyLimit) 条录音")
+                    Text("本机缓存原始录音与文本，超出后删最旧的")
+                }
+                .onChange(of: historyLimit) { _, newValue in
+                    Preferences.shared.historyLimit = newValue
+                    history.prune(limit: newValue)
+                }
             } header: {
                 Text("存储")
-            } footer: {
-                Text("每次听写的原始录音和转录文本保存在本机缓存目录，超出条数自动删除最旧的。")
             }
             Section("最近录音") {
                 if historyEntries.isEmpty {
@@ -963,11 +991,12 @@ struct SettingsView: View {
         .accessibilityLabel(message)
     }
 
-    /// Form supplies the native editor surface; neither editor adds a custom border.
+    /// Both editors share the form row's surface and an appearance-aware hairline.
     private func settingsEditor(_ title: String, text: Binding<String>, placeholder: String) -> some View {
         ZStack(alignment: .topLeading) {
             TextEditor(text: text)
                 .font(.body)
+                .scrollContentBackground(.hidden)
                 .frame(height: 200)
                 .accessibilityLabel(title)
             if text.wrappedValue.isEmpty {
@@ -979,28 +1008,31 @@ struct SettingsView: View {
                     .accessibilityHidden(true)
             }
         }
+        .overlay {
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     /// The popover's presentation lives here too, so helper fragments have no state.
-    private func sectionFooter(_ summary: String, details: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(summary)
-            Button { presentedHelp = details } label: {
-                Image(systemName: "info.circle")
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("更多说明：\(summary)")
-            .help(details)
-            .popover(isPresented: Binding(
-                get: { presentedHelp == details },
-                set: { if !$0 { presentedHelp = nil } }
-            )) {
-                Text(details)
-                    .font(.body)
-                    .padding()
-                    .frame(width: 340)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+    private func settingsHelp(_ summary: String, details: String) -> some View {
+        Button { presentedHelp = details } label: {
+            Image(systemName: "info.circle")
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("更多说明：\(summary)")
+        .help(details)
+        .popover(isPresented: Binding(
+            get: { presentedHelp == details },
+            set: { if !$0 { presentedHelp = nil } }
+        )) {
+            Text(details)
+                .font(.body)
+                .padding()
+                .frame(width: 340)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
