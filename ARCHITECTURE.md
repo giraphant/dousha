@@ -17,16 +17,18 @@ ASRSupport                engine-agnostic domain types (PartialTranscript,
         │                 TranscriptCorrector, WavFileWriter, AudioLevel,
         │                 AudioCapturePaths, WavReader)
         ▼
-DoubaoASR    SonioxASR    one streaming WS client each; peers, never import each other
-        │         │
-        ▼         ▼
-┌───────────────┬──────────────────┐
+DoubaoASR    SonioxASR    MLXASR  ← MLXAudioSTT (mlx-audio-swift, pinned revision)
+        │         │        │    peer engines, never import each other
+        └─────────┼────────┘
+                  ▼
+┌────────────────────────┬──────────────────────┐
 Dousha                   SmokeCLI
 macOS app:               headless smoke
 UI, hotkeys,             harness: register /
 capture hub,             ws-probe / transcribe
 orchestration,           against the real
-settings                 Doubao servers
+settings                 Doubao servers;
+                         mlx-transcribe with local MLX weights
 ```
 
 macOS-only. (A tier-2 Windows shell, `DoushaWin`, existed under QUA-209; it
@@ -36,15 +38,20 @@ it. Resurrect from git history if a port is ever needed again.)
 
 Rules:
 
-- Lower layers never import higher ones. The two ASR clients are peers, and
+- Lower layers never import higher ones. The three ASR libraries are peers, and
   the two entry points never import each other.
+- `MLXASR` depends on mlx-audio-swift's `MLXAudioSTT`, pinned to revision
+  `244458d7b61e54ff135073ddc9ed76782bb20758`. Local model support is restricted
+  to real-time streaming models by product decision; the current catalog is
+  Qwen3-ASR 0.6B / 1.7B (8-bit), with 0.6B as the default. Do not introduce a
+  batch-only local model behind the streaming engine contract.
 - Platform APIs (AppKit) live only in the entry points under `Apps/` and
   `Tools/`.
 - Library targets never read `Preferences` (or any app singleton). The app
   snapshots config at recording start and passes it in
-  (`SonioxBackend`/`DoubaoBackend` snapshot glossary + language in
-  `beginSession`). This keeps mid-recording Settings changes from mutating a
-  live session, and keeps the libraries testable.
+  (`SonioxBackend`/`DoubaoBackend` snapshot glossary + language and `MLXBackend`
+  snapshots the language identifier in `beginSession`). This keeps mid-recording
+  Settings changes from mutating a live session, and keeps the libraries testable.
 - All logging goes through `doushaLog` (ConcurrencySupport). Log strings are part
   of the observable surface — field debugging greps for them — so don't reword
   them casually.
@@ -60,17 +67,18 @@ on recordingFlag: Lock<Bool>)            idle → recording → transcribing →
                                                      │            └ error → (3.0s) → idle
                                                      ▼
                                   MultiEngineBackend.start()  — THREE PHASES, ORDER FIXED:
-                                    1. beginSession on EVERY engine   (reset state, no network)
+                                    1. beginSession on EVERY engine   (reset state, no network/inference)
                                     2. AudioTapHub.startCapture       (the one mic tap goes live)
-                                    3. openStream on every engine     (network; early audio is
+                                    3. openStream on every engine     (network / local model setup; early audio is
                                                                        buffered by each engine)
                                                      │
-                       ┌─────────────────────────────┼──────────────────────────┐
-                       ▼                             ▼                          ▼
-              DoubaoBackend (PCM)           SonioxBackend (PCM)       AppleSpeechBackend (buffer)
-              → DoubaoASR actor             → SonioxASR actor         → SFSpeechRecognizer
-                       │                             │                          │
-                       └────────── partials (all dispatched on main queue) ─────┘
+                       ┌─────────────────────┬───────┴────────────┬────────────────────────┐
+                       ▼                     ▼                    ▼                        ▼
+              DoubaoBackend (PCM)   SonioxBackend (PCM)  MLXBackend (PCM)       AppleSpeechBackend (buffer)
+              → DoubaoASR actor     → SonioxASR actor    → MLXStreamingASR      → SFSpeechRecognizer
+                       │                     │                    │                        │
+                       └─────────────────────┴───────┬────────────┴────────────────────────┘
+                                      partials (all dispatched on main queue)
                                                      │
                                        HUDPartialRouter (QUA-180):
                                        primary drives the HUD; a designated
@@ -99,6 +107,13 @@ engine is still alive (`ErrorGate`); a primary failure hands the HUD to the
 secondary immediately. Only all-engines-dead (or capture failure) becomes a
 fatal `.error` stream event.
 
+`MLXBackend` passes the snapshotted Dousha language identifier (`zh-CN`,
+`en-US`, `auto`) unchanged; `MLXStreamingASR` alone maps it to the Qwen3
+language name. Nil, auto and unknown identifiers mean auto-detect. Local
+streaming does not yet receive glossary/context hints because the upstream
+session lacks that input ([giraphant/dousha#53](https://github.com/giraphant/dousha/issues/53));
+downstream `TranscriptCorrector` still applies local corrections.
+
 Fatal ≠ session end during live capture (issue #46): a fatal `.error` arriving
 while the controller is still `.recording` is latched (`pendingErrorMessage`),
 NOT transitioned — the mic + WAV don't need the network, so capture runs until
@@ -121,6 +136,8 @@ visibility. Timing constants live as statics on the controller
 |---|---|---|
 | `SpeechBackend` | one session = one `AsyncStream<RecordingEvent>`; `stop()` yields exactly one terminal `.final`, `cancel()` finishes with none | `MockSpeechBackend` (RecordingControllerTests) |
 | `PushCaptureEngine` (+ `PCMCaptureEngine` / `BufferCaptureEngine`) | engines receive pushed audio from the hub; two-phase `beginSession`/`openStream` | `MockBackend` (MultiEngineBackendTests, hub = nil) |
+| `MLXBackend` (`Engine.local`, `PCMCaptureEngine`) | adapts prepare / open / ingest / stop / cancel to `MLXStreamingASR`; snapshots the unmapped language identifier | injected prepare closure + isolated Preferences (MLXEngineWiringTests) |
+| `MLXModelStore` loader + process-wide session lease | loads/caches Qwen3 weights once; serializes local inference sessions | injected failing/suspended loader (MLXASRLifecycleTests); lease tests never allocate MLX arrays |
 | `RecordingEnvironment` | struct-of-closures: ALL side effects the controller performs (HUD, inject, refine, scheduling, clock) | closure fakes + virtual clock |
 | `SettingsActions` | struct-of-closures: system-touching settings effects (login item, dock icon, credentials) | closure fakes |
 
@@ -169,6 +186,37 @@ type is used, re-derive the reason or the annotation becomes a lie.
 - **`AppleSpeechBackend`** — `sessionGen` behind a `Lock`, because three
   threads touch it: main, the audio-frame path, and Speech framework callbacks.
   Codes 203/216/1110/301 are benign and intentionally dropped.
+- **`MLXStreamingASR` / `MLXSessionInput`** — lifecycle state is actor-isolated;
+  `ingest` is a nonisolated, lock-only PCM append for the real-time audio path:
+  no conversion, MLX calls, tasks, logging or actor hops on the tap thread.
+  The detached feeder wakes every 100ms and schedules PCM conversion +
+  `feedAudio` on a private serial queue, off both audio and main threads.
+  Final drain, native `stop` and native `cancel` use that same queue, so they
+  cannot overtake an in-progress feed. Odd PCM bytes carry into the next feed;
+  only a malformed final odd byte is discarded.
+- **MLX generations and callbacks** — every recording owns fresh setup,
+  final and event-finished channels; stale setup/cleanup retains its captured
+  objects, never a newer session's lease. `.ended` signals its final channel
+  before the generation guard. Only cumulative `.displayUpdate` events replace
+  the transcript; confirmed/provisional events must not be appended again.
+  Partials, errors and the one stop completion dispatch on main and recheck
+  the generation there; cancel immediately quarantines input and callbacks.
+- **`MLXModelStore` / `MLXLoadedModel` (`@unchecked Sendable`)** — the store
+  actor caches weights and coalesces loading/warmup. A single process-wide
+  lease gate, shared even by separately constructed stores, covers model load,
+  replacement and the complete streaming session. The loaded model is never
+  mutated by the store after publication and is only used by the lease holder;
+  model construction/loading runs off main. Cancelled callers do not cancel a
+  shared download, and setup retains the lease until that load settles.
+- **MLX bounded teardown** — stop waits up to 30s for setup, then up to 10s
+  for `.ended` (falling back to the latest display text), then up to 3s for
+  cleanup before returning. Cleanup waits 3s for queued native cancel; if a
+  synchronous feed is stuck, it retains the lease until cancel actually returns.
+  It then waits up to 3s for event-stream closure before cancelling the consumer
+  and releasing the lease. Upstream `cancel()` has **no native decoder completion
+  barrier**: event-stream closure is its strongest exposed signal, not proof
+  that all detached GPU work has completed. Do not describe this as an awaited
+  native shutdown or weaken the lease to permit concurrent sessions.
 - **`AudioTapHub` (actor)** — the tap closure runs on the audio thread and
   captures only local snapshots; it never hops back into the actor (real-time
   safety). The `nonisolated(unsafe) var fed` is safe because the converter
@@ -228,16 +276,54 @@ Sources/
   Engines/            one streaming ASR client per provider
     DoubaoASR/          Doubao WS client (protobuf, opus, reconnect, credentials)
     SonioxASR/          Soniox WS + async-batch client
+    MLXASR/             local Qwen3 streaming, model store and session lease
   Apps/
     Dousha/             macOS app: AppDelegate wiring, RecordingController,
                         MultiEngineBackend + AudioTapHub, backends (adapters),
                         HUD (FloatingHUD*), Settings, hotkey monitors, Preferences
   Tools/              developer-facing executables, never shipped
-    SmokeCLI/           smoke harness — hits the REAL Doubao servers, so it can
-                        never live in Tests/ (suite must stay offline/deterministic)
+    SmokeCLI/           smoke harness — real Doubao servers or real local MLX
+                        weights; never Tests/ (suite must stay offline/deterministic)
+    SmokeCLISupport/    Doubao file-transcription helper
 Tests/DoushaTests/    all unit tests (one target, @testable imports everything;
                       macOS-only because it imports the app target)
 ```
+
+Builds use Xcode (`xcodebuild`) so MLX's Metal shaders are compiled and the
+`mlx-swift_Cmlx.bundle` resource is placed beside the executable (and copied
+into the app by the Makefile). `swift build` / `swift test` remain useful for
+compilation and offline logic tests, but the SwiftPM build path does not supply
+the metallib needed to run MLX inference. Use full Xcode, not CommandLineTools:
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+swift build
+swift test
+xcodebuild -list  # smoke-cli is the headless executable scheme
+xcodebuild -scheme smoke-cli -configuration Release \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath .build/xcode \
+  CODE_SIGNING_ALLOWED=NO build
+.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
+  ~/Library/Caches/Dousha/last_recording.wav --language zh-CN
+.build/xcode/Build/Products/Release/smoke-cli mlx-transcribe \
+  ~/Library/Caches/Dousha/last_recording.wav --language auto --realtime
+```
+
+`mlx-transcribe` uses `WavReader` (16kHz mono s16le only) and the actual engine
+lifecycle, with 100ms PCM chunks, 10ms inter-chunk sleeps by default, or audio
+rate with `--realtime`. It downloads the default model on first use; `--model`
+accepts a compatible Hugging Face repo. Model load time includes any download
+(open→store ready, sampled every 20ms); first-partial latency starts at first
+ingest, and stop latency ends at completion. The command prints partial count,
+final length and the transcript; keep private transcripts out of shared reports.
+It services main-queue callbacks through async waits, with 600s model-load and
+50s stop watchdogs. Inspect engine logs for `finalTimedOut` even when a nonempty
+fallback makes the command succeed.
+
+`Package.resolved` is committed and the mlx-audio-swift revision is pinned in
+`Package.swift`. Upgrade mlx-audio-swift, mlx-swift, mlx-swift-lm and their
+resolved dependencies as one compatibility set; rerun offline tests and both
+language smoke checks after an upgrade.
 
 Verification for any pipeline change:
 
@@ -251,6 +337,10 @@ Verification for any pipeline change:
    - toggle Wi-Fi off/on mid-recording (QUA-193 reconnect + replay — grep the
      log for reconnect outcome);
    - rapid back-to-back recordings (detached close / concurrent-quota path).
+
+For local-engine inference, also run the Xcode-built `mlx-transcribe` checks
+above. They validate file-based inference without touching the installed app;
+they do not replace installed-bundle testing of audio, hotkeys, HUD or TCC.
 
 ## 7. Removed design assets (QUA-263 / QUA-265)
 

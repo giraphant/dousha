@@ -13,10 +13,12 @@ evidence.
 
 This is a menu-bar / accessibility app on macOS. You cannot test changes by running `swift build` or `swift run` directly — TCC permissions (Microphone, Accessibility, Speech Recognition) are bound to the signed bundle at `/Applications/Dousha.app`, and global hotkeys only work for the installed bundle the user already granted permissions to.
 
+`make build` / `make install` now use `xcodebuild` with full Xcode to compile MLX's Metal shaders and package its resource bundles. `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build` and `swift test` still check compilation and offline logic, but their products cannot run MLX inference without the metallib. For headless real-model checks, build the `smoke-cli` scheme with `xcodebuild` and run the products-dir `smoke-cli mlx-transcribe`; see `ARCHITECTURE.md` §6 for commands. Keep the committed `Package.resolved` and pinned mlx-audio-swift revision together when upgrading dependencies.
+
 Every time you want the user to test a change, you must:
 
 1. **Ask the user to quit the running Dousha** (menu bar → Quit, or `killall Dousha`). `make install` will not replace a running `.app` cleanly, and the user will end up testing the old build without noticing.
-2. Run `make install` — this does release build, codesigns with `Dousha Local Dev`, and copies to `/Applications/Dousha.app`.
+2. Run `make install` — this does an Xcode release build, codesigns with the configured Developer ID identity (see below), and copies to `/Applications/Dousha.app`.
 3. Launch the new bundle (`open /Applications/Dousha.app`) or ask the user to launch it.
 4. Then ask the user to reproduce / test.
 
