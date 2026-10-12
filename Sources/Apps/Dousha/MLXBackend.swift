@@ -5,9 +5,24 @@ import ASRSupport
 /// Adapter bridging the standalone MLXASR package to Dousha's push-capture
 /// model: `MLXStreamingASR` receives PCM pushed from the shared `AudioTapHub`
 /// via `ingest`. `setLanguage` is a no-op — the per-recording language is read
-/// from `Preferences` in `beginSession` and handed to Qwen3 as a language name.
+/// from `Preferences` in `beginSession`; the engine maps that identifier to Qwen3.
 final class MLXBackend: PCMCaptureEngine {
+    typealias PrepareSession = @Sendable (
+        @escaping @Sendable (PartialTranscript) -> Void,
+        @escaping @Sendable (Error) -> Void,
+        String?
+    ) async -> Void
+
     private let asr = MLXStreamingASR(model: MLXModelCatalog.defaultModel, store: .shared)
+    private let preferences: Preferences
+    private let prepareSession: PrepareSession
+
+    init(preferences: Preferences = .shared, prepareSession: PrepareSession? = nil) {
+        self.preferences = preferences
+        self.prepareSession = prepareSession ?? { [asr] onPartial, onError, language in
+            await asr.prepareSession(onPartial: onPartial, onError: onError, language: language)
+        }
+    }
 
     func setLanguage(_ identifier: String) {}
 
@@ -17,11 +32,13 @@ final class MLXBackend: PCMCaptureEngine {
                       onError: @escaping @Sendable (Error) -> Void) async {
         // Snapshot the language at recording start so a Settings change
         // mid-recording can't alter the active session.
-        let language = MLXASRSupport.qwenLanguage(forIdentifier: Preferences.shared.language)
+        // Pass the Dousha identifier unchanged: mapping twice turns Chinese
+        // into auto-detect because "Chinese" is not a "zh" identifier.
+        let language = preferences.language
         // The glossary is not applied here yet: the upstream streaming session
         // lacks context support (giraphant/dousha#53). TranscriptCorrector still
         // applies local corrections downstream.
-        await asr.prepareSession(onPartial: onPartial, onError: onError, language: language)
+        await prepareSession(onPartial, onError, language)
     }
 
     func openStream() { asr.openStream() }

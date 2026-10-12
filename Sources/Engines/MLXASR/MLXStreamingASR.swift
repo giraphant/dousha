@@ -201,6 +201,9 @@ public actor MLXStreamingASR {
         self.store = store
     }
 
+    /// `language` is a Dousha identifier (e.g. "zh-CN"), mapped once via
+    /// MLXASRSupport.qwenLanguage(forIdentifier:); nil, "auto" and unknown
+    /// identifiers select auto-detection, not Qwen3's default English.
     public func prepareSession(onPartial: @escaping @Sendable (PartialTranscript) -> Void,
                                onError: @escaping @Sendable (Error) -> Void,
                                language: String?) {
