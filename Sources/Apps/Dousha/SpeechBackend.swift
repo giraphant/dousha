@@ -8,12 +8,14 @@ enum Engine: String, CaseIterable {
     case apple
     case doubao
     case soniox
+    case local
 
     var displayName: String {
         switch self {
         case .apple:  return "Apple Speech"
         case .doubao: return "豆包"
         case .soniox: return "Soniox"
+        case .local:  return "本地 Qwen3"
         }
     }
 }
@@ -65,7 +67,7 @@ protocol PushCaptureEngine: AnyObject, Sendable {
     func cancelSession()
 }
 
-/// A `PushCaptureEngine` that consumes int16 16 kHz mono PCM (Doubao, Soniox).
+/// A `PushCaptureEngine` that consumes int16 16 kHz mono PCM (Doubao, Soniox, MLX).
 protocol PCMCaptureEngine: PushCaptureEngine {
     func ingest(_ pcm: Data)
 }
@@ -85,6 +87,8 @@ enum SpeechBackendFactory {
         case .soniox:
             return SonioxBackend(apiKey: Preferences.shared.sonioxAPIKey,
                                  mode: Preferences.shared.sonioxMode)
+        case .local:
+            return MLXBackend()
         }
     }
 }

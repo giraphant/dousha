@@ -12,7 +12,7 @@ struct LanguageMenu {
     /// Language options for the menu bar.
     ///
     /// - Single engine: behaviour follows the engine. Apple needs an explicit
-    ///   locale (lists all); Doubao/Soniox auto-detect (just 「自动」).
+    ///   locale (lists all); Doubao/Soniox/local show just 「自动」.
     /// - Multi-engine: there is no 「自动」 — a primary language must be forced so
     ///   one routing slot is the primary/HUD engine. The only meaningful primary
     ///   languages are 中文 / 英文 (混合 ≡ 自动, never a primary). 中文 → zh-CN,
@@ -38,7 +38,7 @@ struct LanguageMenu {
                     isSelected: lang.rawValue == selectedLanguage
                 )
             }
-        case .doubao, .soniox:
+        case .doubao, .soniox, .local:
             return [Option(title: "自动", rawValue: autoIdentifier, isSelected: true)]
         }
     }
