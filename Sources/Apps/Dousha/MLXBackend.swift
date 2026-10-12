@@ -14,11 +14,14 @@ final class MLXBackend: PCMCaptureEngine {
         String
     ) async -> Void
 
-    private let asr = MLXStreamingASR(model: MLXModelCatalog.defaultModel, store: .shared)
+    private let asr: MLXStreamingASR
     private let preferences: Preferences
     private let prepareSession: PrepareSession
 
-    init(preferences: Preferences = .shared, prepareSession: PrepareSession? = nil) {
+    init(model: MLXModelDescriptor = MLXModelCatalog.defaultModel,
+         preferences: Preferences = .shared, prepareSession: PrepareSession? = nil) {
+        let asr = MLXStreamingASR(model: model, store: .shared)
+        self.asr = asr
         self.preferences = preferences
         self.prepareSession = prepareSession ?? { [asr] onPartial, onError, language, context in
             await asr.prepareSession(onPartial: onPartial, onError: onError, language: language, context: context)

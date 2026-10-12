@@ -8,15 +8,43 @@ enum Engine: String, CaseIterable {
     case apple
     case doubao
     case soniox
-    case local
+    case qwen3
+
+    /// Decode persisted engine IDs, including the first local-engine release.
+    init?(storedValue: String) {
+        self.init(rawValue: storedValue == "local" ? "qwen3" : storedValue)
+    }
 
     var displayName: String {
         switch self {
         case .apple:  return "Apple Speech"
         case .doubao: return "豆包"
         case .soniox: return "Soniox"
-        case .local:  return "本地 Qwen3"
+        case .qwen3:  return "Qwen3"
         }
+    }
+
+    var isLocal: Bool { self == .apple || self == .qwen3 }
+
+    var kind: String {
+        switch self {
+        case .apple: return "系统 ASR"
+        case .qwen3: return "MLX"
+        case .doubao, .soniox: return "云端"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .apple: return "apple.logo"
+        case .qwen3: return "cpu"
+        case .doubao: return "waveform"
+        case .soniox: return "waveform.circle"
+        }
+    }
+
+    var tags: [String] {
+        (isLocal ? ["本地"] : ["远程"]) + (self == .apple ? ["内置"] : []) + ["实时"]
     }
 }
 
@@ -87,8 +115,8 @@ enum SpeechBackendFactory {
         case .soniox:
             return SonioxBackend(apiKey: Preferences.shared.sonioxAPIKey,
                                  mode: Preferences.shared.sonioxMode)
-        case .local:
-            return MLXBackend()
+        case .qwen3:
+            return MLXBackend(model: Preferences.shared.qwen3Model)
         }
     }
 }
