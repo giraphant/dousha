@@ -125,6 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 _ = refiner.refineLater(text, traceId: traceId) { refined in
                     let pb = NSPasteboard.general
                     let changedWhileRefining = pb.changeCount != originalChangeCount
+                    guard !changedWhileRefining else {
+                        doushaLog("[Dousha] deferred refine skipped reason=clipboard_changed traceId=\(traceId)")
+                        return
+                    }
                     pb.clearContents()
                     let setOK = pb.setString(refined, forType: .string)
                     if setOK {

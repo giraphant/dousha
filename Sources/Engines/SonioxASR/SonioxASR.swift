@@ -381,8 +381,7 @@ public actor SonioxASR {
         if contextTerms.isEmpty {
             doushaLog("[SonioxASR] traceId=\(requestId) config context: (none)")
         } else {
-            let preview = contextTerms.prefix(8).joined(separator: "、")
-            doushaLog("[SonioxASR] traceId=\(requestId) config context.terms=\(contextTerms.count) preview=\(preview)")
+            doushaLog("[SonioxASR] traceId=\(requestId) config context.terms=\(contextTerms.count)")
         }
         try await ws.send(.string(json))
     }

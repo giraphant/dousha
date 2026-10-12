@@ -674,8 +674,7 @@ public actor DoubaoASR {
         if contextHint.isEmpty {
             doushaLog("[DoubaoASR] StartSession context: (none)")
         } else {
-            let preview = contextHint.count > 60 ? String(contextHint.prefix(60)) + "…" : contextHint
-            doushaLog("[DoubaoASR] StartSession context.len=\(contextHint.count) preview=\(preview)")
+            doushaLog("[DoubaoASR] StartSession context.len=\(contextHint.count)")
         }
         try await sendData(AsrMessageBuilder.startSession(requestId: requestId, token: token, configJSON: configJSON))
         let resp2 = try await waitForResponse(timeout: 5.0) {
@@ -827,7 +826,7 @@ public actor DoubaoASR {
             signalFinished()
             return
         case "TaskFailed", "SessionFailed":
-            doushaLog("[DoubaoASR] \(resp.messageType) statusCode=\(resp.statusCode) statusMessage=\(resp.statusMessage) resultJson=\(resp.resultJson)")
+            doushaLog("[DoubaoASR] \(resp.messageType) statusCode=\(resp.statusCode) statusMessage=\(resp.statusMessage) resultJson.len=\(resp.resultJson.count)")
             let msg = resp.statusMessage.isEmpty ? "ASR failed (\(resp.statusCode))" : "\(resp.statusMessage) (\(resp.statusCode))"
             deliverError(NSError(domain: "DoubaoASR", code: Int(resp.statusCode),
                                   userInfo: [NSLocalizedDescriptionKey: msg]))
@@ -840,9 +839,8 @@ public actor DoubaoASR {
         guard let update = resultState.ingest(resultJson: resp.resultJson) else { return }
         self.lastTranscriptAt = Date()
 
-        let preview = update.text.prefix(40).replacingOccurrences(of: "\n", with: " ")
         let stopDelta = stopStartedAt.map { " stop+\(elapsedMs(since: $0))ms" } ?? ""
-        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms\(stopDelta) result isInterim=\(update.isInterim) vadFinished=\(update.vadFinished) nonstream=\(update.nonstreamResult) textLen=\(update.text.count) currentInterimLen=\(update.previousInterimLength) newUtterance=\(update.looksLikeNewUtterance) preview=\(preview)")
+        doushaLog("[DoubaoASR] traceId=\(requestId) t=\(traceElapsedMs())ms\(stopDelta) result isInterim=\(update.isInterim) vadFinished=\(update.vadFinished) nonstream=\(update.nonstreamResult) textLen=\(update.text.count) currentInterimLen=\(update.previousInterimLength) newUtterance=\(update.looksLikeNewUtterance)")
 
         switch update.commit {
         case .rescued(let rescued):
