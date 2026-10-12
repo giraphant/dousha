@@ -117,6 +117,7 @@ struct SettingsView: View {
     @State private var presentedHelp: String?
     @State private var activeEngines: [Engine] = Preferences.shared.activeEngines
     @State private var qwen3ModelRepoID: String = Preferences.shared.qwen3ModelRepoID
+    @State private var qwen3IdleUnloadSeconds = Preferences.shared.qwen3IdleUnloadSeconds
     @State private var modelInventory: [String: MLXModelInventory.Entry] = [:]
     @State private var modelStoreState: MLXModelStore.State = .idle
     @State private var requestedModelRepoID: String?
@@ -575,6 +576,23 @@ struct SettingsView: View {
 
     private var qwen3Settings: some View {
         Section {
+            Picker(selection: $qwen3IdleUnloadSeconds) {
+                Text("10 秒").tag(10.0)
+                Text("30 秒").tag(30.0)
+                Text("1 分钟").tag(60.0)
+                Text("2 分钟").tag(120.0)
+                Text("5 分钟").tag(300.0)
+                Text("10 分钟").tag(600.0)
+                Text("20 分钟").tag(1200.0)
+            } label: {
+                Text("空闲后卸载")
+                Text("释放内存；之后的首次听写需重新加载")
+            }
+            .pickerStyle(.menu)
+            .onChange(of: qwen3IdleUnloadSeconds) { _, seconds in
+                Preferences.shared.qwen3IdleUnloadSeconds = seconds
+                Task { await MLXModelStore.shared.setIdleUnloadDelay(seconds) }
+            }
             ForEach(MLXModelCatalog.all, id: \.repoID) { descriptor in
                 qwen3ModelRow(descriptor)
             }

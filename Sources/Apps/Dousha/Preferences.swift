@@ -50,6 +50,7 @@ final class Preferences: @unchecked Sendable {
         static let mixedEngine               = "mixedEngine"
         static let activeEngines             = "activeEngines"
         static let qwen3ModelRepoID           = "qwen3ModelRepoID"
+        static let qwen3IdleUnloadSeconds     = "qwen3IdleUnloadSeconds"
         static let llmEnabled                = "llmEnabled"
         static let llmBaseURL                = "llmBaseURL"
         static let llmAPIKey                 = "llmAPIKey"
@@ -257,6 +258,11 @@ final class Preferences: @unchecked Sendable {
     var qwen3Model: MLXModelDescriptor {
         let repoID = defaults.string(forKey: Keys.qwen3ModelRepoID)
         return MLXModelCatalog.all.first { $0.repoID == repoID } ?? MLXModelCatalog.defaultModel
+    }
+
+    var qwen3IdleUnloadSeconds: TimeInterval {
+        get { defaults.object(forKey: Keys.qwen3IdleUnloadSeconds) as? Double ?? 60 }
+        set { defaults.set(newValue, forKey: Keys.qwen3IdleUnloadSeconds) }
     }
 
     var llmEnabled: Bool {

@@ -202,7 +202,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if prefs.activeEngines.contains(.doubao) {
             DoubaoCredentialStore.shared.warmup()
         }
-        if prefs.activeEngines.contains(.qwen3) { MLXModelStore.shared.warmup(prefs.qwen3Model) }
+        Task {
+            await MLXModelStore.shared.setIdleUnloadDelay(prefs.qwen3IdleUnloadSeconds)
+            if prefs.activeEngines.contains(.qwen3) { await MLXModelStore.shared.preload(prefs.qwen3Model) }
+        }
     }
 
     /// If the app is relaunched while already running (Finder/Spotlight), bring

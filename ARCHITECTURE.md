@@ -167,9 +167,13 @@ prewarm, the whole streaming session and batch. Never overlap streaming and
 batch inference. The store never mutates a published model; only its lease
 holder uses it. Construction/loading runs off main; caller cancellation does
 not cancel shared downloads, and setup retains its lease until loading settles.
+After the last lease/request ends, the configured idle delay (default 60s) evicts
+the model and clears MLX's buffer cache under the process-wide lease; new activity
+cancels eviction and the next recording reloads as needed.
 
 **Preload/prewarm.** Launch preloads after hotkey installation when Qwen3 is
 active; routing/menu/model changes use the same fire-and-forget `warmup` path.
+Launch preload still loads normally, then the same idle-unload timer applies.
 Only a preload-owned new load runs one off-main, 1s silent batch (8-token limit)
 under the lease and discards output. Cached models and recording-owned loads
 never prewarm, even when warmup joins or queues behind them. Failure logs an
