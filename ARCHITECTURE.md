@@ -67,8 +67,8 @@ on recordingFlag: Lock<Bool>)            idle → recording → transcribing →
                                                      │
                        ┌─────────────────────┬───────┴────────────┬────────────────────────┐
                        ▼                     ▼                    ▼                        ▼
-              DoubaoBackend (PCM)   SonioxBackend (PCM)  MLXBackend (PCM)       AppleSpeechBackend (buffer)
-              → DoubaoASR actor     → SonioxASR actor    → MLXStreamingASR      → SFSpeechRecognizer
+              DoubaoBackend (PCM)   SonioxBackend (PCM)  MLXBackend (PCM)       AppleSpeechBackend (PCM)
+              → DoubaoASR actor     → SonioxASR actor    → MLXStreamingASR      → SpeechAnalyzer
                        │                     │                    │                        │
                        └─────────────────────┴───────┬────────────┴────────────────────────┘
                                       partials (all dispatched on main queue)
@@ -246,7 +246,7 @@ and both language smoke checks.
 | Seam | Purpose | Faked by |
 |---|---|---|
 | `SpeechBackend` | one session = one `AsyncStream<RecordingEvent>`; `stop()` yields exactly one terminal `.final`, `cancel()` finishes with none | `MockSpeechBackend` (RecordingControllerTests) |
-| `PushCaptureEngine` (+ `PCMCaptureEngine` / `BufferCaptureEngine`) | engines receive pushed audio from the hub; two-phase `beginSession`/`openStream` | `MockBackend` (MultiEngineBackendTests, hub = nil) |
+| `PushCaptureEngine` (+ `PCMCaptureEngine`) | engines receive pushed audio from the hub; two-phase `beginSession`/`openStream` | `MockBackend` (MultiEngineBackendTests, hub = nil) |
 | `MLXBackend` | app adapter (§2.1) | injected prepare closure + isolated Preferences (MLXEngineWiringTests) |
 | `MLXModelStore` loader + lease | model ownership (§2.1) | injected loader / `MLXLoadedModel` fake (MLXASRLifecycleTests, MLXModelPrewarmTests); lease tests never allocate MLX arrays |
 | `MLXPreparedSession` stream + final-pass runner | stop/cancel/deadline ownership (§2.1) | fake event stream + suspended runner (MLXFinalPassTests) |
@@ -295,9 +295,11 @@ type is used, re-derive the reason or the annotation becomes a lie.
   (`DoubaoASR.swift`, "Signal the close handshake BEFORE the generation
   guard") — do not reorder. `OneShotChannel`s are recreated per session so
   signals never leak forward.
-- **`AppleSpeechBackend`** — `sessionGen` behind a `Lock`, because three
-  threads touch it: main, the audio-frame path, and Speech framework callbacks.
-  Codes 203/216/1110/301 are benign and intentionally dropped.
+- **`AppleSpeechBackend`** — MultiEngineBackend calls its lifecycle methods
+  from arbitrary tasks, so each one hops to main and all session state is
+  main-confined. Only `ingest` runs on the audio path; it reaches the session's
+  `AnalyzerInput` stream through `activeInput: Lock`. A cancelled session's
+  late results and errors are dropped via its `isCancelled` flag.
 - **MLX types** — §2.1 defines actor/lock isolation, generation guards, serial
   feed/teardown ordering and the process-wide lease protecting `QwenLoadedModel`.
 - **`AudioTapHub` (actor)** — the tap closure runs on the audio thread and

@@ -95,14 +95,9 @@ protocol PushCaptureEngine: AnyObject, Sendable {
     func cancelSession()
 }
 
-/// A `PushCaptureEngine` that consumes int16 16 kHz mono PCM (Doubao, Soniox, MLX).
+/// A `PushCaptureEngine` that consumes int16 16 kHz mono PCM (every engine).
 protocol PCMCaptureEngine: PushCaptureEngine {
     func ingest(_ pcm: Data)
-}
-
-/// A `PushCaptureEngine` that consumes the native mic buffer (Apple Speech).
-protocol BufferCaptureEngine: PushCaptureEngine {
-    func ingest(_ buffer: AVAudioPCMBuffer)
 }
 
 enum SpeechBackendFactory {

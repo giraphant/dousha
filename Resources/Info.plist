@@ -21,14 +21,12 @@
 	<key>CFBundleVersion</key>
 	<string>20</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Dousha needs microphone access to transcribe your voice into text.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Dousha uses speech recognition to convert what you say into text.</string>
 </dict>
 </plist>

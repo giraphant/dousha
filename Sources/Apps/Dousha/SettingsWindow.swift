@@ -3,7 +3,6 @@ import CoreGraphics
 import SwiftUI
 import Charts
 import AVFoundation
-import Speech
 import ApplicationServices
 import ASRSupport
 import ConcurrencySupport
@@ -177,7 +176,6 @@ struct SettingsView: View {
     private let statsStore = DictationStatsStore()
 
     @State private var microphoneStatus: AVAuthorizationStatus = .notDetermined
-    @State private var speechStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
     @State private var accessibilityGranted = false
 
     init(actions: SettingsActions) {
@@ -987,9 +985,6 @@ struct SettingsView: View {
                               privacyPane: "Privacy_Microphone", request: actions.requestMicrophone)
                 permissionRow("辅助功能", granted: accessibilityGranted, notDetermined: false,
                               privacyPane: "Privacy_Accessibility", request: {})
-                permissionRow("语音识别", subtitle: "仅 Apple 听写需要", granted: speechStatus == .authorized,
-                              notDetermined: speechStatus == .notDetermined,
-                              privacyPane: "Privacy_SpeechRecognition", request: actions.requestSpeechRecognition)
             }
         }
         .formStyle(.grouped)
@@ -999,7 +994,7 @@ struct SettingsView: View {
         }
     }
 
-    private func permissionRow(_ title: String, subtitle: String? = nil, granted: Bool,
+    private func permissionRow(_ title: String, granted: Bool,
                                notDetermined: Bool, privacyPane: String,
                                request: @escaping @MainActor () async -> Void) -> some View {
         LabeledContent {
@@ -1019,13 +1014,11 @@ struct SettingsView: View {
             }
         } label: {
             Text(title)
-            if let subtitle { Text(subtitle) }
         }
     }
 
     private func refreshPermissions() {
         microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        speechStatus = SFSpeechRecognizer.authorizationStatus()
         accessibilityGranted = AXIsProcessTrusted()
     }
 

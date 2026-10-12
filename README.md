@@ -4,7 +4,7 @@
 
 <h1 align="center">豆沙 (Dousha)</h1>
 
-A menu-bar dictation app for **macOS 14+ on Apple Silicon**. Speech becomes text wherever you're typing.
+A menu-bar dictation app for **macOS 26+ on Apple Silicon**. Speech becomes text wherever you're typing.
 
 - Choose **豆包 (Doubao)**, **Soniox**, **Apple Speech**, or **local Qwen3 via MLX**. Qwen3 runs offline after a one-time model download.
 - Optionally run engines in parallel and route Chinese, English, and mixed-language results to your preferred engine.
@@ -30,7 +30,7 @@ make install
 open /Applications/Dousha.app
 ```
 
-See [AGENTS.md](AGENTS.md) for signing setup. Grant Microphone and Accessibility when prompted; Apple Speech also needs Speech Recognition permission.
+See [AGENTS.md](AGENTS.md) for signing setup. Grant Microphone and Accessibility when prompted.
 
 ## Use
 

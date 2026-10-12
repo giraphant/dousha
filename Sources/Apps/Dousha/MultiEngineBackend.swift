@@ -227,20 +227,15 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     static func fromPreferences(_ prefs: Preferences) -> SpeechBackend {
         let (entries, primary, router) = makeEntries(prefs)
 
-        // One tap, fanned out to each engine's sink: int16 PCM for Doubao/Soniox,
-        // native buffers for Apple.
+        // One tap, fanned out to each engine's int16 PCM sink.
         var pcmSinks: [AudioTapHub.PCMSink] = []
-        var bufferSinks: [AudioTapHub.BufferSink] = []
         for entry in entries {
             if let p = entry.backend as? PCMCaptureEngine {
                 pcmSinks.append { p.ingest($0) }
-            } else if let b = entry.backend as? BufferCaptureEngine {
-                bufferSinks.append { b.ingest($0) }
             } else {
-                // Every shipping engine is either PCM (Doubao/Soniox) or Buffer
-                // (Apple). A PushCaptureEngine that is neither would silently get
-                // NO audio — an empty transcript with no error. Make it loud.
-                assertionFailure("\(entry.engine) is a PushCaptureEngine but neither PCMCaptureEngine nor BufferCaptureEngine — it would receive no audio")
+                // A PushCaptureEngine that is not a PCMCaptureEngine would silently
+                // get NO audio — an empty transcript with no error. Make it loud.
+                assertionFailure("\(entry.engine) is a PushCaptureEngine but not a PCMCaptureEngine — it would receive no audio")
                 doushaLog("[MultiEngine] \(entry.engine.rawValue) has no audio sink — check its capture protocol conformance")
             }
         }
@@ -252,7 +247,6 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             pauseMedia: prefs.pauseMediaDuringRecording
         )
         let hub = AudioTapHub(pcmSinks: pcmSinks,
-                              bufferSinks: bufferSinks,
                               wantsWAV: wantsWAV,
                               // AVAudioEngine Voice Processing route removed as known-broken with virtual/aggregate devices; resurrect from git.
                               microphoneSelection: prefs.microphoneSelection,
@@ -309,9 +303,8 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         return stream
     }
 
-    /// Read the WAV and push it chunk-by-chunk, mirroring what the live tap
-    /// does per buffer: raw int16 Data to PCM engines, an AVAudioPCMBuffer of
-    /// the same samples to buffer engines (Apple).
+    /// Read the WAV and push it chunk-by-chunk as raw int16 Data, mirroring
+    /// what the live tap does per buffer.
     private static func pushReplay(wav: URL,
                                    entries: [(engine: Engine, backend: PushCaptureEngine)],
                                    cont: AsyncStream<RecordingEvent>.Continuation) async {
@@ -324,7 +317,6 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             return
         }
         let pcmEngines = entries.compactMap { $0.backend as? PCMCaptureEngine }
-        let bufferEngines = entries.compactMap { $0.backend as? BufferCaptureEngine }
         let chunkBytes = 3_200   // 100 ms of 16 kHz mono s16
         let bytesPerSecond: UInt64 = 32_000
         var offset = 0
@@ -332,9 +324,6 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             let end = min(offset + chunkBytes, pcm.count)
             let chunk = pcm.subdata(in: offset..<end)
             for e in pcmEngines { e.ingest(chunk) }
-            if !bufferEngines.isEmpty, let buf = int16Buffer(from: chunk) {
-                for e in bufferEngines { e.ingest(buf) }
-            }
             offset = end
 
             let nanoseconds = UInt64(chunk.count) * 1_000_000_000 / bytesPerSecond
@@ -345,21 +334,6 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             }
         }
         doushaLog("[MultiEngine] replay pushed \(pcm.count) bytes to \(entries.count) engine(s)")
-    }
-
-    /// int16 16 kHz mono chunk → AVAudioPCMBuffer (what Apple Speech ingests).
-    private static func int16Buffer(from chunk: Data) -> AVAudioPCMBuffer? {
-        guard let fmt = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000,
-                                      channels: 1, interleaved: true) else { return nil }
-        let frames = AVAudioFrameCount(chunk.count / MemoryLayout<Int16>.size)
-        guard frames > 0, let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames) else { return nil }
-        buf.frameLength = frames
-        chunk.withUnsafeBytes { raw in
-            if let base = raw.baseAddress, let dst = buf.int16ChannelData?[0] {
-                memcpy(dst, base, Int(frames) * MemoryLayout<Int16>.size)
-            }
-        }
-        return buf
     }
 
     /// Replay factory (re-transcribe): same engine set as a live recording but

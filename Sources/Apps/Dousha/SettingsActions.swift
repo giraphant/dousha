@@ -40,5 +40,4 @@ struct SettingsActions {
     var canRetranscribe: @MainActor () -> Bool
 
     var requestMicrophone: @MainActor () async -> Void
-    var requestSpeechRecognition: @MainActor () async -> Void
 }
