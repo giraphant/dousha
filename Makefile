@@ -1,12 +1,17 @@
 APP_NAME    := Dousha
 BUILD_DIR   := .build
-RELEASE_DIR := $(BUILD_DIR)/release
+RELEASE_DIR := $(BUILD_DIR)/xcode/Build/Products/Release
 APP_BUNDLE  := $(BUILD_DIR)/$(APP_NAME).app
 INSTALL_DIR := /Applications
 DIST_DIR    := $(BUILD_DIR)/dist
 DIST_APP    := $(DIST_DIR)/$(APP_NAME).app
 DIST_DMG    := $(DIST_DIR)/$(APP_NAME).dmg
 DMG_STAGING := $(BUILD_DIR)/dmg-staging
+
+# Use Xcode's package build to compile MLX's Metal shaders and package the
+# default.metallib resource; CommandLineTools alone are insufficient.
+DEVELOPER_DIR ?= /Applications/Xcode.app/Contents/Developer
+export DEVELOPER_DIR
 
 # Homebrew tap that ships the cask. `make release` bumps the cask here so
 # users can `brew upgrade --cask dousha`.
@@ -34,7 +39,7 @@ CODESIGN_ENTITLEMENTS ?= --entitlements Resources/Dousha.entitlements
 all: build
 
 build:
-	swift build -c release
+	xcodebuild -scheme Dousha -configuration Release -destination 'platform=macOS,arch=arm64' -derivedDataPath $(BUILD_DIR)/xcode CODE_SIGNING_ALLOWED=NO build
 	@rm -rf $(APP_BUNDLE)
 	@mkdir -p $(APP_BUNDLE)/Contents/MacOS
 	@mkdir -p $(APP_BUNDLE)/Contents/Resources
@@ -43,6 +48,10 @@ build:
 	@cp Resources/AppIcon.icns $(APP_BUNDLE)/Contents/Resources/AppIcon.icns
 	@cp Resources/MenuIcon.png $(APP_BUNDLE)/Contents/Resources/MenuIcon.png
 	@cp -R Resources/*.lproj $(APP_BUNDLE)/Contents/Resources/
+	@for bundle in "$(RELEASE_DIR)"/*.bundle; do \
+		[ -d "$$bundle" ] || continue; \
+		cp -R "$$bundle" "$(APP_BUNDLE)/Contents/Resources/" || exit 1; \
+	done
 	@# The repo lives under ~/Documents, which iCloud/FileProvider decorates
 	@# with quarantine/provenance/FinderInfo xattrs; cp -R drags them into the
 	@# bundle and codesign rejects such "detritus" (broke the 0.4.0 notarize).
