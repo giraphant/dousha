@@ -52,6 +52,7 @@ final class Preferences: @unchecked Sendable {
         static let llmBaseURL                = "llmBaseURL"
         static let llmAPIKey                 = "llmAPIKey"
         static let llmModel                  = "llmModel"
+        static let llmSystemPrompt           = "llmSystemPrompt"
         static let sonioxAPIKey              = "sonioxAPIKey"
         static let sonioxMode                = "sonioxMode"
         // Engine-agnostic glossary (QUA-133). Key strings keep the historical
@@ -264,6 +265,20 @@ final class Preferences: @unchecked Sendable {
     var llmModel: String {
         get { defaults.string(forKey: Keys.llmModel) ?? "gpt-4o-mini" }
         set { defaults.set(newValue, forKey: Keys.llmModel) }
+    }
+
+    /// Absence means the built-in prompt, so resetting also follows future
+    /// default-prompt updates. Preserve custom text, including its formatting.
+    var llmSystemPrompt: String {
+        get { defaults.string(forKey: Keys.llmSystemPrompt) ?? TextRefiner.defaultSystemPrompt }
+        set {
+            if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || newValue == TextRefiner.defaultSystemPrompt {
+                defaults.removeObject(forKey: Keys.llmSystemPrompt)
+            } else {
+                defaults.set(newValue, forKey: Keys.llmSystemPrompt)
+            }
+        }
     }
 
     var sonioxAPIKey: String {

@@ -98,6 +98,36 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(prefs2.refineMode, .deferred)
     }
 
+    // MARK: - Custom refinement prompt
+
+    func testLLMPrompt_defaultsToBuiltInWithoutPersistingACopy() {
+        XCTAssertEqual(prefs.llmSystemPrompt, TextRefiner.defaultSystemPrompt)
+        XCTAssertNil(defaults.string(forKey: "llmSystemPrompt"))
+    }
+
+    func testLLMPrompt_persistsVerbatimAndRefinersKeepTheirSnapshot() {
+        let prompt = "  保留原意，清理重复和口头禅。\n只输出正文。\n"
+        prefs.llmSystemPrompt = prompt
+        let fresh = Preferences(defaults: defaults)
+        XCTAssertEqual(fresh.llmSystemPrompt, prompt)
+
+        let inFlight = TextRefiner(baseURL: "https://example.test/v1", apiKey: "k",
+                                   model: "m", systemPrompt: fresh.llmSystemPrompt)
+        prefs.llmSystemPrompt = "只纠正错别字。"
+        XCTAssertEqual(inFlight.systemPrompt, prompt)
+        XCTAssertEqual(fresh.llmSystemPrompt, "只纠正错别字。")
+    }
+
+    func testLLMPrompt_blankOrRestoreDefaultRemovesTheOverride() {
+        for reset in ["", " \n\t ", TextRefiner.defaultSystemPrompt] {
+            prefs.llmSystemPrompt = "清理重复。"
+            prefs.llmSystemPrompt = reset
+            XCTAssertEqual(Preferences(defaults: defaults).llmSystemPrompt,
+                           TextRefiner.defaultSystemPrompt)
+            XCTAssertNil(defaults.string(forKey: "llmSystemPrompt"))
+        }
+    }
+
     // MARK: - Multi-engine routing (QUA-145)
 
     func testEngineSlots_defaultToLegacyApple() {

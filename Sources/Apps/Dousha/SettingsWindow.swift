@@ -91,6 +91,8 @@ struct SettingsView: View {
     @State private var baseURL: String = Preferences.shared.llmBaseURL
     @State private var apiKey:  String = Preferences.shared.llmAPIKey
     @State private var model:   String = Preferences.shared.llmModel
+    @State private var llmSystemPrompt: String = Preferences.shared.llmSystemPrompt
+    @State private var savedLLMSystemPrompt: String = Preferences.shared.llmSystemPrompt
     @State private var refineMode: RefineMode = Preferences.shared.refineMode
     @State private var status: String = ""
     @State private var statusIsError: Bool = false
@@ -576,12 +578,36 @@ struct SettingsView: View {
                     Button("保存并测试") { saveAndTestLLM() }
                         .disabled(isTesting || apiKey.isEmpty || baseURL.isEmpty || model.isEmpty)
                 }
-                Text("使用任意兼容 OpenAI 的对话补全接口来清理听写结果。模型只会修正明显的识别错误，不会改写内容。")
+                Text("使用任意兼容 OpenAI 的对话补全接口来清理听写结果。默认仅修正明显的识别错误；可在下方自定义润色规则。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            Section("润色提示词") {
+                TextEditor(text: $llmSystemPrompt)
+                    .font(.body)
+                    .disableAutocorrection(true)
+                    .frame(height: 220)
+                    .padding(6)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                    .accessibilityLabel("润色提示词")
+                HStack {
+                    Button("恢复默认") { llmSystemPrompt = TextRefiner.defaultSystemPrompt }
+                        .disabled(llmSystemPrompt == TextRefiner.defaultSystemPrompt)
+                    Spacer()
+                    Text(llmSystemPrompt == savedLLMSystemPrompt ? "已保存" : "未保存")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("保存提示词") { saveLLMPrompt() }
+                        .disabled(llmSystemPrompt == savedLLMSystemPrompt)
+                }
+                Text("自定义提示词会完整替换默认规则，可允许清理重复、修复断句或轻度润色。建议要求模型只输出处理后的正文。修改后点击「保存提示词」，后续润色请求生效；留空则使用默认规则。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .formStyle(.grouped)
     }
@@ -716,6 +742,12 @@ struct SettingsView: View {
         }
     }
 
+    private func saveLLMPrompt() {
+        Preferences.shared.llmSystemPrompt = llmSystemPrompt
+        llmSystemPrompt = Preferences.shared.llmSystemPrompt
+        savedLLMSystemPrompt = llmSystemPrompt
+    }
+
     /// Save the LLM credentials, then test connectivity. Settings persist
     /// regardless of the test outcome; the test result is informational.
     private func saveAndTestLLM() {
@@ -729,7 +761,8 @@ struct SettingsView: View {
         isTesting = true
         status = ""
         statusIsError = false
-        let refiner = TextRefiner(baseURL: baseURL, apiKey: apiKey, model: model)
+        let refiner = TextRefiner(baseURL: baseURL, apiKey: apiKey, model: model,
+                                  systemPrompt: Preferences.shared.llmSystemPrompt)
         Task {
             let result = await refiner.test()
             DispatchQueue.main.async {
