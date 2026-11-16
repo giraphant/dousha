@@ -6,7 +6,6 @@ Before touching the recording pipeline, any `@unchecked Sendable` type, the
 ASR clients, or anything that looks like duplicated code worth abstracting,
 read [ARCHITECTURE.md](ARCHITECTURE.md). Its invariants and deliberately rejected
 refactors are normative; do not re-propose rejected designs without new evidence.
-`CLAUDE.md` is a symlink to this file; keep it that way.
 
 ## Testing workflow (REQUIRED)
 
