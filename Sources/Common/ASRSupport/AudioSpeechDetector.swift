@@ -3,25 +3,29 @@ import ConcurrencySupport
 
 /// Lightweight acoustic speech-activity detector for 16 kHz mono int16 PCM.
 ///
-/// Prevents silent recordings, room noise, steady fan/AC hum, and brief
-/// accidental key-click taps from reaching ASR finalization (where context-biased
-/// models like Qwen3-ASR, Doubao, or Soniox can hallucinate glossary terms on
-/// blank audio).
+/// Prevents silent recordings, long ambient room noise, steady fan/AC hum, and
+/// brief accidental key-click taps from reaching ASR finalization (where
+/// context-biased models like Qwen3-ASR, Doubao, or Soniox can hallucinate
+/// glossary terms on blank audio).
 ///
 /// Signal pipeline:
-///   1. 1st-order high-pass filter (~250 Hz @ 16 kHz) removes DC offset, 50/60 Hz
-///      mains hum, AC rumble, desk vibrations, and breath pops while keeping
-///      speech formants intact.
+///   1. Band-pass filter (~250 Hz – 3400 Hz @ 16 kHz, telephone speech band):
+///      - 1st-order high-pass (~250 Hz) removes DC offset, 50/60 Hz mains hum,
+///        AC rumble, desk vibrations, and low-frequency breath pops.
+///      - 1st-order low-pass (~3400 Hz) attenuates high-frequency hiss, cloth
+///        rustle, paper crinkle, and sharp keyboard-click harmonics.
 ///   2. 20 ms frame RMS (320 samples per frame).
 ///   3. Adaptive threshold: `min(unconditionalSpeechRMS, max(absoluteFloorRMS,
-///      noiseFloor * noiseFloorMultiplier))`, where `noiseFloor` is the 10th
+///      noiseFloor * noiseFloorMultiplier))`, where `noiseFloor` is the 25th
 ///      percentile of frame RMS for recordings ≥ 300 ms (0 for shorter clips).
-///      This rejects steady fan/AC noise without suppressing soft speech in a
-///      quiet room or continuous speech that fills a whole clip.
+///      Using the 25th percentile with a 3.0× (+9.5 dB) margin rejects natural
+///      multi-second ambient room fluctuations and steady fan/AC noise without
+///      suppressing soft speech in a quiet room or continuous speech filling a
+///      whole clip.
 ///   4. Burst gate: requires at least `minDurationFrames` total frames (160 ms)
 ///      and at least `minConsecutiveActiveFrames` consecutive active frames
-///      (80 ms), rejecting isolated 20–40 ms keyboard clicks and quick taps while
-///      preserving short monosyllabic words ("是", "好", "OK").
+///      (100 ms), rejecting isolated 20–60 ms keyboard clicks, mouse scrapes, and
+///      quick taps while preserving short monosyllabic words ("是", "好", "OK").
 public enum AudioSpeechDetector {
     public struct Analysis: Sendable, Equatable {
         public let hasSpeech: Bool
@@ -56,19 +60,22 @@ public enum AudioSpeechDetector {
     public static let frameSamples = 320
     /// 160 ms minimum recording duration — filters accidental press-and-release taps.
     public static let minDurationFrames = 8
-    /// 80 ms consecutive active speech energy — filters 20–40 ms keyboard clicks.
-    public static let minConsecutiveActiveFrames = 4
+    /// 100 ms consecutive speech-band energy — filters key clicks and short room bursts.
+    public static let minConsecutiveActiveFrames = 5
     /// Minimum frame count (300 ms) before estimating a per-recording noise floor.
     public static let minFramesForNoiseFloor = 15
-    /// High-passed RMS floor (~ -48 dBFS): above quiet-room mic floor, below soft speech.
-    public static let absoluteFloorRMS: Float = 0.004
-    /// High-passed RMS (~ -32 dBFS) above which sustained energy is always speech
+    /// Band-passed RMS floor (~ -42 dBFS): above quiet/moderate room ambient floor,
+    /// safely below soft conversational speech.
+    public static let absoluteFloorRMS: Float = 0.008
+    /// Band-passed RMS (~ -30 dBFS) above which sustained energy is always speech
     /// even if the entire clip is filled with continuous speech (no quiet margin).
-    public static let unconditionalSpeechRMS: Float = 0.025
-    /// Adaptive margin (+6.8 dB) above a recording's steady background noise floor.
-    public static let noiseFloorMultiplier: Float = 2.2
+    public static let unconditionalSpeechRMS: Float = 0.030
+    /// Adaptive margin (+9.5 dB) above a recording's 25th-percentile ambient floor.
+    public static let noiseFloorMultiplier: Float = 3.0
     /// 1-pole high-pass coefficient for ~250 Hz cutoff at 16 kHz: 1 / (1 + 2π*250/16000).
     static let highPassAlpha: Float = 0.9106
+    /// 1-pole low-pass coefficient for ~3400 Hz cutoff at 16 kHz: dt / (RC + dt).
+    static let lowPassAlpha: Float = 0.5718
 
     /// Analyze a full 16 kHz mono signed 16-bit little-endian PCM buffer.
     public static func analyze(pcm16LE data: Data) -> Analysis {
@@ -82,7 +89,7 @@ public enum AudioSpeechDetector {
         analyze(pcm16LE: data).hasSpeech
     }
 
-    /// Pure decision function over precomputed 20 ms high-passed frame RMS values.
+    /// Pure decision function over precomputed 20 ms band-passed frame RMS values.
     static func evaluate(frameRMS: [Float], totalSamples: Int) -> Analysis {
         let durationSeconds = Double(totalSamples) / Double(sampleRate)
         let frameCount = frameRMS.count
@@ -104,7 +111,7 @@ public enum AudioSpeechDetector {
         let noiseFloor: Float
         if frameCount >= minFramesForNoiseFloor {
             let sorted = frameRMS.sorted()
-            noiseFloor = sorted[frameCount / 10]
+            noiseFloor = sorted[frameCount / 4]
         } else {
             noiseFloor = 0
         }
@@ -141,7 +148,8 @@ public enum AudioSpeechDetector {
 public final class AudioSpeechTracker: Sendable {
     private struct State {
         var prevX: Float = 0
-        var prevY: Float = 0
+        var prevHP: Float = 0
+        var prevLP: Float = 0
         var frameSumSquares: Float = 0
         var frameSampleCount: Int = 0
         var totalSamples: Int = 0
@@ -164,7 +172,8 @@ public final class AudioSpeechTracker: Sendable {
     /// Feed 16 kHz mono int16 samples directly from `AVAudioPCMBuffer.int16ChannelData`.
     public func append(int16Samples samples: UnsafePointer<Int16>, count: Int) {
         guard count > 0 else { return }
-        let alpha = AudioSpeechDetector.highPassAlpha
+        let hpAlpha = AudioSpeechDetector.highPassAlpha
+        let lpAlpha = AudioSpeechDetector.lowPassAlpha
         let frameSamples = AudioSpeechDetector.frameSamples
         let invScale: Float = 1.0 / 32_768.0
         let invFrameCount: Float = 1.0 / Float(frameSamples)
@@ -173,10 +182,12 @@ public final class AudioSpeechTracker: Sendable {
             s.totalSamples += count
             for i in 0..<count {
                 let x = Float(samples[i]) * invScale
-                let y = alpha * (s.prevY + x - s.prevX)
+                let hp = hpAlpha * (s.prevHP + x - s.prevX)
                 s.prevX = x
-                s.prevY = y
-                s.frameSumSquares += y * y
+                s.prevHP = hp
+                let bp = s.prevLP + lpAlpha * (hp - s.prevLP)
+                s.prevLP = bp
+                s.frameSumSquares += bp * bp
                 s.frameSampleCount += 1
                 if s.frameSampleCount == frameSamples {
                     s.frameRMS.append(sqrt(s.frameSumSquares * invFrameCount))
@@ -191,7 +202,8 @@ public final class AudioSpeechTracker: Sendable {
     public func append(pcm16LE data: Data) {
         let sampleCount = data.count / 2
         guard sampleCount > 0 else { return }
-        let alpha = AudioSpeechDetector.highPassAlpha
+        let hpAlpha = AudioSpeechDetector.highPassAlpha
+        let lpAlpha = AudioSpeechDetector.lowPassAlpha
         let frameSamples = AudioSpeechDetector.frameSamples
         let invScale: Float = 1.0 / 32_768.0
         let invFrameCount: Float = 1.0 / Float(frameSamples)
@@ -204,10 +216,12 @@ public final class AudioSpeechTracker: Sendable {
                     let offset = idx * 2
                     let bits = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
                     let x = Float(Int16(bitPattern: bits)) * invScale
-                    let y = alpha * (s.prevY + x - s.prevX)
+                    let hp = hpAlpha * (s.prevHP + x - s.prevX)
                     s.prevX = x
-                    s.prevY = y
-                    s.frameSumSquares += y * y
+                    s.prevHP = hp
+                    let bp = s.prevLP + lpAlpha * (hp - s.prevLP)
+                    s.prevLP = bp
+                    s.frameSumSquares += bp * bp
                     s.frameSampleCount += 1
                     if s.frameSampleCount == frameSamples {
                         s.frameRMS.append(sqrt(s.frameSumSquares * invFrameCount))

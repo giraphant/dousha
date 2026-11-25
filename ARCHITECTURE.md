@@ -137,10 +137,14 @@ is unavailable ([#53](https://github.com/giraphant/dousha/issues/53)).
 **Preview and final.** Streaming text previews the HUD. Stop transcribes all
 retained audio in one batch `generate` call; nonempty batch text wins, while
 empty/failed/overdue output falls back to filtered streaming text. When
-streaming fallback is empty and `AudioSpeechDetector` finds no speech in the
-retained PCM, batch is skipped so silent audio cannot trigger system-prompt
-glossary hallucinations; when streaming cleanly ends empty on non-silent audio
-(e.g. cough/bump), batch runs without glossary context. Batch runs
+streaming fallback has no substantive characters and `AudioSpeechDetector` finds
+no speech in the retained PCM, batch is skipped; when streaming ends with no
+substantive characters on non-silent audio (e.g. ambient noise/cough), batch
+runs without glossary context. If a glossary-biased batch output looks like a
+prompt echo (`MLXGlossaryEchoGuard` — e.g. `"词汇：..."`, glossary-only dump, or
+uncorroborated glossary expansion over noisy streaming), a single context-free
+verification pass confirms whether real speech was present and suppresses
+confirmed prompt hallucinations. Batch runs
 off main, after streaming cleanup, with temperature 0, repetition penalty 1.15
 and 32-token repetition context; upstream splits only very long audio at 1200s
 low-energy boundaries. `finalPass: false` is for A/B smoke checks.

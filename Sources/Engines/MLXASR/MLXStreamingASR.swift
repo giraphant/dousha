@@ -173,6 +173,7 @@ private final class MLXFinalPassWork: Sendable {
     struct Output: Sendable {
         let text: String
         let milliseconds: Double
+        let suppressedHallucination: Bool
     }
     let result = OneShotChannel<Output>(Output.self)
     let ready = OneShotChannel<Void>()
@@ -181,6 +182,8 @@ private final class MLXFinalPassWork: Sendable {
         var abandoned = false
     }
     private let state = Lock(State())
+
+    var isAbandoned: Bool { state.withLock { $0.abandoned } }
 
     func begin() -> Bool {
         let started = state.withLock {
@@ -194,10 +197,11 @@ private final class MLXFinalPassWork: Sendable {
 
     func abandon() { state.withLock { $0.abandoned = true } }
 
-    func complete(_ text: String, milliseconds: Double = 0) {
+    func complete(_ text: String, milliseconds: Double = 0, suppressedHallucination: Bool = false) {
         let output = state.withLock {
             Output(text: $0.abandoned ? "" : text,
-                   milliseconds: milliseconds)
+                   milliseconds: milliseconds,
+                   suppressedHallucination: !$0.abandoned && suppressedHallucination)
         }
         result.finish(output)
         ready.finish(())
@@ -514,18 +518,20 @@ public actor MLXStreamingASR {
         let pcm = input.fullAudio(generation)
         let audioSeconds = Double(pcm.count / 2) / 16_000
         let speech = AudioSpeechDetector.analyze(pcm16LE: pcm)
-        let skipSilentBatch = fallback.isEmpty && !speech.hasSpeech
-        // When streaming finished cleanly with zero characters, omit the
-        // glossary system context so non-speech sounds (coughs, sighs, bumps)
-        // cannot trigger system-prompt vocabulary hallucinations.
-        let batchContext = (fallback.isEmpty && streamEndedCleanly) ? "" : current.context
+        let streamHasWords = MLXGlossaryEchoGuard.hasSubstantiveText(fallback)
+        let skipSilentBatch = !streamHasWords && !speech.hasSpeech
+        // When streaming heard zero substantive words (empty or punctuation-only,
+        // including after a timeout), omit the glossary system context so ambient
+        // noise, coughs, or sighs cannot prompt-hallucinate glossary terms.
+        let batchContext = streamHasWords ? current.context : ""
         if skipSilentBatch {
             log(current, "finalPassSkipped reason=silent_audio duration=\(String(format: "%.2f", speech.durationSeconds))s maxRMS=\(String(format: "%.4f", speech.maxFrameRMS)) maxRun=\(speech.longestActiveRunFrames)")
-        } else if fallback.isEmpty && streamEndedCleanly && !current.context.isEmpty {
-            log(current, "finalPassContextOmitted reason=empty_stream")
+        } else if !streamHasWords && !current.context.isEmpty {
+            log(current, "finalPassContextOmitted reason=empty_stream streamEndedCleanly=\(streamEndedCleanly)")
         }
         let deadlineSeconds = finalPassDeadline.seconds(forAudioSeconds: audioSeconds)
-        let work = startFinalPass(current, pcm: pcm, runBatch: !skipSilentBatch, context: batchContext)
+        let work = startFinalPass(current, pcm: pcm, runBatch: !skipSilentBatch,
+                                  context: batchContext, streamFallback: fallback)
         // Includes up to 3s for streaming cleanup. After a streaming timeout,
         // natural .ended is still required before batch inference can start.
         // A detached owner retains the lease if either stage exceeds this wait.
@@ -539,23 +545,36 @@ public actor MLXStreamingASR {
         guard isCurrent(current) else { return }
         let batch: String
         let milliseconds: Double
+        let suppressedHallucination: Bool
         if case .signaled(let value) = output, value.milliseconds <= deadlineSeconds * 1_000 {
             batch = value.text
             milliseconds = value.milliseconds
+            suppressedHallucination = value.suppressedHallucination
         } else {
             batch = ""
             milliseconds = work.elapsedMilliseconds
+            suppressedHallucination = false
         }
-        let text = batch.isEmpty ? fallback : batch
+        let text: String
+        if suppressedHallucination {
+            text = ""
+        } else if !batch.isEmpty {
+            text = batch
+        } else if streamHasWords {
+            text = fallback
+        } else {
+            text = ""
+        }
         recordFinalPass(current, text: text, fallback: fallback, batchMilliseconds: milliseconds,
-                        audioSeconds: audioSeconds, source: batch.isEmpty ? "stream" : "batch")
+                        audioSeconds: audioSeconds, source: (!suppressedHallucination && !batch.isEmpty) ? "batch" : "stream")
         deliverCompletion(text, current: current, completion: completion)
     }
 
     /// Transfers the captured streaming resources and lease to one detached
     /// owner. Cancel/restart cannot release this lease while generate is running.
     private func startFinalPass(_ current: Recording, pcm: Data,
-                                runBatch: Bool = true, context: String) -> MLXFinalPassWork {
+                                runBatch: Bool = true, context: String,
+                                streamFallback: String) -> MLXFinalPassWork {
         let work = MLXFinalPassWork()
         current.finalPassWork = work
         guard let io = current.io, let lease = current.lease, let runner = current.finalPassRunner else {
@@ -572,6 +591,7 @@ public actor MLXStreamingASR {
         let eventTask = current.eventTask
         let input = self.input
         let generation = current.generation
+        let traceId = current.traceId
         let request = MLXFinalPassRequest(pcm: pcm, language: current.language, context: context)
         let enabled = finalPassEnabled
         Task.detached(priority: .userInitiated) {
@@ -583,17 +603,47 @@ public actor MLXStreamingASR {
             _ = try? await io.cancelFinished.wait()
             if case .timeout = await eventsFinished.wait(timeout: 3) { eventTask?.cancel() }
             var text = ""
+            var suppressedHallucination = false
             if ended != nil, enabled, runBatch, !request.pcm.isEmpty, input.permitsCallback(generation), work.begin() {
                 // Qwen's batch parser already strips auto-language metadata;
                 // filter defensively for both forced and automatic modes.
                 if let generated = try? await runner(request) {
                     text = QwenTranscriptFilter.visibleText(generated, suppressIncompleteTail: request.language == nil)
+                    let check = MLXGlossaryEchoGuard.needsUnbiasedVerification(
+                        batchText: text,
+                        streamFallback: streamFallback,
+                        context: request.context
+                    )
+                    if check.verify {
+                        let unbiasedRequest = MLXFinalPassRequest(
+                            pcm: request.pcm, language: request.language, context: ""
+                        )
+                        let unbiasedText: String?
+                        if input.permitsCallback(generation), !work.isAbandoned,
+                           let generatedUnbiased = try? await runner(unbiasedRequest) {
+                            unbiasedText = QwenTranscriptFilter.visibleText(
+                                generatedUnbiased,
+                                suppressIncompleteTail: request.language == nil
+                            )
+                        } else {
+                            unbiasedText = nil
+                        }
+                        let resolved = MLXGlossaryEchoGuard.resolve(
+                            biasedBatch: text,
+                            unbiasedBatch: unbiasedText,
+                            streamFallback: streamFallback,
+                            classification: check.classification
+                        )
+                        doushaLog("[MLXASR] traceId=\(traceId) glossaryVerify classification=\(check.classification) biasedLen=\(text.count) unbiasedLen=\(unbiasedText?.count ?? -1) keptLen=\(resolved.text.count) suppressed=\(resolved.suppressedHallucination)")
+                        text = resolved.text
+                        suppressedHallucination = resolved.suppressedHallucination
+                    }
                 }
             }
             let milliseconds = work.elapsedMilliseconds
             await lease.release()
             cleanupFinished.finish(())
-            work.complete(text, milliseconds: milliseconds)
+            work.complete(text, milliseconds: milliseconds, suppressedHallucination: suppressedHallucination)
         }
         return work
     }

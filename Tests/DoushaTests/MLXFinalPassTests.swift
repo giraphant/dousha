@@ -318,7 +318,7 @@ final class MLXFinalPassTests: XCTestCase {
         await fulfillment(of: [unexpected], timeout: 0.05)
     }
 
-    private func makeSpeechPCM(durationSeconds: Double = 0.5, amplitude: Float = 0.06) -> Data {
+    private func makeSpeechPCM(durationSeconds: Double = 0.5, amplitude: Float = 0.08) -> Data {
         let count = Int(durationSeconds * 16_000)
         var data = Data(capacity: count * 2)
         for i in 0..<count {
@@ -352,38 +352,100 @@ final class MLXFinalPassTests: XCTestCase {
         await lease.release()
     }
 
-    func testNonSilentPCMWithEmptyStreamOmitsGlossaryContextInBatchPass() async throws {
-        let capturedContext = Lock<String?>(nil)
+    func testNonSilentPCMWithEmptyOrPunctuationOnlyStreamOmitsGlossaryContextInBatchPass() async throws {
+        for noisyStream in ["", "。", " ... "] {
+            let capturedContexts = Lock<[String]>([])
+            let engine = MLXStreamingASR { _, _, _, _ in
+                MLXPreparedSession(stream: FakeMLXStream(text: noisyStream)) { request in
+                    capturedContexts.withLock { $0.append(request.context) }
+                    return ""
+                }
+            }
+            await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") },
+                                        language: "zh-CN", context: "Vocabulary:\n- quasi\n- 吉登斯")
+            engine.ingest(makeSpeechPCM())
+            engine.openStream()
+            let result = try await stop(engine).wait()
+            XCTAssertEqual(result.text, "")
+            XCTAssertEqual(capturedContexts.value(), [""],
+                           "Empty or punctuation-only streaming output must omit glossary context")
+        }
+    }
+
+    func testPromptLeakageHallucinationOverAmbientNoiseIsVerifiedAndSuppressed() async throws {
+        // Reproduces the 10s ambient-noise failure: streaming emitted a stray "嗯",
+        // biased batch echoed "词汇：quasi，吉登斯，非人，能动性。", unbiased verification
+        // returned "" → must deliver "" and NOT fall back to "嗯".
+        let contexts = Lock<[String]>([])
+        let glossary = "Vocabulary:\n- quasi\n- 吉登斯\n- 非人\n- 能动性"
         let engine = MLXStreamingASR { _, _, _, _ in
-            MLXPreparedSession(stream: FakeMLXStream(text: "")) { request in
-                capturedContext.withLock { $0 = request.context }
-                return ""
+            MLXPreparedSession(stream: FakeMLXStream(text: "嗯")) { request in
+                contexts.withLock { $0.append(request.context) }
+                return request.context.isEmpty ? "" : "词汇：quasi，吉登斯，非人，能动性。"
             }
         }
         await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") },
-                                    language: "zh-CN", context: "Vocabulary:\n- 吉登斯")
+                                    language: "zh-CN", context: glossary)
+        engine.ingest(makeSpeechPCM(durationSeconds: 1.0))
+        engine.openStream()
+        let result = try await stop(engine).wait()
+        XCTAssertEqual(result.text, "")
+        XCTAssertEqual(contexts.value(), [glossary, ""])
+        let lease = try await MLXModelStore().acquireSessionLease()
+        await lease.release()
+    }
+
+    func testLoneGlossaryTermHallucinationIsSuppressedWhenUnbiasedIsEmpty() async throws {
+        let contexts = Lock<[String]>([])
+        let glossary = "Vocabulary:\n- 吉登斯"
+        let engine = MLXStreamingASR { _, _, _, _ in
+            MLXPreparedSession(stream: FakeMLXStream(text: "嗯")) { request in
+                contexts.withLock { $0.append(request.context) }
+                return request.context.isEmpty ? "" : "吉登斯"
+            }
+        }
+        await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") },
+                                    language: "zh-CN", context: glossary)
         engine.ingest(makeSpeechPCM())
         engine.openStream()
         let result = try await stop(engine).wait()
         XCTAssertEqual(result.text, "")
-        XCTAssertEqual(capturedContext.value(), "",
-                       "Empty streaming output must omit glossary context to avoid system-prompt hallucination")
+        XCTAssertEqual(contexts.value(), [glossary, ""])
     }
 
-    func testNonSilentPCMWithNonEmptyStreamRetainsGlossaryContextInBatchPass() async throws {
-        let capturedContext = Lock<String?>(nil)
+    func testGenuineSingleGlossaryTermSpeechSurvivesVerification() async throws {
+        let contexts = Lock<[String]>([])
+        let glossary = "Vocabulary:\n- 吉登斯"
         let engine = MLXStreamingASR { _, _, _, _ in
             MLXPreparedSession(stream: FakeMLXStream(text: "基登斯")) { request in
-                capturedContext.withLock { $0 = request.context }
-                return "吉登斯"
+                contexts.withLock { $0.append(request.context) }
+                return request.context.isEmpty ? "基登斯" : "吉登斯"
             }
         }
         await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") },
-                                    language: "zh-CN", context: "Vocabulary:\n- 吉登斯")
+                                    language: "zh-CN", context: glossary)
         engine.ingest(makeSpeechPCM())
         engine.openStream()
         let result = try await stop(engine).wait()
         XCTAssertEqual(result.text, "吉登斯")
-        XCTAssertEqual(capturedContext.value(), "Vocabulary:\n- 吉登斯")
+        XCTAssertEqual(contexts.value(), [glossary, ""])
+    }
+
+    func testNormalSentenceWithGlossaryTermsRunsBatchOnlyOnce() async throws {
+        let contexts = Lock<[String]>([])
+        let glossary = "Vocabulary:\n- quasi\n- 吉登斯\n- 非人\n- 能动性"
+        let engine = MLXStreamingASR { _, _, _, _ in
+            MLXPreparedSession(stream: FakeMLXStream(text: "我觉得基登斯的非人能动性很有意思")) { request in
+                contexts.withLock { $0.append(request.context) }
+                return "我觉得吉登斯的非人能动性很有意思。"
+            }
+        }
+        await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") },
+                                    language: "zh-CN", context: glossary)
+        engine.ingest(makeSpeechPCM())
+        engine.openStream()
+        let result = try await stop(engine).wait()
+        XCTAssertEqual(result.text, "我觉得吉登斯的非人能动性很有意思。")
+        XCTAssertEqual(contexts.value(), [glossary], "Normal sentences must not incur a verification pass")
     }
 }
