@@ -15,7 +15,7 @@ ConcurrencySupport        concurrency primitives (SessionGeneration, OneShotChan
 ASRSupport                engine-agnostic domain types (PartialTranscript,
         │                 TranscriptionResult, TranscriptFormatter,
         │                 TranscriptCorrector, WavFileWriter, AudioLevel,
-        │                 AudioCapturePaths, WavReader)
+        │                 AudioSpeechDetector, AudioCapturePaths, WavReader)
         ▼
 DoubaoASR    SonioxASR    MLXASR  ← MLXAudioSTT (mlx-audio-swift, pinned revision)
         │         │        │    peer engines, never import each other
@@ -80,7 +80,10 @@ on recordingFlag: Lock<Bool>)            idle → recording → transcribing →
                                                      │
                                        FloatingHUDModel (reveal timer) → FloatingHUDView
 stop():
-  hub.stopCapture()        ← removes tap + 50ms drain so the spoken tail reaches engines
+  hub.stopCapture()        ← removes tap + 50ms drain so the spoken tail reaches engines;
+                             returns AudioSpeechDetector.Analysis — silent live captures
+                             cancel engines immediately and yield empty .final (WAV still
+                             archived in history for manual re-transcribe)
   THEN engines finish()    ← order matters: drain before flush
   FinalResultCollector     ← QUA-153 routing: online language signal (classifier
                              partials seen during recording) > classifier final >
@@ -133,7 +136,11 @@ is unavailable ([#53](https://github.com/giraphant/dousha/issues/53)).
 
 **Preview and final.** Streaming text previews the HUD. Stop transcribes all
 retained audio in one batch `generate` call; nonempty batch text wins, while
-empty/failed/overdue output falls back to filtered streaming text. Batch runs
+empty/failed/overdue output falls back to filtered streaming text. When
+streaming fallback is empty and `AudioSpeechDetector` finds no speech in the
+retained PCM, batch is skipped so silent audio cannot trigger system-prompt
+glossary hallucinations; when streaming cleanly ends empty on non-silent audio
+(e.g. cough/bump), batch runs without glossary context. Batch runs
 off main, after streaming cleanup, with temperature 0, repetition penalty 1.15
 and 32-token repetition context; upstream splits only very long audio at 1200s
 low-energy boundaries. `finalPass: false` is for A/B smoke checks.
@@ -247,6 +254,7 @@ and both language smoke checks.
 |---|---|---|
 | `SpeechBackend` | one session = one `AsyncStream<RecordingEvent>`; `stop()` yields exactly one terminal `.final`, `cancel()` finishes with none | `MockSpeechBackend` (RecordingControllerTests) |
 | `PushCaptureEngine` (+ `PCMCaptureEngine`) | engines receive pushed audio from the hub; two-phase `beginSession`/`openStream` | `MockBackend` (MultiEngineBackendTests, hub = nil) |
+| `AudioCaptureHub` | live capture start/stop/cancel + speech-activity analysis | `MockCaptureHub` (MultiEngineBackendTests) |
 | `MLXBackend` | app adapter (§2.1) | injected prepare closure + isolated Preferences (MLXEngineWiringTests) |
 | `MLXModelStore` loader + lease | model ownership (§2.1) | injected loader / `MLXLoadedModel` fake (MLXASRLifecycleTests, MLXModelPrewarmTests); lease tests never allocate MLX arrays |
 | `MLXPreparedSession` stream + final-pass runner | stop/cancel/deadline ownership (§2.1) | fake event stream + suspended runner (MLXFinalPassTests) |

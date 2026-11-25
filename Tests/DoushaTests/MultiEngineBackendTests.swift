@@ -14,6 +14,7 @@ final class MultiEngineBackendTests: XCTestCase {
         /// drive the online language signal in QUA-153 tests.
         let partialOnStart: String?
         private(set) var startCalled = false
+        private(set) var finishCalled = false
         private(set) var cancelCalled = false
         /// Captured in `beginSession` so a test can drive partials on demand
         /// (QUA-180 fallback timing tests), mirroring an engine emitting mid-session.
@@ -42,6 +43,7 @@ final class MultiEngineBackendTests: XCTestCase {
         }
         func openStream() {}
         func finish(completion: @escaping @Sendable (TranscriptionResult) -> Void) {
+            finishCalled = true
             if stopDelay > 0 {
                 let r = result
                 DispatchQueue.global().asyncAfter(deadline: .now() + stopDelay) { completion(r) }
@@ -50,6 +52,24 @@ final class MultiEngineBackendTests: XCTestCase {
             }
         }
         func cancelSession() { cancelCalled = true }
+    }
+
+    private final class MockCaptureHub: AudioCaptureHub, @unchecked Sendable {
+        let analysis: AudioSpeechDetector.Analysis?
+        init(hasSpeech: Bool) {
+            self.analysis = AudioSpeechDetector.Analysis(
+                hasSpeech: hasSpeech,
+                durationSeconds: 0.5,
+                frameCount: 25,
+                maxFrameRMS: hasSpeech ? 0.05 : 0.001,
+                noiseFloorRMS: 0.001,
+                activeThresholdRMS: 0.004,
+                longestActiveRunFrames: hasSpeech ? 10 : 0
+            )
+        }
+        func startCapture(onLevel: @escaping @Sendable (Float) -> Void) async throws {}
+        func stopCapture() async -> AudioSpeechDetector.Analysis? { analysis }
+        func cancelCapture() async {}
     }
 
     private let router = LanguageRouter(chineseEngine: .doubao,
@@ -474,5 +494,38 @@ final class MultiEngineBackendTests: XCTestCase {
         _ = multi.start()
         multi.cancel()
         await eventually({ doubao.cancelCalled && soniox.cancelCalled })
+    }
+
+    func testStop_silentLiveCapture_cancelsEnginesAndReturnsEmptyWithoutHallucination() async {
+        // Even if an engine would have hallucinated a glossary term ("吉登斯") on
+        // silence, a live capture with no speech must cancel engines and yield "".
+        let qwen = MockBackend(text: "吉登斯")
+        let doubao = MockBackend(text: "吉登斯")
+        let multi = MultiEngineBackend(
+            entries: [(.qwen3, qwen), (.doubao, doubao)],
+            primary: .qwen3,
+            router: router,
+            hub: MockCaptureHub(hasSpeech: false)
+        )
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "")
+        XCTAssertTrue(qwen.cancelCalled)
+        XCTAssertTrue(doubao.cancelCalled)
+        XCTAssertFalse(qwen.finishCalled)
+        XCTAssertFalse(doubao.finishCalled)
+    }
+
+    func testStop_liveCaptureWithSpeech_runsEnginesNormally() async {
+        let qwen = MockBackend(text: "吉登斯")
+        let multi = MultiEngineBackend(
+            entries: [(.qwen3, qwen)],
+            primary: .qwen3,
+            router: LanguageRouter(chineseEngine: .qwen3, englishEngine: .qwen3, mixedEngine: .qwen3),
+            hub: MockCaptureHub(hasSpeech: true)
+        )
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "吉登斯")
+        XCTAssertTrue(qwen.finishCalled)
+        XCTAssertFalse(qwen.cancelCalled)
     }
 }

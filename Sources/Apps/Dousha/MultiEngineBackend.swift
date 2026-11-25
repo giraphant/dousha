@@ -36,7 +36,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     private let entries: [(engine: Engine, backend: PushCaptureEngine)]
     private let primary: Engine
     private let router: LanguageRouter
-    private let hub: AudioTapHub?
+    private let hub: (any AudioCaptureHub)?
     /// QUA-180: how long the primary may emit no partials before a secondary is
     /// allowed to drive the HUD's live-subtitle area. Injectable for tests.
     private let hudFallbackSeconds: TimeInterval
@@ -191,7 +191,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     init(entries: [(engine: Engine, backend: PushCaptureEngine)],
          primary: Engine,
          router: LanguageRouter,
-         hub: AudioTapHub? = nil,
+         hub: (any AudioCaptureHub)? = nil,
          hudFallbackSeconds: TimeInterval = 2.0,
          replayWAV: URL? = nil) {
         precondition(!entries.isEmpty, "MultiEngineBackend needs at least one engine")
@@ -409,7 +409,20 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             await self.startTask?.value          // never route before the session began
             // Remove the tap + drain the tail BEFORE the engines flush + finish,
             // so every engine's pcmBuffer holds the last buffers the user spoke.
-            if let hub = self.hub { await hub.stopCapture() }
+            if let hub = self.hub {
+                let speech = await hub.stopCapture()
+                if let speech, !speech.hasSpeech {
+                    // Blank/silent live recording (or accidental quick tap): cancel
+                    // engines immediately so context-biased ASR models cannot
+                    // hallucinate glossary terms on silence. The closed WAV still
+                    // enters history via RecordingController for manual re-transcribe.
+                    doushaLog("[MultiEngine] silent live capture suppressed — cancelling \(self.entries.count) engine(s) duration=\(String(format: "%.2f", speech.durationSeconds))s maxRMS=\(String(format: "%.4f", speech.maxFrameRMS)) floor=\(String(format: "%.4f", speech.noiseFloorRMS)) threshold=\(String(format: "%.4f", speech.activeThresholdRMS)) maxRun=\(speech.longestActiveRunFrames)")
+                    for entry in self.entries { entry.backend.cancelSession() }
+                    self.continuation?.yield(.final(TranscriptionResult(text: "")))
+                    self.continuation?.finish()
+                    return
+                }
+            }
             self.routeFinalResult { result in
                 self.continuation?.yield(.final(result))
                 self.continuation?.finish()

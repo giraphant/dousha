@@ -502,16 +502,30 @@ public actor MLXStreamingASR {
         let ended = await current.final.wait(timeout: streamEndTimeout)
         guard isCurrent(current) else { return }
         let fallback: String
+        let streamEndedCleanly: Bool
         if case .signaled(let fullText) = ended {
             fallback = current.transcript.finalText(endedText: fullText)
+            streamEndedCleanly = true
         } else {
             fallback = current.transcript.finalText(endedText: nil)
+            streamEndedCleanly = false
             log(current, "finalTimedOut fallbackLength=\(fallback.count)")
         }
         let pcm = input.fullAudio(generation)
         let audioSeconds = Double(pcm.count / 2) / 16_000
+        let speech = AudioSpeechDetector.analyze(pcm16LE: pcm)
+        let skipSilentBatch = fallback.isEmpty && !speech.hasSpeech
+        // When streaming finished cleanly with zero characters, omit the
+        // glossary system context so non-speech sounds (coughs, sighs, bumps)
+        // cannot trigger system-prompt vocabulary hallucinations.
+        let batchContext = (fallback.isEmpty && streamEndedCleanly) ? "" : current.context
+        if skipSilentBatch {
+            log(current, "finalPassSkipped reason=silent_audio duration=\(String(format: "%.2f", speech.durationSeconds))s maxRMS=\(String(format: "%.4f", speech.maxFrameRMS)) maxRun=\(speech.longestActiveRunFrames)")
+        } else if fallback.isEmpty && streamEndedCleanly && !current.context.isEmpty {
+            log(current, "finalPassContextOmitted reason=empty_stream")
+        }
         let deadlineSeconds = finalPassDeadline.seconds(forAudioSeconds: audioSeconds)
-        let work = startFinalPass(current, pcm: pcm)
+        let work = startFinalPass(current, pcm: pcm, runBatch: !skipSilentBatch, context: batchContext)
         // Includes up to 3s for streaming cleanup. After a streaming timeout,
         // natural .ended is still required before batch inference can start.
         // A detached owner retains the lease if either stage exceeds this wait.
@@ -540,7 +554,8 @@ public actor MLXStreamingASR {
 
     /// Transfers the captured streaming resources and lease to one detached
     /// owner. Cancel/restart cannot release this lease while generate is running.
-    private func startFinalPass(_ current: Recording, pcm: Data) -> MLXFinalPassWork {
+    private func startFinalPass(_ current: Recording, pcm: Data,
+                                runBatch: Bool = true, context: String) -> MLXFinalPassWork {
         let work = MLXFinalPassWork()
         current.finalPassWork = work
         guard let io = current.io, let lease = current.lease, let runner = current.finalPassRunner else {
@@ -557,7 +572,7 @@ public actor MLXStreamingASR {
         let eventTask = current.eventTask
         let input = self.input
         let generation = current.generation
-        let request = MLXFinalPassRequest(pcm: pcm, language: current.language, context: current.context)
+        let request = MLXFinalPassRequest(pcm: pcm, language: current.language, context: context)
         let enabled = finalPassEnabled
         Task.detached(priority: .userInitiated) {
             // cancel() only closes the upstream event stream; it does NOT join
@@ -568,7 +583,7 @@ public actor MLXStreamingASR {
             _ = try? await io.cancelFinished.wait()
             if case .timeout = await eventsFinished.wait(timeout: 3) { eventTask?.cancel() }
             var text = ""
-            if ended != nil, enabled, !request.pcm.isEmpty, input.permitsCallback(generation), work.begin() {
+            if ended != nil, enabled, runBatch, !request.pcm.isEmpty, input.permitsCallback(generation), work.begin() {
                 // Qwen's batch parser already strips auto-language metadata;
                 // filter defensively for both forced and automatic modes.
                 if let generated = try? await runner(request) {

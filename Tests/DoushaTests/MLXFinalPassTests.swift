@@ -317,4 +317,73 @@ final class MLXFinalPassTests: XCTestCase {
         XCTAssertEqual(result.text, "new batch")
         await fulfillment(of: [unexpected], timeout: 0.05)
     }
+
+    private func makeSpeechPCM(durationSeconds: Double = 0.5, amplitude: Float = 0.06) -> Data {
+        let count = Int(durationSeconds * 16_000)
+        var data = Data(capacity: count * 2)
+        for i in 0..<count {
+            let t = Double(i) / 16_000.0
+            let sample = Int16(amplitude * Float(sin(2.0 * .pi * 600.0 * t)) * 32_767.0)
+            var le = sample.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
+    func testSilentPCMWithEmptyStreamSkipsBatchPassAndReleasesLease() async throws {
+        let batchCalled = Lock(false)
+        let engine = MLXStreamingASR { _, _, _, _ in
+            MLXPreparedSession(stream: FakeMLXStream(text: "")) { _ in
+                batchCalled.withLock { $0 = true }
+                return "吉登斯"
+            }
+        }
+        await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") },
+                                    language: "zh-CN", context: "Vocabulary:\n- 吉登斯")
+        engine.ingest(Data(repeating: 0, count: 32_000)) // 1 second of pure silence
+        engine.openStream()
+        let result = try await stop(engine).wait()
+        XCTAssertEqual(result.text, "")
+        XCTAssertFalse(batchCalled.value(), "Batch pass must not run on silent audio with empty streaming output")
+        let metrics = await engine.finalPassMetrics
+        XCTAssertEqual(metrics?.source, "stream")
+        XCTAssertEqual(metrics?.finalLength, 0)
+        let lease = try await MLXModelStore().acquireSessionLease()
+        await lease.release()
+    }
+
+    func testNonSilentPCMWithEmptyStreamOmitsGlossaryContextInBatchPass() async throws {
+        let capturedContext = Lock<String?>(nil)
+        let engine = MLXStreamingASR { _, _, _, _ in
+            MLXPreparedSession(stream: FakeMLXStream(text: "")) { request in
+                capturedContext.withLock { $0 = request.context }
+                return ""
+            }
+        }
+        await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") },
+                                    language: "zh-CN", context: "Vocabulary:\n- 吉登斯")
+        engine.ingest(makeSpeechPCM())
+        engine.openStream()
+        let result = try await stop(engine).wait()
+        XCTAssertEqual(result.text, "")
+        XCTAssertEqual(capturedContext.value(), "",
+                       "Empty streaming output must omit glossary context to avoid system-prompt hallucination")
+    }
+
+    func testNonSilentPCMWithNonEmptyStreamRetainsGlossaryContextInBatchPass() async throws {
+        let capturedContext = Lock<String?>(nil)
+        let engine = MLXStreamingASR { _, _, _, _ in
+            MLXPreparedSession(stream: FakeMLXStream(text: "基登斯")) { request in
+                capturedContext.withLock { $0 = request.context }
+                return "吉登斯"
+            }
+        }
+        await engine.prepareSession(onPartial: { _ in }, onError: { _ in XCTFail("Unexpected error") },
+                                    language: "zh-CN", context: "Vocabulary:\n- 吉登斯")
+        engine.ingest(makeSpeechPCM())
+        engine.openStream()
+        let result = try await stop(engine).wait()
+        XCTAssertEqual(result.text, "吉登斯")
+        XCTAssertEqual(capturedContext.value(), "Vocabulary:\n- 吉登斯")
+    }
 }

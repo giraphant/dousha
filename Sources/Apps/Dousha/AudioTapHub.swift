@@ -20,7 +20,15 @@ import ConcurrencySupport
 /// `stopCapture` (drains the in-flight tail before engines flush) or
 /// `cancelCapture`. The audio-thread tap closure captures only local copies and
 /// never hops back into this actor, so it stays real-time safe.
-actor AudioTapHub {
+/// Internal seam so `MultiEngineBackend` tests can exercise live capture
+/// lifecycle and silence suppression without opening real audio hardware.
+protocol AudioCaptureHub: Sendable {
+    func startCapture(onLevel: @escaping @Sendable (Float) -> Void) async throws
+    func stopCapture() async -> AudioSpeechDetector.Analysis?
+    func cancelCapture() async
+}
+
+actor AudioTapHub: AudioCaptureHub {
     /// Consumes int16 16 kHz mono PCM, pushed as `Data` chunks.
     typealias PCMSink = @Sendable (Data) -> Void
 
@@ -34,6 +42,7 @@ actor AudioTapHub {
     private let microphoneSelection: MicrophoneSelectionPreference
     private let audioControls: RecordingAudioControls?
     private var wavWriter: WavFileWriter?
+    private var speechTracker: AudioSpeechTracker?
     private var capturing = false
     private var levelSink: (@Sendable (Float) -> Void)?
     private var configObserver: NSObjectProtocol?
@@ -74,6 +83,7 @@ actor AudioTapHub {
         captureGeneration += 1
         levelSink = onLevel
         restartPending = false
+        speechTracker = AudioSpeechTracker()
 
         if wantsWAV {
             try? FileManager.default.removeItem(at: AudioCapturePaths.sharedWAV)
@@ -99,6 +109,7 @@ actor AudioTapHub {
             unregisterConfigurationObserver()
             levelSink = nil
             restartPending = false
+            speechTracker = nil
             removeTapStopAndReset()
             closeSharedWAV(deleteFile: true)
             throw error
@@ -110,8 +121,9 @@ actor AudioTapHub {
     /// land on the engine actors' `pcmBuffer` before the engines flush + finish.
     /// Mirrors the old per-actor `stopDrainWindow`; the WAV is closed afterward
     /// so it's readable immediately (Soniox async upload).
-    func stopCapture() async {
-        guard capturing else { return }
+    @discardableResult
+    func stopCapture() async -> AudioSpeechDetector.Analysis? {
+        guard capturing else { return nil }
         capturing = false
         captureGeneration += 1
         restartPending = false
@@ -125,7 +137,13 @@ actor AudioTapHub {
         for _ in 0..<4 { await Task.yield() }
         try? await Task.sleep(nanoseconds: 50_000_000)  // 50 ms drain window for the tail buffers
         closeSharedWAV(deleteFile: false)
+        let analysis = speechTracker?.analyze()
+        speechTracker = nil
         doushaLog("[AudioTapHub] capture stopped + drained")
+        if let analysis {
+            doushaLog("[AudioTapHub] speechAnalysis hasSpeech=\(analysis.hasSpeech) duration=\(String(format: "%.2f", analysis.durationSeconds))s frames=\(analysis.frameCount) maxRMS=\(String(format: "%.4f", analysis.maxFrameRMS)) floor=\(String(format: "%.4f", analysis.noiseFloorRMS)) threshold=\(String(format: "%.4f", analysis.activeThresholdRMS)) maxRun=\(analysis.longestActiveRunFrames)")
+        }
+        return analysis
     }
 
     /// Aborts capture and discards the WAV. No drain — the recording is being
@@ -135,6 +153,7 @@ actor AudioTapHub {
         capturing = false
         restartPending = false
         levelSink = nil
+        speechTracker = nil
         unregisterConfigurationObserver()
         removeTapStopAndReset()
         audioControls?.end()
@@ -207,9 +226,10 @@ actor AudioTapHub {
         // Snapshots for the audio-thread closure — it must not touch actor state.
         let pcmSinks = self.pcmSinks
         let capturedWAV = self.wavWriter
+        let capturedTracker = self.speechTracker
         // Only do the int16 conversion if someone actually consumes it (an
-        // engine or the WAV).
-        let needPCM = !pcmSinks.isEmpty || capturedWAV != nil
+        // engine, the WAV, or the speech detector).
+        let needPCM = !pcmSinks.isEmpty || capturedWAV != nil || capturedTracker != nil
 
         inputNode.removeTap(onBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { buffer, _ in
@@ -242,6 +262,7 @@ actor AudioTapHub {
             guard n > 0, let src = outBuf.int16ChannelData?[0] else { return }
 
             if let wav = capturedWAV { wav.append(int16Samples: src, count: n) }
+            capturedTracker?.append(int16Samples: src, count: n)
 
             if !pcmSinks.isEmpty {
                 let chunk = Data(bytes: src, count: n * MemoryLayout<Int16>.size)
