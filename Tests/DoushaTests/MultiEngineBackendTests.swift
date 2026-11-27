@@ -56,14 +56,14 @@ final class MultiEngineBackendTests: XCTestCase {
 
     private final class MockCaptureHub: AudioCaptureHub, @unchecked Sendable {
         let analysis: AudioSpeechDetector.Analysis?
-        init(hasSpeech: Bool) {
+        init(hasSpeech: Bool, maxFrameRMS: Float? = nil) {
             self.analysis = AudioSpeechDetector.Analysis(
                 hasSpeech: hasSpeech,
                 durationSeconds: 0.5,
                 frameCount: 25,
-                maxFrameRMS: hasSpeech ? 0.05 : 0.001,
+                maxFrameRMS: maxFrameRMS ?? (hasSpeech ? 0.05 : 0.001),
                 noiseFloorRMS: 0.001,
-                activeThresholdRMS: 0.004,
+                activeThresholdRMS: 0.0025,
                 longestActiveRunFrames: hasSpeech ? 10 : 0
             )
         }
@@ -527,5 +527,56 @@ final class MultiEngineBackendTests: XCTestCase {
         XCTAssertEqual(result.text, "吉登斯")
         XCTAssertTrue(qwen.finishCalled)
         XCTAssertFalse(qwen.cancelCalled)
+    }
+
+    func testStop_quietSpeechWithSubstantiveStreamingPartial_isNotSuppressed() async {
+        // Even if acoustic VAD reports hasSpeech=false on whispered/very-quiet speech,
+        // once an engine has already streamed substantive words on non-zero audio,
+        // MultiEngineBackend must preserve the session instead of cancelling engines.
+        let qwen = MockBackend(text: "小声说话也能识别", partialOnStart: "小声说话")
+        let multi = MultiEngineBackend(
+            entries: [(.qwen3, qwen)],
+            primary: .qwen3,
+            router: LanguageRouter(chineseEngine: .qwen3, englishEngine: .qwen3, mixedEngine: .qwen3),
+            hub: MockCaptureHub(hasSpeech: false, maxFrameRMS: 0.0018)
+        )
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "小声说话也能识别")
+        XCTAssertTrue(qwen.finishCalled)
+        XCTAssertFalse(qwen.cancelCalled)
+    }
+
+    func testStop_silentCaptureWithStraySingleCharOrPunctuationPartial_stillSuppressed() async {
+        // A stray 1-char ambient filler ("嗯") or punctuation ("。") must NOT bypass
+        // acoustic silence suppression.
+        for stray in ["。", "嗯", " ... "] {
+            let qwen = MockBackend(text: "吉登斯", partialOnStart: stray)
+            let multi = MultiEngineBackend(
+                entries: [(.qwen3, qwen)],
+                primary: .qwen3,
+                router: LanguageRouter(chineseEngine: .qwen3, englishEngine: .qwen3, mixedEngine: .qwen3),
+                hub: MockCaptureHub(hasSpeech: false, maxFrameRMS: 0.001)
+            )
+            let result = await finalResult(multi)
+            XCTAssertEqual(result.text, "", "Stray partial '\(stray)' must not override silence suppression")
+            XCTAssertTrue(qwen.cancelCalled)
+            XCTAssertFalse(qwen.finishCalled)
+        }
+    }
+
+    func testStop_digitalZeroCaptureWithStreamingPartial_stillSuppressed() async {
+        // Muted / dead-mic digital zero (maxFrameRMS = 0) must stay suppressed even if
+        // an engine emitted a hallucinated streaming partial.
+        let qwen = MockBackend(text: "吉登斯", partialOnStart: "吉登斯")
+        let multi = MultiEngineBackend(
+            entries: [(.qwen3, qwen)],
+            primary: .qwen3,
+            router: LanguageRouter(chineseEngine: .qwen3, englishEngine: .qwen3, mixedEngine: .qwen3),
+            hub: MockCaptureHub(hasSpeech: false, maxFrameRMS: 0)
+        )
+        let result = await finalResult(multi)
+        XCTAssertEqual(result.text, "")
+        XCTAssertTrue(qwen.cancelCalled)
+        XCTAssertFalse(qwen.finishCalled)
     }
 }

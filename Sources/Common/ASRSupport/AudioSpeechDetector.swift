@@ -16,12 +16,14 @@ import ConcurrencySupport
 ///        rustle, paper crinkle, and sharp keyboard-click harmonics.
 ///   2. 20 ms frame RMS (320 samples per frame).
 ///   3. Adaptive threshold: `min(unconditionalSpeechRMS, max(absoluteFloorRMS,
-///      noiseFloor * noiseFloorMultiplier))`, where `noiseFloor` is the 25th
+///      noiseFloor * noiseFloorMultiplier))`, where `noiseFloor` is the 10th
 ///      percentile of frame RMS for recordings ≥ 300 ms (0 for shorter clips).
-///      Using the 25th percentile with a 3.0× (+9.5 dB) margin rejects natural
-///      multi-second ambient room fluctuations and steady fan/AC noise without
-///      suppressing soft speech in a quiet room or continuous speech filling a
-///      whole clip.
+///      Using the 10th percentile with a 2.4× (+7.6 dB) margin rejects steady
+///      fan/AC hum and mild room fluctuations without letting continuous
+///      push-to-talk soft speech contaminate its own noise floor.
+///      Ambient-noise glossary prompt echoes on Qwen3-ASR are handled directly
+///      by `MLXGlossaryEchoGuard` rather than raising the acoustic floor into
+///      soft-speech territory.
 ///   4. Burst gate: requires at least `minDurationFrames` total frames (160 ms)
 ///      and at least `minConsecutiveActiveFrames` consecutive active frames
 ///      (100 ms), rejecting isolated 20–60 ms keyboard clicks, mouse scrapes, and
@@ -64,14 +66,14 @@ public enum AudioSpeechDetector {
     public static let minConsecutiveActiveFrames = 5
     /// Minimum frame count (300 ms) before estimating a per-recording noise floor.
     public static let minFramesForNoiseFloor = 15
-    /// Band-passed RMS floor (~ -42 dBFS): above quiet/moderate room ambient floor,
-    /// safely below soft conversational speech.
-    public static let absoluteFloorRMS: Float = 0.008
-    /// Band-passed RMS (~ -30 dBFS) above which sustained energy is always speech
+    /// Band-passed RMS floor (~ -52 dBFS): safely above quiet-room mic self-noise
+    /// (~0.001–0.0015), while preserving very soft speech and whispers.
+    public static let absoluteFloorRMS: Float = 0.0025
+    /// Band-passed RMS (~ -34 dBFS) above which sustained energy is always speech
     /// even if the entire clip is filled with continuous speech (no quiet margin).
-    public static let unconditionalSpeechRMS: Float = 0.030
-    /// Adaptive margin (+9.5 dB) above a recording's 25th-percentile ambient floor.
-    public static let noiseFloorMultiplier: Float = 3.0
+    public static let unconditionalSpeechRMS: Float = 0.020
+    /// Adaptive margin (+7.6 dB) above a recording's 10th-percentile ambient floor.
+    public static let noiseFloorMultiplier: Float = 2.4
     /// 1-pole high-pass coefficient for ~250 Hz cutoff at 16 kHz: 1 / (1 + 2π*250/16000).
     static let highPassAlpha: Float = 0.9106
     /// 1-pole low-pass coefficient for ~3400 Hz cutoff at 16 kHz: dt / (RC + dt).
@@ -111,7 +113,7 @@ public enum AudioSpeechDetector {
         let noiseFloor: Float
         if frameCount >= minFramesForNoiseFloor {
             let sorted = frameRMS.sorted()
-            noiseFloor = sorted[frameCount / 4]
+            noiseFloor = sorted[frameCount / 10]
         } else {
             noiseFloor = 0
         }

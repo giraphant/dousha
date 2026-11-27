@@ -159,6 +159,44 @@ final class AudioSpeechDetectorTests: XCTestCase {
         XCTAssertTrue(analysis.hasSpeech, "Soft speech in a quiet room must still be detected")
     }
 
+    func testVerySoftWhisperedSpeechInQuietRoom_detectedAsSpeech() {
+        // Regression for v0.5.3 (absoluteFloorRMS = 0.008 rejected quiet speech):
+        // 1.2s clip with quiet room floor (~0.0011 band-passed) + soft 240 ms voice
+        // at ~0.0045 band-passed RMS (-47 dBFS), well below 0.008.
+        let total = Int(1.2 * Double(AudioSpeechDetector.sampleRate))
+        let room = deterministicNoise(count: total, rms: 0.0015, seed: 0x2222)
+        let samples: [Int16] = (0..<total).map { i in
+            var v = room[i]
+            if i >= 4_800 && i < 8_640 { // 240 ms
+                v += sine(at: i, frequency: 650, amplitude: 0.0075)
+            }
+            return Int16(max(-1, min(1, v)) * 32_767)
+        }
+        let analysis = AudioSpeechDetector.analyze(pcm16LE: pcmData(from: samples))
+        XCTAssertTrue(analysis.hasSpeech, "Very soft/whispered speech (~ -47 dBFS) must not be filtered out")
+        XCTAssertLessThan(analysis.maxFrameRMS, 0.008, "Test must exercise levels that v0.5.3 wrongly rejected")
+    }
+
+    func testContinuousSoftPushToTalkSpeechWithBriefSyllableDips_detectedAsSpeech() {
+        // Regression for v0.5.3 (25th percentile + 3.0x + 0.030 cap):
+        // Push-to-talk recording where 80% of frames are soft speech (~0.009 band-passed
+        // RMS) with brief 60 ms inter-syllable dips (~0.0012 room floor). Using the
+        // 25th percentile contaminated the noise floor with speech itself and pushed
+        // the threshold above the soft speech level.
+        let total = Int(1.6 * Double(AudioSpeechDetector.sampleRate))
+        let room = deterministicNoise(count: total, rms: 0.0018, seed: 0x3333)
+        let samples: [Int16] = (0..<total).map { i in
+            var v = room[i]
+            let posInCycle = i % 5_120 // 320 ms syllable cycle: 260 ms voiced + 60 ms dip
+            if posInCycle < 4_160 {
+                v += sine(at: i, frequency: 550, amplitude: 0.015)
+            }
+            return Int16(max(-1, min(1, v)) * 32_767)
+        }
+        let analysis = AudioSpeechDetector.analyze(pcm16LE: pcmData(from: samples))
+        XCTAssertTrue(analysis.hasSpeech, "Continuous soft push-to-talk speech must not contaminate its own noise floor")
+    }
+
     func testContinuousSpeechFillingEntireClip_detectedDespiteNoQuietMargin() {
         // 1.0s clip filled 100% with speech (~0.045 band-passed RMS) — capped by unconditionalSpeechRMS.
         let samples = makeSamples(durationSeconds: 1.0) { i in

@@ -82,8 +82,9 @@ on recordingFlag: Lock<Bool>)            idle → recording → transcribing →
 stop():
   hub.stopCapture()        ← removes tap + 50ms drain so the spoken tail reaches engines;
                              returns AudioSpeechDetector.Analysis — silent live captures
-                             cancel engines immediately and yield empty .final (WAV still
-                             archived in history for manual re-transcribe)
+                             cancel engines immediately and yield empty .final unless
+                             streaming already emitted substantive speech on non-zero
+                             audio (WAV still archived in history for manual re-transcribe)
   THEN engines finish()    ← order matters: drain before flush
   FinalResultCollector     ← QUA-153 routing: online language signal (classifier
                              partials seen during recording) > classifier final >
@@ -292,9 +293,9 @@ type is used, re-derive the reason or the annotation becomes a lie.
   `stop()`/`cancel()` first `await startTask` so teardown can never race a
   session that hasn't finished starting. Helper classes
   (`HUDPartialRouter`, `ErrorGate`, `OnlineLanguageSignal`,
-  `FinalResultCollector`) are NSLock-guarded because engine callbacks may fire
-  from arbitrary threads; `FinalResultCollector` fires its completion exactly
-  once.
+  `StreamingSpeechSignal`, `FinalResultCollector`) are NSLock-guarded because
+  engine callbacks may fire from arbitrary threads; `FinalResultCollector` fires
+  its completion exactly once.
 - **`HUDPartialRouter` ordering** — every shipping engine dispatches partials
   on the main queue, so primary/secondary records never interleave; the lock is
   defensive. If you ever add an engine that emits off-main, the lock is what

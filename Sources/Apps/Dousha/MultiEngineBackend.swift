@@ -65,6 +65,17 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
     /// `PartialTranscript.combined` from `router.classifierEngine`; read once at
     /// stop. Thread-safe: written from partial callbacks, read at stop.
     private let onlineSignal = OnlineLanguageSignal()
+    /// Tracks substantive streaming text emitted by ANY engine during a live
+    /// recording so acoustic silence suppression cannot discard quiet/whispered
+    /// speech that an engine has already recognized.
+    private let streamingSpeechSignal = StreamingSpeechSignal()
+    /// Minimum substantive characters streamed during recording required to
+    /// override an acoustic silence verdict (ignores punctuation-only and
+    /// single-char noise fillers like "嗯").
+    private static let streamingOverrideMinChars = 2
+    /// Minimum non-zero band-passed RMS required alongside a streaming override
+    /// so muted / digital-zero captures cannot bypass suppression.
+    private static let streamingOverrideMinRMS: Float = 0.0002
 
     /// Latest cumulative classifier partial, guarded by a lock. `PartialTranscript`
     /// fields are cumulative, so the most recent `combined` is the whole transcript
@@ -81,6 +92,41 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         var text: String? {
             lock.lock(); defer { lock.unlock() }
             return latest.isEmpty ? nil : latest
+        }
+    }
+
+    /// Peak substantive character count streamed by any engine during the live
+    /// recording, guarded by a lock because engine partials arrive from arbitrary
+    /// callbacks.
+    private final class StreamingSpeechSignal: @unchecked Sendable {
+        private let lock = NSLock()
+        private var maxCoreChars = 0
+
+        func reset() {
+            lock.lock()
+            maxCoreChars = 0
+            lock.unlock()
+        }
+
+        func record(_ text: String) {
+            var count = 0
+            for scalar in text.unicodeScalars {
+                if !CharacterSet.whitespacesAndNewlines.contains(scalar),
+                   !CharacterSet.punctuationCharacters.contains(scalar),
+                   !CharacterSet.symbols.contains(scalar) {
+                    count += 1
+                }
+            }
+            guard count > 0 else { return }
+            lock.lock()
+            if count > maxCoreChars { maxCoreChars = count }
+            lock.unlock()
+        }
+
+        var maxSubstantiveCharCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return maxCoreChars
         }
     }
 
@@ -263,6 +309,7 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         let (stream, cont) = AsyncStream<RecordingEvent>.makeStream(bufferingPolicy: .unbounded)
         self.continuation = cont
         onlineSignal.reset()   // QUA-153: fresh language signal per recording
+        streamingSpeechSignal.reset()
 
         startTask = Task {
             // Phase 1 — reset every engine's session state BEFORE capture starts,
@@ -396,10 +443,13 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
         } else {
             base = { _ in }
         }
-        guard engine == router.classifierEngine else { return base }
+        let isClassifier = (engine == router.classifierEngine)
         let signal = onlineSignal
+        let speechSignal = streamingSpeechSignal
         return { p in
-            signal.update(p.combined)
+            let combined = p.combined
+            speechSignal.record(combined)
+            if isClassifier { signal.update(combined) }
             base(p)
         }
     }
@@ -411,16 +461,22 @@ final class MultiEngineBackend: SpeechBackend, @unchecked Sendable {
             // so every engine's pcmBuffer holds the last buffers the user spoke.
             if let hub = self.hub {
                 let speech = await hub.stopCapture()
+                let streamedChars = self.streamingSpeechSignal.maxSubstantiveCharCount
                 if let speech, !speech.hasSpeech {
-                    // Blank/silent live recording (or accidental quick tap): cancel
-                    // engines immediately so context-biased ASR models cannot
-                    // hallucinate glossary terms on silence. The closed WAV still
-                    // enters history via RecordingController for manual re-transcribe.
-                    doushaLog("[MultiEngine] silent live capture suppressed — cancelling \(self.entries.count) engine(s) duration=\(String(format: "%.2f", speech.durationSeconds))s maxRMS=\(String(format: "%.4f", speech.maxFrameRMS)) floor=\(String(format: "%.4f", speech.noiseFloorRMS)) threshold=\(String(format: "%.4f", speech.activeThresholdRMS)) maxRun=\(speech.longestActiveRunFrames)")
-                    for entry in self.entries { entry.backend.cancelSession() }
-                    self.continuation?.yield(.final(TranscriptionResult(text: "")))
-                    self.continuation?.finish()
-                    return
+                    let keepForStreamedSpeech = streamedChars >= Self.streamingOverrideMinChars
+                        && speech.maxFrameRMS >= Self.streamingOverrideMinRMS
+                    if !keepForStreamedSpeech {
+                        // Blank/silent live recording (or accidental quick tap): cancel
+                        // engines immediately so context-biased ASR models cannot
+                        // hallucinate glossary terms on silence. The closed WAV still
+                        // enters history via RecordingController for manual re-transcribe.
+                        doushaLog("[MultiEngine] silent live capture suppressed — cancelling \(self.entries.count) engine(s) duration=\(String(format: "%.2f", speech.durationSeconds))s maxRMS=\(String(format: "%.4f", speech.maxFrameRMS)) floor=\(String(format: "%.4f", speech.noiseFloorRMS)) threshold=\(String(format: "%.4f", speech.activeThresholdRMS)) maxRun=\(speech.longestActiveRunFrames) streamedChars=\(streamedChars)")
+                        for entry in self.entries { entry.backend.cancelSession() }
+                        self.continuation?.yield(.final(TranscriptionResult(text: "")))
+                        self.continuation?.finish()
+                        return
+                    }
+                    doushaLog("[MultiEngine] silent audio override — preserving session with \(streamedChars) streamed substantive char(s) duration=\(String(format: "%.2f", speech.durationSeconds))s maxRMS=\(String(format: "%.4f", speech.maxFrameRMS)) threshold=\(String(format: "%.4f", speech.activeThresholdRMS))")
                 }
             }
             self.routeFinalResult { result in
